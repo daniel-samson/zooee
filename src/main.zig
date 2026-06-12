@@ -1,7 +1,5 @@
-//! Demo executable. For now: drives the recording backend through a tiny
-//! scene and dumps the captured command list — the smallest end-to-end
-//! exercise of the draw-primitive interface. Real backends replace this
-//! as they land (#7, #11, #12, #15).
+//! Demo executable: draws a small scene through the terminal backend and
+//! prints it. Grows into the gallery app (#24) as components land.
 
 const std = @import("std");
 const Io = std.Io;
@@ -15,22 +13,20 @@ pub fn main(init: std.process.Init) !void {
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     const out = &stdout_file_writer.interface;
 
-    var rec = zooee.backends.record.RecordBackend.init(arena);
-    defer rec.deinit();
-    const b = rec.interface();
+    var term = zooee.backends.terminal.TerminalBackend.init(arena);
+    defer term.deinit();
+    const b = term.interface();
 
-    try b.beginFrame(.{ .width = 80, .height = 24 });
+    try b.beginFrame(.{ .width = 44, .height = 7 });
     b.drawRect(
-        .{ .x = 2, .y = 1, .width = 40, .height = 5 },
-        .{ .background = zooee.Color.white, .border = .{ .width = 1 }, .corner_radius = 2 },
+        .{ .x = 1, .y = 1, .width = 42, .height = 5 },
+        .{ .border = .{ .width = 1 }, .corner_radius = 2 },
     );
-    b.drawText(.{ .x = 4, .y = 3 }, "hello from zooee", .{});
+    b.drawText(.{ .x = 4, .y = 3 }, "hello from zooee's terminal backend", .{});
     try b.endFrame();
 
-    try out.print("zooee demo — recorded {d} draw commands:\n", .{rec.commands.items.len});
-    for (rec.commands.items) |cmd| {
-        try out.print("  {t}\n", .{cmd});
-    }
+    const text = try term.renderToText(arena);
+    try out.writeAll(text);
     try out.flush();
 }
 
