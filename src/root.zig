@@ -20,6 +20,13 @@ pub const Size = geometry.Size;
 
 pub const fixtures = @import("testing/scenes.zig");
 
+pub const platform = struct {
+    pub const win32 = if (@import("builtin").os.tag == .windows)
+        @import("platform/win32.zig")
+    else
+        struct {};
+};
+
 test {
     std.testing.refAllDecls(@This());
     _ = @import("testing/harness_test.zig");
