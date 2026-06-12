@@ -41,6 +41,7 @@ pub fn main(init: std.process.Init) !void {
     for (zooee.fixtures.all) |scene| {
         var ras = zooee.backends.raster.RasterBackend.init(gpa);
         defer ras.deinit();
+        try ras.setFont(zooee.test_font_ttf);
         try zooee.fixtures.run(scene, ras.interface(), scale);
 
         var actual: std.ArrayList(u8) = .empty;
