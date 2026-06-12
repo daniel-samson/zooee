@@ -1,9 +1,8 @@
-//! Native GUI demo. macOS: ships as Zooee Demo.app and renders real
-//! zooee content — the layout engine drives the CPU raster backend and
-//! the framebuffer blits into the window (GPU backends replace the blit
-//! in #11/#12). Re-renders on resize. Text is placeholder glyph blocks
-//! until the TTF rasterizer lands (#10).
-//! Windows: opens the bare window (GDI blit is the next slice).
+//! Native GUI demo (macOS .app / Windows exe): the layout engine drives
+//! the CPU raster backend and the framebuffer blits into the native
+//! window — CoreGraphics on macOS, GDI on Windows (GPU backends replace
+//! the blit in #11/#12). Re-renders on resize. Text is placeholder
+//! glyph blocks until the TTF rasterizer lands (#10).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -82,7 +81,7 @@ pub fn main(init: std.process.Init) !void {
             .resized => dirty = true,
         };
 
-        if (dirty and builtin.os.tag == .macos) {
+        if (dirty) {
             _ = frame_arena.reset(.retain_capacity);
             const arena = frame_arena.allocator();
             const px = platform.contentPixelSize(w);
