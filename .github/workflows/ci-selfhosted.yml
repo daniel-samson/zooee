@@ -1,0 +1,50 @@
+# Tier 2: real-platform tests on self-hosted VM runners (issue #33).
+# Security: push/dispatch triggers only — never pull_request, so fork PRs
+# can never execute code on the self-hosted machines.
+name: CI (self-hosted)
+
+on:
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+
+jobs:
+  linux-vm:
+    runs-on: [self-hosted, linux, vm]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Build and test
+        run: |
+          zig build
+          zig build test
+      - name: Environment smoke check
+        run: |
+          echo "Display: ${DISPLAY:-none}"
+          uname -a
+
+  windows-vm:
+    runs-on: [self-hosted, windows, vm]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Build and test
+        run: |
+          zig build
+          zig build test
+      - name: Interactive session check
+        shell: powershell
+        run: |
+          $sid = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+          Write-Host "Runner session id: $sid"
+          if ($sid -eq 0) {
+            Write-Warning "Running in session 0 - no interactive desktop. Windowing tests will not work until auto-logon setup is complete."
+          } else {
+            Write-Host "Interactive session OK - desktop available."
+          }
