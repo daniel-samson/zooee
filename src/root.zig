@@ -8,6 +8,7 @@ pub const style = @import("style.zig");
 pub const backend = @import("backend.zig");
 pub const backends = struct {
     pub const record = @import("backends/record.zig");
+    pub const terminal = @import("backends/terminal.zig");
 };
 
 pub const Backend = backend.Backend;
