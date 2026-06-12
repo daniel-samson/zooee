@@ -13,6 +13,7 @@ Most UI frameworks lock you into one rendering target. Zooee separates *what* yo
 - **Terminal backend** — render your app as a TUI over ANSI escape sequences. Great for CLIs, servers, and SSH sessions.
 - **DirectX backend** — GPU-accelerated rendering on Windows.
 - **OpenGL backend** — GPU-accelerated rendering on Linux and macOS.
+- **Web backend** — compile to WebAssembly and render to a `<canvas>` in the browser.
 
 The same widget tree, layout, and event handling drive all of them. Build a dashboard once; ship it as both a terminal tool and a desktop app.
 
@@ -68,9 +69,13 @@ build.zig    # build graph
 
 Tracked as [milestones](https://github.com/daniel-samson/zooee/milestones), built backends-first and test-driven:
 
-1. **Test harness & backends** — e2e test infrastructure (terminal output snapshots, offscreen golden-image rendering for GPU), then the terminal, OpenGL (Linux/macOS), and DirectX (Windows) backends, native windowing with integrated/headless title bars, in-house text rendering, and a CI gate keeping release binaries under 2MB
+1. **Test harness & backends** — e2e test infrastructure (terminal output snapshots, offscreen golden-image rendering for GPU), then the terminal, OpenGL (Linux/macOS), DirectX (Windows), and web (wasm + canvas) backends, native windowing with integrated/headless title bars, in-house text rendering, and a CI gate keeping release binaries under 2MB
 2. **Core framework** — layout engine, declarative widget API, event loop
 3. **Component library** — high-level widgets (buttons, inputs, tables, tab bars) built on the backend primitives
+
+## Acknowledgements
+
+Zooee is heavily inspired by [Textual](https://github.com/Textualize/textual), Will McGugan and Textualize's Python framework that proved a modern, component-based UI framework can treat the terminal as a first-class rendering target — and run the same app in the browser. Zooee borrows that spirit (and ambition) in Zig.
 
 ## Contributing
 
