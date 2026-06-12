@@ -28,6 +28,8 @@ pub fn build(b: *std.Build) void {
     // to our consumers. We must give it a name because a Zig package can expose
     // multiple modules and consumers will need to be able to specify which
     // module they want to access.
+    // The zooee module itself touches AppKit on macOS (platform/macos.zig),
+    // so anything importing it — tests included — needs the framework.
     const mod = b.addModule("zooee", .{
         // The root source file is the "entry point" of this module. Users of
         // this module will only be able to access public declarations contained
@@ -40,6 +42,9 @@ pub fn build(b: *std.Build) void {
         // which requires us to specify a target.
         .target = target,
     });
+    if (target.result.os.tag == .macos) {
+        mod.linkFramework("AppKit", .{});
+    }
 
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
@@ -172,6 +177,44 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_visual_test.addArgs(args); // forward --update
     const visual_step = b.step("visual-test", "Render scene fixtures and compare against PPM goldens");
     visual_step.dependOn(&run_visual_test.step);
+
+    // macOS GUI demo, assembled as a .app bundle by plain `zig build`
+    // (Daniel's requirement, #9): bare Mach-O binaries are second-class
+    // citizens on macOS (no Dock identity, focus quirks).
+    if (target.result.os.tag == .macos) {
+        const gui_demo = b.addExecutable(.{
+            .name = "zooee-gui-demo",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("examples/gui_demo.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "zooee", .module = mod }},
+            }),
+        });
+
+        const plist = b.addWriteFiles().add("Info.plist",
+            \\<?xml version="1.0" encoding="UTF-8"?>
+            \\<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            \\<plist version="1.0"><dict>
+            \\  <key>CFBundleIdentifier</key><string>dev.zooee.demo</string>
+            \\  <key>CFBundleName</key><string>Zooee Demo</string>
+            \\  <key>CFBundleExecutable</key><string>zooee-gui-demo</string>
+            \\  <key>CFBundlePackageType</key><string>APPL</string>
+            \\  <key>NSHighResolutionCapable</key><true/>
+            \\</dict></plist>
+            \\
+        );
+        const app_bin = b.addInstallArtifact(gui_demo, .{
+            .dest_dir = .{ .override = .{ .custom = "Zooee Demo.app/Contents/MacOS" } },
+        });
+        const app_plist = b.addInstallFile(plist, "Zooee Demo.app/Contents/Info.plist");
+        b.getInstallStep().dependOn(&app_bin.step);
+        b.getInstallStep().dependOn(&app_plist.step);
+
+        const run_gui = b.step("run-gui", "Run the native GUI demo (macOS)");
+        const run_gui_cmd = b.addRunArtifact(gui_demo);
+        run_gui.dependOn(&run_gui_cmd.step);
+    }
 
     // Native window demo, Windows targets only — the e2e visual subject.
     if (target.result.os.tag == .windows) {
