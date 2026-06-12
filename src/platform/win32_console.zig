@@ -29,6 +29,7 @@ const ENABLE_WINDOW_INPUT: u32 = 0x0008;
 const ENABLE_MOUSE_INPUT: u32 = 0x0010;
 const ENABLE_QUICK_EDIT_MODE: u32 = 0x0040; // swallows mouse input; must be off
 const ENABLE_EXTENDED_FLAGS: u32 = 0x0080;
+const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
 const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
 
 const KEY_EVENT: u16 = 0x0001;
@@ -89,11 +90,22 @@ var saved_out_mode: ?u32 = null;
 var saved_in: HANDLE = undefined;
 var saved_out: HANDLE = undefined;
 
+const vt_input = @import("vt_input.zig");
+
 pub const Console = struct {
     in: HANDLE,
     out: HANDLE,
     last_size: geometry.Size = .{},
     last_buttons: event.Buttons = .{},
+    /// Windows Terminal/ConPTY deliver keys AND mouse only as VT byte
+    /// sequences (inside KEY_EVENT records) when this mode is on — the
+    /// reason MOUSE_EVENT records never arrive there. Textual-style fix:
+    /// reconstruct the byte stream and use the shared VT parser. Classic
+    /// conhost still sends MOUSE_EVENT records; both paths are handled.
+    vt_mode: bool = false,
+    /// Carry-over for VT sequences split across reads.
+    pending: [64]u8 = undefined,
+    pending_len: usize = 0,
 
     pub fn init() !Console {
         const in = GetStdHandle(STD_INPUT_HANDLE) orelse return error.NotATty;
@@ -115,7 +127,13 @@ pub const Console = struct {
 
         const raw_in = (in_mode & ~(ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_QUICK_EDIT_MODE)) |
             ENABLE_WINDOW_INPUT | ENABLE_MOUSE_INPUT | ENABLE_EXTENDED_FLAGS;
-        if (SetConsoleMode(self.in, raw_in) == .FALSE) return error.BackendFailure;
+        // Prefer VT input (Windows Terminal mouse only works this way);
+        // fall back to legacy records if the console refuses it.
+        if (SetConsoleMode(self.in, raw_in | ENABLE_VIRTUAL_TERMINAL_INPUT) != .FALSE) {
+            self.vt_mode = true;
+        } else if (SetConsoleMode(self.in, raw_in) == .FALSE) {
+            return error.BackendFailure;
+        }
         // VT processing makes the ANSI present() path work on conhost.
         _ = SetConsoleMode(self.out, out_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
     }
@@ -150,6 +168,11 @@ pub const Console = struct {
         var pending: u32 = 0;
         if (GetNumberOfConsoleInputEvents(self.in, &pending) == .FALSE) return events.toOwnedSlice(gpa);
 
+        var vt_buf: [512]u8 = undefined;
+        @memcpy(vt_buf[0..self.pending_len], self.pending[0..self.pending_len]);
+        var vt_len: usize = self.pending_len;
+        self.pending_len = 0;
+
         while (pending > 0) {
             var records: [32]INPUT_RECORD = undefined;
             var got: u32 = 0;
@@ -157,9 +180,35 @@ pub const Console = struct {
             if (got == 0) break;
             pending -= got;
             for (records[0..got]) |rec| {
-                try translateRecord(rec, &self.last_buttons, &events, gpa);
+                if (self.vt_mode and rec.event_type == KEY_EVENT and
+                    rec.data.key.key_down != .FALSE and rec.data.key.unicode_char != 0)
+                {
+                    // VT mode: chars ARE the byte stream (one UTF-16 unit
+                    // per record; sequences span records). Surrogate
+                    // pairs deferred to #19.
+                    const ch = rec.data.key.unicode_char;
+                    if (ch < 0xD800 or ch > 0xDFFF) {
+                        var utf8: [4]u8 = undefined;
+                        const n = std.unicode.utf8Encode(@intCast(ch), &utf8) catch 0;
+                        if (vt_len + n <= vt_buf.len) {
+                            @memcpy(vt_buf[vt_len..][0..n], utf8[0..n]);
+                            vt_len += n;
+                        }
+                    }
+                } else {
+                    try translateRecord(rec, &self.last_buttons, &events, gpa);
+                }
             }
             if (GetNumberOfConsoleInputEvents(self.in, &pending) == .FALSE) break;
+        }
+
+        if (vt_len > 0) {
+            const consumed = try vt_input.parseInput(vt_buf[0..vt_len], &events, gpa);
+            const left = vt_len - consumed;
+            if (left > 0 and left <= self.pending.len) {
+                @memcpy(self.pending[0..left], vt_buf[consumed..vt_len]);
+                self.pending_len = left;
+            }
         }
         return events.toOwnedSlice(gpa);
     }
@@ -252,7 +301,7 @@ pub fn restoreNow() void {
     if (saved_out_mode) |m| {
         _ = SetConsoleMode(saved_out, m);
         saved_out_mode = null;
-        const seq = "\x1b[0m\x1b[?25h\x1b[?1049l";
+        const seq = "\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[0m\x1b[?25h\x1b[?1049l";
         var written: u32 = 0;
         _ = WriteFileShim(saved_out, seq, seq.len, &written);
     }
@@ -335,4 +384,40 @@ test "mouse translation: press, release, wheel" {
     press.data.mouse.button_state = @as(u32, @as(u16, @bitCast(@as(i16, 120)))) << 16;
     try translateRecord(press, &test_buttons, &events, std.testing.allocator);
     try std.testing.expectEqual(event.Key.up, events.items[2].key_down.key);
+}
+
+pub const enter_tui_seq = vt_input.enter_tui_seq;
+
+test "vt mode: SGR mouse bytes inside KEY_EVENT records decode to pointer events" {
+    const con: Console = .{ .in = undefined, .out = undefined, .vt_mode = true };
+    var events: std.ArrayList(event.Event) = .empty;
+    defer events.deinit(std.testing.allocator);
+
+    // Simulate the per-record byte handling for "\x1b[<0;10;5M".
+    var vt_buf: [64]u8 = undefined;
+    var vt_len: usize = 0;
+    for ("\x1b[<0;10;5M") |byte| {
+        const rec: INPUT_RECORD = .{
+            .event_type = KEY_EVENT,
+            .data = .{ .key = .{
+                .key_down = .TRUE,
+                .repeat_count = 1,
+                .virtual_key_code = 0,
+                .virtual_scan_code = 0,
+                .unicode_char = byte,
+                .control_key_state = 0,
+            } },
+        };
+        // Mirror pumpEvents' VT branch.
+        if (con.vt_mode and rec.event_type == KEY_EVENT and
+            rec.data.key.key_down != .FALSE and rec.data.key.unicode_char != 0)
+        {
+            vt_buf[vt_len] = @intCast(rec.data.key.unicode_char);
+            vt_len += 1;
+        }
+    }
+    _ = try vt_input.parseInput(vt_buf[0..vt_len], &events, std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), events.items.len);
+    try std.testing.expect(events.items[0] == .pointer_down);
+    try std.testing.expectEqual(@as(f32, 9), events.items[0].pointer_down.position.x);
 }
