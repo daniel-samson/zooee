@@ -59,6 +59,9 @@ const WS_OVERLAPPEDWINDOW = 0x00CF0000;
 const CW_USEDEFAULT: i32 = @bitCast(@as(u32, 0x80000000));
 const SW_SHOWNORMAL = 1;
 const GWLP_USERDATA = -21;
+const WHITE_BRUSH = 0;
+
+extern "gdi32" fn GetStockObject(i32) callconv(WINAPI) ?*anyopaque;
 
 extern "user32" fn RegisterClassExW(*const WNDCLASSEXW) callconv(WINAPI) u16;
 extern "user32" fn CreateWindowExW(u32, [*:0]const u16, [*:0]const u16, u32, i32, i32, i32, i32, ?HWND, ?*anyopaque, HINSTANCE, ?*anyopaque) callconv(WINAPI) ?HWND;
@@ -106,6 +109,10 @@ pub const Window = struct {
                 .lpfnWndProc = wndProc,
                 .hInstance = hinstance,
                 .lpszClassName = class_name,
+                // Defined clear color before any backend paints. Without a
+                // background brush the client area is undefined (renders
+                // black) — caught by the e2e window visual test.
+                .hbrBackground = GetStockObject(WHITE_BRUSH),
             };
             if (RegisterClassExW(&wc) == 0) return error.BackendFailure;
             class_registered = true;
