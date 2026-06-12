@@ -227,6 +227,9 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{.{ .name = "zooee", .module = mod }},
             }),
         });
+        // GUI subsystem: without this Windows allocates a console window
+        // before showing the app window — wrong for a GUI app.
+        window_demo.subsystem = .Windows;
         b.installArtifact(window_demo);
     }
 
