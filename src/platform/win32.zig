@@ -15,15 +15,15 @@ comptime {
 }
 
 const win = std.os.windows;
-const WINAPI = win.WINAPI;
+const WINAPI: std.builtin.CallingConvention = .winapi;
 
 // --- minimal user32/kernel32 surface -------------------------------------
 
 const HWND = win.HWND;
 const HINSTANCE = win.HINSTANCE;
-const WPARAM = win.WPARAM;
+const WPARAM = usize; // ULONG_PTR; absent from std.os.windows in 0.16
 const LPARAM = win.LPARAM;
-const LRESULT = win.LRESULT;
+const LRESULT = isize; // LONG_PTR
 
 const WNDCLASSEXW = extern struct {
     cbSize: u32 = @sizeOf(WNDCLASSEXW),
@@ -153,7 +153,7 @@ pub const Window = struct {
     pub fn pumpEvents(self: *Window) []const Event {
         self.queue.clearRetainingCapacity();
         var msg: MSG = undefined;
-        while (PeekMessageW(&msg, null, 0, 0, PM_REMOVE) != 0) {
+        while (PeekMessageW(&msg, null, 0, 0, PM_REMOVE).toBool()) {
             _ = TranslateMessage(&msg);
             _ = DispatchMessageW(&msg);
         }
