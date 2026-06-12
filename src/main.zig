@@ -21,7 +21,7 @@ pub fn main(init: std.process.Init) !void {
     try b.beginFrame(.{ .width = 44, .height = 7 });
     b.drawRect(
         .{ .x = 1, .y = 1, .width = 42, .height = 5 },
-        .{ .border = .{ .width = 1 }, .corner_radius = 2 },
+        .{ .border = .all(1, .black), .corner_radius = .all(2) },
     );
     b.drawText(.{ .x = 4, .y = 3 }, "hello from zooee's terminal backend", .{});
     try b.endFrame();
