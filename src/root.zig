@@ -30,4 +30,9 @@ pub const platform = struct {
 test {
     std.testing.refAllDecls(@This());
     _ = @import("testing/harness_test.zig");
+    // refAllDecls is shallow — without this, platform tests are lazily
+    // skipped and never compile-checked or run.
+    if (@import("builtin").os.tag == .windows) {
+        std.testing.refAllDecls(platform.win32);
+    }
 }

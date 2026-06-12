@@ -13,6 +13,7 @@ pub fn main(init: std.process.Init) !void {
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     const out = &stdout_file_writer.interface;
 
+    zooee.backends.terminal.setupConsole();
     var term = zooee.backends.terminal.TerminalBackend.init(arena);
     defer term.deinit();
     const b = term.interface();
