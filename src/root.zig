@@ -25,6 +25,7 @@ pub const fixtures = @import("testing/scenes.zig");
 pub const event = @import("event.zig");
 pub const font = struct {
     pub const ttf = @import("font/ttf.zig");
+    pub const raster = @import("font/raster.zig");
 };
 
 pub const platform = struct {
