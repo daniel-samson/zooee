@@ -23,6 +23,9 @@ pub const Size = geometry.Size;
 pub const fixtures = @import("testing/scenes.zig");
 
 pub const event = @import("event.zig");
+pub const font = struct {
+    pub const ttf = @import("font/ttf.zig");
+};
 
 pub const platform = struct {
     pub const win32 = if (@import("builtin").os.tag == .windows)
