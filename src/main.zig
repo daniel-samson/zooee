@@ -8,6 +8,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
 const zooee = @import("zooee");
+const Color = zooee.Color;
 
 // Per-platform terminal session with one shared loop below.
 const tty_mod = if (builtin.os.tag == .windows)
@@ -129,7 +130,7 @@ fn renderFrame(
     const list: L.Element = .{
         .direction = .column,
         .padding = .symmetric(2, 1),
-        .rect_style = .{ .border = .all(1, .black), .corner_radius = .all(1) },
+        .rect_style = .{ .border = .all(1, Color.rgb(128, 128, 128)), .corner_radius = .all(1) },
         .children = &rows_ptrs,
     };
     const root: L.Element = .{
