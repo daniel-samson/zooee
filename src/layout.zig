@@ -73,6 +73,11 @@ pub const Element = struct {
     children: []const *const Element = &.{},
     text: ?[]const u8 = null,
     text_style: style.TextStyle = .{},
+
+    // Interaction messages (#4): dispatched by the app loop when the
+    // pointer hits this element. Values are app-defined (enum ints).
+    on_click: ?u32 = null,
+    on_hover: ?u32 = null,
 };
 
 /// One positioned element, output of layout.
