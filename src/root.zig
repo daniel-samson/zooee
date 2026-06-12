@@ -21,9 +21,15 @@ pub const Size = geometry.Size;
 
 pub const fixtures = @import("testing/scenes.zig");
 
+pub const event = @import("event.zig");
+
 pub const platform = struct {
     pub const win32 = if (@import("builtin").os.tag == .windows)
         @import("platform/win32.zig")
+    else
+        struct {};
+    pub const posix_tty = if (@import("builtin").os.tag != .windows)
+        @import("platform/posix_tty.zig")
     else
         struct {};
 };
@@ -35,5 +41,7 @@ test {
     // skipped and never compile-checked or run.
     if (@import("builtin").os.tag == .windows) {
         std.testing.refAllDecls(platform.win32);
+    } else {
+        std.testing.refAllDecls(platform.posix_tty);
     }
 }
