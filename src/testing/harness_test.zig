@@ -80,6 +80,15 @@ const terminal_goldens = [_]TerminalGolden{
     \\      GGGGGGGGG
     \\
     },
+    .{ .name = "sides", .text =
+    \\
+    \\ ╭──────────┐
+    \\ │          │
+    \\ │          │
+    \\
+    \\
+    \\
+    },
 };
 
 fn findScene(name: []const u8) scenes.Scene {
@@ -115,6 +124,7 @@ const raster_goldens = [_]RasterGolden{
     .{ .name = "card", .hash = 0x295ce3b589adc575 },
     .{ .name = "nested_clip", .hash = 0x802b0f2a3db4bb25 },
     .{ .name = "overlap", .hash = 0xc6478bd603cbc525 },
+    .{ .name = "sides", .hash = 0xcc939316ad5d00b9 },
 };
 
 test "raster renders all scenes to golden hashes" {

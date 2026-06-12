@@ -27,13 +27,14 @@ pub const all = [_]Scene{
     .{ .name = "card", .width = 24, .height = 7, .draw = drawCard },
     .{ .name = "nested_clip", .width = 20, .height = 5, .draw = drawNestedClip },
     .{ .name = "overlap", .width = 16, .height = 6, .draw = drawOverlap },
+    .{ .name = "sides", .width = 14, .height = 6, .draw = drawSides },
 };
 
 /// A bordered, rounded "card" with a title — the hello-world scene.
 fn drawCard(b: Backend, s: f32) !void {
     b.drawRect(
         .{ .x = 1 * s, .y = 1 * s, .width = 22 * s, .height = 5 * s },
-        .{ .background = Color.white, .border = .{ .width = 1 }, .corner_radius = 2 * s },
+        .{ .background = Color.white, .border = .all(1, .black), .corner_radius = .all(2 * s) },
     );
     b.drawText(.{ .x = 3 * s, .y = 3 * s }, "zooee", .{ .color = Color.black });
 }
@@ -59,6 +60,23 @@ fn drawOverlap(b: Backend, s: f32) !void {
     b.drawRect(
         .{ .x = 6 * s, .y = 2 * s, .width = 9 * s, .height = 4 * s },
         .{ .background = Color.rgb(0, 255, 0) },
+    );
+}
+
+/// Per-side borders (CSS-style): distinct colors per side, no bottom
+/// border at all, only the top-left corner rounded.
+fn drawSides(b: Backend, s: f32) !void {
+    b.drawRect(
+        .{ .x = 1 * s, .y = 1 * s, .width = 12 * s, .height = 4 * s },
+        .{
+            .border = .{
+                .top = .{ .width = 1, .color = Color.rgb(255, 0, 0) },
+                .right = .{ .width = 1, .color = Color.rgb(0, 255, 0) },
+                .bottom = .none,
+                .left = .{ .width = 1, .color = Color.rgb(0, 0, 255) },
+            },
+            .corner_radius = .{ .top_left = 2 * s },
+        },
     );
 }
 

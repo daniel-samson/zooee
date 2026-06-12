@@ -166,16 +166,29 @@ pub const RasterBackend = struct {
         self.in_frame = false;
     }
 
-    /// Is pixel center (x+0.5, y+0.5) inside the rounded rect?
-    fn insideRounded(r: Rect, radius: f32, px: f32, py: f32) bool {
+    /// Is pixel center (px, py) inside the rect with per-corner radii?
+    fn insideRounded(r: Rect, radius: style.CornerRadius, px: f32, py: f32) bool {
         if (px < r.x or px >= r.x + r.width or py < r.y or py >= r.y + r.height) return false;
-        if (radius <= 0) return true;
-        const rad = @min(radius, @min(r.width, r.height) / 2);
-        const cx = std.math.clamp(px, r.x + rad, r.x + r.width - rad);
-        const cy = std.math.clamp(py, r.y + rad, r.y + r.height - rad);
-        const dx = px - cx;
-        const dy = py - cy;
-        return dx * dx + dy * dy <= rad * rad;
+        const max_rad = @min(r.width, r.height) / 2;
+        const corners = [4]struct { rad: f32, cx: f32, cy: f32 }{
+            .{ .rad = radius.top_left, .cx = r.x + radius.top_left, .cy = r.y + radius.top_left },
+            .{ .rad = radius.top_right, .cx = r.x + r.width - radius.top_right, .cy = r.y + radius.top_right },
+            .{ .rad = radius.bottom_right, .cx = r.x + r.width - radius.bottom_right, .cy = r.y + r.height - radius.bottom_right },
+            .{ .rad = radius.bottom_left, .cx = r.x + radius.bottom_left, .cy = r.y + r.height - radius.bottom_left },
+        };
+        for (corners) |c| {
+            const rad = @min(c.rad, max_rad);
+            if (rad <= 0) continue;
+            // Only test points in this corner's square.
+            const in_x = if (c.cx <= r.x + r.width / 2) px < c.cx else px > c.cx;
+            const in_y = if (c.cy <= r.y + r.height / 2) py < c.cy else py > c.cy;
+            if (in_x and in_y) {
+                const dx = px - c.cx;
+                const dy = py - c.cy;
+                if (dx * dx + dy * dy > rad * rad) return false;
+            }
+        }
+        return true;
     }
 
     fn drawRect(ptr: *anyopaque, rect: Rect, rect_style: style.RectStyle) void {
@@ -183,14 +196,21 @@ pub const RasterBackend = struct {
         const bounds = IRect.fromRect(rect).intersect(self.currentClip());
         if (bounds.isEmpty()) return;
 
-        const bw = rect_style.border.width;
+        const b = rect_style.border;
+        const has_border = !b.isNone();
         const inner: Rect = .{
-            .x = rect.x + bw,
-            .y = rect.y + bw,
-            .width = @max(0, rect.width - 2 * bw),
-            .height = @max(0, rect.height - 2 * bw),
+            .x = rect.x + b.left.width,
+            .y = rect.y + b.top.width,
+            .width = @max(0, rect.width - b.left.width - b.right.width),
+            .height = @max(0, rect.height - b.top.width - b.bottom.width),
         };
-        const inner_radius = @max(0, rect_style.corner_radius - bw);
+        // Inner radii shrink by the widths of the sides meeting each corner.
+        const inner_radius: style.CornerRadius = .{
+            .top_left = @max(0, rect_style.corner_radius.top_left - @max(b.top.width, b.left.width)),
+            .top_right = @max(0, rect_style.corner_radius.top_right - @max(b.top.width, b.right.width)),
+            .bottom_right = @max(0, rect_style.corner_radius.bottom_right - @max(b.bottom.width, b.right.width)),
+            .bottom_left = @max(0, rect_style.corner_radius.bottom_left - @max(b.bottom.width, b.left.width)),
+        };
 
         var y = bounds.y0;
         while (y < bounds.y1) : (y += 1) {
@@ -199,14 +219,34 @@ pub const RasterBackend = struct {
                 const px = @as(f32, @floatFromInt(x)) + 0.5;
                 const py = @as(f32, @floatFromInt(y)) + 0.5;
                 if (!insideRounded(rect, rect_style.corner_radius, px, py)) continue;
-                const in_inner = bw > 0 and insideRounded(inner, inner_radius, px, py);
-                if (bw > 0 and !in_inner) {
-                    self.setPixel(x, y, rect_style.border.color);
+                const in_inner = insideRounded(inner, inner_radius, px, py);
+                if (has_border and !in_inner) {
+                    self.setPixel(x, y, borderColorAt(rect, rect_style, inner, px, py));
                 } else if (rect_style.background) |bg| {
                     self.setPixel(x, y, bg);
                 }
             }
         }
+    }
+
+    /// Side attribution for a border pixel. Pixels in a rounded corner's
+    /// square belong to that corner: the horizontal side's color wins if
+    /// present, else the vertical side's. Elsewhere, band logic applies.
+    fn borderColorAt(rect: Rect, rect_style: style.RectStyle, inner: Rect, px: f32, py: f32) Color {
+        const b = rect_style.border;
+        const rad = rect_style.corner_radius;
+        if (px < rect.x + rad.top_left and py < rect.y + rad.top_left)
+            return if (b.top.width > 0) b.top.color else b.left.color;
+        if (px >= rect.x + rect.width - rad.top_right and py < rect.y + rad.top_right)
+            return if (b.top.width > 0) b.top.color else b.right.color;
+        if (px >= rect.x + rect.width - rad.bottom_right and py >= rect.y + rect.height - rad.bottom_right)
+            return if (b.bottom.width > 0) b.bottom.color else b.right.color;
+        if (px < rect.x + rad.bottom_left and py >= rect.y + rect.height - rad.bottom_left)
+            return if (b.bottom.width > 0) b.bottom.color else b.left.color;
+        if (py < inner.y) return b.top.color;
+        if (py >= inner.y + inner.height) return b.bottom.color;
+        if (px < inner.x) return b.left.color;
+        return b.right.color;
     }
 
     fn drawText(ptr: *anyopaque, origin: geometry.Point, text: []const u8, text_style: style.TextStyle) void {
@@ -352,7 +392,7 @@ test "border surrounds background" {
     try b.beginFrame(.{ .width = 20, .height = 20 });
     b.drawRect(
         .{ .x = 2, .y = 2, .width = 16, .height = 16 },
-        .{ .background = Color.rgb(0, 0, 255), .border = .{ .width = 2, .color = Color.black } },
+        .{ .background = Color.rgb(0, 0, 255), .border = .all(2, Color.black) },
     );
     try b.endFrame();
 
@@ -370,7 +410,7 @@ test "rounded corners cut the corner pixel" {
     try b.beginFrame(.{ .width = 16, .height = 16 });
     b.drawRect(
         .{ .x = 0, .y = 0, .width = 16, .height = 16 },
-        .{ .background = Color.rgb(255, 0, 0), .corner_radius = 6 },
+        .{ .background = Color.rgb(255, 0, 0), .corner_radius = .all(6) },
     );
     try b.endFrame();
 
