@@ -28,6 +28,11 @@ jobs:
 
   windows-vm:
     runs-on: [self-hosted, windows, vm]
+    defaults:
+      run:
+        # The VM's PowerShell execution policy is Restricted; scope a bypass
+        # to this workflow's steps instead of weakening the host setting.
+        shell: powershell -ExecutionPolicy Bypass -Command ". '{0}'"
     steps:
       - uses: actions/checkout@v4
       - name: Set up Zig
@@ -39,7 +44,6 @@ jobs:
           zig build
           zig build test
       - name: Interactive session check
-        shell: powershell
         run: |
           $sid = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
           Write-Host "Runner session id: $sid"
