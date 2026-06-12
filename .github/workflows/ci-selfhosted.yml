@@ -52,3 +52,26 @@ jobs:
           } else {
             Write-Host "Interactive session OK - desktop available."
           }
+
+      - name: Visual golden test
+        run: zig build visual-test
+
+      - name: E2E window visual test
+        run: |
+          $demo = Start-Process -FilePath "zig-out\bin\zooee-window-demo.exe" -PassThru
+          try {
+            powershell -NoProfile -ExecutionPolicy Bypass -File ci\capture-window.ps1 -TitlePattern "zooee window demo" -OutFile window.bmp
+            # Until a GPU backend paints the client area (#12), it must be solid white.
+            & "zig-out\bin\visual-diff.exe" --expect-solid 255,255,255 window.bmp
+            if ($LASTEXITCODE -ne 0) { throw "visual-diff failed" }
+          } finally {
+            Stop-Process -Id $demo.Id -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Upload window capture
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: window-capture
+          path: window.bmp
+          if-no-files-found: ignore
