@@ -1,18 +1,21 @@
-//! By convention, root.zig is the root source file when making a package.
+//! Zooee — a cross-platform UI framework with pluggable rendering
+//! backends (terminal, DirectX, OpenGL, web).
+
 const std = @import("std");
-const Io = std.Io;
 
-/// This is a documentation comment to explain the `printAnotherMessage` function below.
-///
-/// Accepting an `Io.Writer` instance is a handy way to write reusable code.
-pub fn printAnotherMessage(writer: *Io.Writer) Io.Writer.Error!void {
-    try writer.print("Run `zig build test` to run the tests.\n", .{});
-}
+pub const geometry = @import("geometry.zig");
+pub const style = @import("style.zig");
+pub const backend = @import("backend.zig");
+pub const backends = struct {
+    pub const record = @import("backends/record.zig");
+};
 
-pub fn add(a: i32, b: i32) i32 {
-    return a + b;
-}
+pub const Backend = backend.Backend;
+pub const Color = style.Color;
+pub const Rect = geometry.Rect;
+pub const Point = geometry.Point;
+pub const Size = geometry.Size;
 
-test "basic add functionality" {
-    try std.testing.expect(add(3, 7) == 10);
+test {
+    std.testing.refAllDecls(@This());
 }

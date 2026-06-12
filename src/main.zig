@@ -1,71 +1,43 @@
+//! Demo executable. For now: drives the recording backend through a tiny
+//! scene and dumps the captured command list — the smallest end-to-end
+//! exercise of the draw-primitive interface. Real backends replace this
+//! as they land (#7, #11, #12, #15).
+
 const std = @import("std");
 const Io = std.Io;
-
 const zooee = @import("zooee");
 
 pub fn main(init: std.process.Init) !void {
-    // Prints to stderr, unbuffered, ignoring potential errors.
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
-
-    // This is appropriate for anything that lives as long as the process.
     const arena: std.mem.Allocator = init.arena.allocator();
-
-    // Accessing command line arguments:
-    const args = try init.minimal.args.toSlice(arena);
-    for (args) |arg| {
-        std.log.info("arg: {s}", .{arg});
-    }
-
-    // In order to do I/O operations need an `Io` instance.
     const io = init.io;
 
-    // Stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
-    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_buffer: [4096]u8 = undefined;
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
-    const stdout_writer = &stdout_file_writer.interface;
+    const out = &stdout_file_writer.interface;
 
-    try zooee.printAnotherMessage(stdout_writer);
+    var rec = zooee.backends.record.RecordBackend.init(arena);
+    defer rec.deinit();
+    const b = rec.interface();
 
-    try stdout_writer.flush(); // Don't forget to flush!
+    try b.beginFrame(.{ .width = 80, .height = 24 });
+    b.drawRect(
+        .{ .x = 2, .y = 1, .width = 40, .height = 5 },
+        .{ .background = zooee.Color.white, .border = .{ .width = 1 }, .corner_radius = 2 },
+    );
+    b.drawText(.{ .x = 4, .y = 3 }, "hello from zooee", .{});
+    try b.endFrame();
+
+    try out.print("zooee demo — recorded {d} draw commands:\n", .{rec.commands.items.len});
+    for (rec.commands.items) |cmd| {
+        try out.print("  {t}\n", .{cmd});
+    }
+    try out.flush();
 }
 
 test "simple test" {
     const gpa = std.testing.allocator;
     var list: std.ArrayList(i32) = .empty;
-    defer list.deinit(gpa); // Try commenting this out and see if zig detects the memory leak!
+    defer list.deinit(gpa);
     try list.append(gpa, 42);
     try std.testing.expectEqual(@as(i32, 42), list.pop());
-}
-
-test "fuzz example" {
-    try std.testing.fuzz({}, testOne, .{});
-}
-
-fn testOne(context: void, smith: *std.testing.Smith) !void {
-    _ = context;
-    // Try passing `--fuzz` to `zig build test` and see if it manages to fail this test case!
-
-    const gpa = std.testing.allocator;
-    var list: std.ArrayList(u8) = .empty;
-    defer list.deinit(gpa);
-    while (!smith.eos()) switch (smith.value(enum { add_data, dup_data })) {
-        .add_data => {
-            const slice = try list.addManyAsSlice(gpa, smith.value(u4));
-            smith.bytes(slice);
-        },
-        .dup_data => {
-            if (list.items.len == 0) continue;
-            if (list.items.len > std.math.maxInt(u32)) return error.SkipZigTest;
-            const len = smith.valueRangeAtMost(u32, 1, @min(32, list.items.len));
-            const off = smith.valueRangeAtMost(u32, 0, @intCast(list.items.len - len));
-            try list.appendSlice(gpa, list.items[off..][0..len]);
-            try std.testing.expectEqualSlices(
-                u8,
-                list.items[off..][0..len],
-                list.items[list.items.len - len ..],
-            );
-        },
-    };
 }
