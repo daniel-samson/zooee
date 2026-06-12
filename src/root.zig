@@ -4,6 +4,7 @@
 const std = @import("std");
 
 pub const geometry = @import("geometry.zig");
+pub const layout = @import("layout.zig");
 pub const style = @import("style.zig");
 pub const backend = @import("backend.zig");
 pub const backends = struct {
