@@ -12,7 +12,7 @@ Most UI frameworks lock you into one rendering target. Zooee separates *what* yo
 
 - **Terminal backend** — render your app as a TUI over ANSI escape sequences. Great for CLIs, servers, and SSH sessions.
 - **DirectX backend** — GPU-accelerated rendering on Windows.
-- **OpenGL backend** — GPU-accelerated rendering across Linux, macOS, and Windows.
+- **OpenGL backend** — GPU-accelerated rendering on Linux and macOS.
 
 The same widget tree, layout, and event handling drive all of them. Build a dashboard once; ship it as both a terminal tool and a desktop app.
 
@@ -66,13 +66,11 @@ build.zig    # build graph
 
 ## Roadmap
 
-- [ ] Core widget tree and layout engine
-- [ ] Event/input abstraction (keyboard, mouse, resize)
-- [ ] Terminal backend (ANSI / escape sequences)
-- [ ] OpenGL backend
-- [ ] DirectX backend
-- [ ] Theming and styling
-- [ ] Examples and documentation
+Tracked as [milestones](https://github.com/daniel-samson/zooee/milestones), built backends-first and test-driven:
+
+1. **Test harness & backends** — e2e test infrastructure (terminal output snapshots, offscreen golden-image rendering for GPU), then the terminal, OpenGL (Linux/macOS), and DirectX (Windows) backends, native windowing with integrated/headless title bars, in-house text rendering, and a CI gate keeping release binaries under 2MB
+2. **Core framework** — layout engine, declarative widget API, event loop
+3. **Component library** — high-level widgets (buttons, inputs, tables, tab bars) built on the backend primitives
 
 ## Contributing
 
