@@ -11,6 +11,7 @@
 const std = @import("std");
 const backend = @import("../backend.zig");
 const style = @import("../style.zig");
+const layout = @import("../layout.zig");
 
 const Backend = backend.Backend;
 const Color = style.Color;
@@ -28,6 +29,7 @@ pub const all = [_]Scene{
     .{ .name = "nested_clip", .width = 20, .height = 5, .draw = drawNestedClip },
     .{ .name = "overlap", .width = 16, .height = 6, .draw = drawOverlap },
     .{ .name = "sides", .width = 14, .height = 6, .draw = drawSides },
+    .{ .name = "layout_card", .width = 24, .height = 8, .draw = drawLayoutCard },
 };
 
 /// A bordered, rounded "card" with a title — the hello-world scene.
@@ -78,6 +80,37 @@ fn drawSides(b: Backend, s: f32) !void {
             .corner_radius = .{ .top_left = 2 * s },
         },
     );
+}
+
+/// Built via the layout engine (#3) rather than hand-placed draws: a
+/// padded column holding a bordered text card and a row of two flex-grow
+/// fills. Exercises box model, gap, text measurement, and remainder
+/// distribution end-to-end on every backend.
+fn drawLayoutCard(b: Backend, s: f32) !void {
+    const red: layout.Element = .{ .grow = 1, .rect_style = .{ .background = Color.rgb(255, 0, 0) } };
+    const green: layout.Element = .{ .grow = 1, .rect_style = .{ .background = Color.rgb(0, 255, 0) } };
+    const row: layout.Element = .{
+        .direction = .row,
+        .gap = 1 * s,
+        .grow = 1,
+        .children = &.{ &red, &green },
+    };
+    const card: layout.Element = .{
+        .rect_style = .{ .border = .all(1, .black) },
+        .padding = .{ .left = 1 * s, .right = 1 * s },
+        .text = "layout",
+    };
+    const root: layout.Element = .{
+        .direction = .column,
+        .padding = .all(1 * s),
+        .gap = 1 * s,
+        .children = &.{ &card, &row },
+    };
+
+    const gpa = std.heap.page_allocator;
+    var result = try layout.layout(gpa, b, &root, .{ .width = 24 * s, .height = 8 * s });
+    defer result.deinit(gpa);
+    layout.render(b, result);
 }
 
 /// Drive one scene through a backend at the given scale.
