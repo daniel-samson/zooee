@@ -162,6 +162,54 @@ pub const Window = struct {
     }
 };
 
+// --- raster blit (CoreGraphics) ---------------------------------------------
+// Presents a CPU-rendered RGBA framebuffer in the window: the GUI path
+// until GPU backends land (#11/#12) — same approach for first pixels.
+
+const CGColorSpace = ?*anyopaque;
+const CGDataProvider = ?*anyopaque;
+const CGImage = ?*anyopaque;
+
+extern "c" fn CGColorSpaceCreateDeviceRGB() CGColorSpace;
+extern "c" fn CGColorSpaceRelease(CGColorSpace) void;
+extern "c" fn CGDataProviderCreateWithData(?*anyopaque, ?*const anyopaque, usize, ?*const anyopaque) CGDataProvider;
+extern "c" fn CGDataProviderRelease(CGDataProvider) void;
+extern "c" fn CGImageCreate(usize, usize, usize, usize, usize, CGColorSpace, u32, CGDataProvider, ?*const anyopaque, bool, i32) CGImage;
+extern "c" fn CGImageRelease(CGImage) void;
+
+const kCGImageAlphaNoneSkipLast: u32 = 5; // RGBX, our raster layout
+
+/// Present an RGBA8 framebuffer (row-major, top-down) in the window.
+/// The buffer must stay valid for the duration of the call (the image
+/// copies via the data provider before returning from setContents).
+pub fn blit(window: *Window, rgba: []const u8, width: usize, height: usize) void {
+    std.debug.assert(rgba.len == width * height * 4);
+    const space = CGColorSpaceCreateDeviceRGB();
+    defer CGColorSpaceRelease(space);
+    const provider = CGDataProviderCreateWithData(null, rgba.ptr, rgba.len, null);
+    defer CGDataProviderRelease(provider);
+    const image = CGImageCreate(width, height, 8, 32, width * 4, space, kCGImageAlphaNoneSkipLast, provider, null, false, 0);
+    defer CGImageRelease(image);
+
+    const view = msg(id, struct {}, window.ns_window, sel("contentView"), .{});
+    _ = msg(void, struct { bool }, view, sel("setWantsLayer:"), .{true});
+    const layer = msg(id, struct {}, view, sel("layer"), .{});
+    const scale = msg(f64, struct {}, window.ns_window, sel("backingScaleFactor"), .{});
+    _ = msg(void, struct { f64 }, layer, sel("setContentsScale:"), .{scale});
+    _ = msg(void, struct { id }, layer, sel("setContents:"), .{image});
+}
+
+/// Content size in pixels (points × backing scale) for rendering.
+pub fn contentPixelSize(window: *Window) struct { width: usize, height: usize, scale: f64 } {
+    const content = msg(NSRect, struct {}, window.ns_window, sel("contentLayoutRect"), .{});
+    const scale = msg(f64, struct {}, window.ns_window, sel("backingScaleFactor"), .{});
+    return .{
+        .width = @intFromFloat(@max(1, content.w * scale)),
+        .height = @intFromFloat(@max(1, content.h * scale)),
+        .scale = scale,
+    };
+}
+
 test "objc runtime reachable: NSString round-trip" {
     const s = nsString("zooee");
     try std.testing.expect(s != null);
