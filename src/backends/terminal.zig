@@ -23,6 +23,19 @@ const Backend = backend.Backend;
 const Color = style.Color;
 const Rect = geometry.Rect;
 
+/// Prepare the hosting console for zooee output. On Windows this switches
+/// the console output codepage to UTF-8 — without it, legacy conhost
+/// renders box-drawing characters as OEM-codepage mojibake. No-op
+/// elsewhere. Call once at startup before presenting.
+pub fn setupConsole() void {
+    if (@import("builtin").os.tag == .windows) {
+        const CP_UTF8: u32 = 65001;
+        _ = (struct {
+            extern "kernel32" fn SetConsoleOutputCP(u32) callconv(.winapi) std.os.windows.BOOL;
+        }).SetConsoleOutputCP(CP_UTF8);
+    }
+}
+
 pub const Cell = struct {
     cp: u21 = ' ',
     fg: ?Color = null,
