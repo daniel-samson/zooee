@@ -32,6 +32,10 @@ jobs:
       - name: Visual golden test
         run: zig build visual-test
 
+      - name: Binary size gate
+        shell: bash
+        run: bash ci/check-size.sh
+
       - name: Upload visual diffs on failure
         if: failure()
         uses: actions/upload-artifact@v4
