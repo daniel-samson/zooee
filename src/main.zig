@@ -8,12 +8,17 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
 const zooee = @import("zooee");
+const Color = zooee.Color;
+
+// Per-platform terminal session with one shared loop below.
+const tty_mod = if (builtin.os.tag == .windows)
+    zooee.platform.win32_console
+else
+    zooee.platform.posix_tty;
+const Session = if (builtin.os.tag == .windows) tty_mod.Console else tty_mod.Tty;
 
 // Restore the terminal before any panic stack trace (#25).
-pub const panic = if (builtin.os.tag != .windows)
-    std.debug.FullPanic(zooee.platform.posix_tty.panicRestore)
-else
-    std.debug.FullPanic(std.debug.defaultPanic);
+pub const panic = std.debug.FullPanic(tty_mod.panicRestore);
 
 const items = [_][]const u8{ "Terminal backend", "Raster backend", "Win32 windowing", "Layout engine", "Event layer" };
 
@@ -37,14 +42,7 @@ pub fn main(init: std.process.Init) !void {
 
     var state: State = .{};
 
-    if (builtin.os.tag == .windows) {
-        // Windows console input is a #7 follow-up: render one frame.
-        try renderFrame(arena, b, &term, &state, .{ .width = 44, .height = 12 });
-        try dumpPlain(&term, arena, out);
-        return;
-    }
-
-    var tty = zooee.platform.posix_tty.Tty.init() catch {
+    var tty = Session.init() catch {
         // Not a TTY (CI, pipes): render one static frame and exit.
         try renderFrame(arena, b, &term, &state, .{ .width = 44, .height = 12 });
         try dumpPlain(&term, arena, out);
@@ -121,7 +119,7 @@ fn renderFrame(
             .text_style = if (state.selected == i)
                 .{ .color = .{ .r = 0, .g = 120, .b = 255 }, .bold = true }
             else
-                .{ .color = .black },
+                .{},
         };
     }
 
@@ -132,7 +130,7 @@ fn renderFrame(
     const list: L.Element = .{
         .direction = .column,
         .padding = .symmetric(2, 1),
-        .rect_style = .{ .border = .all(1, .black), .corner_radius = .all(1) },
+        .rect_style = .{ .border = .all(1, Color.rgb(128, 128, 128)), .corner_radius = .all(1) },
         .children = &rows_ptrs,
     };
     const root: L.Element = .{

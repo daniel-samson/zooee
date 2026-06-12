@@ -268,7 +268,7 @@ pub const RasterBackend = struct {
             while (y < bounds.y1) : (y += 1) {
                 var x = bounds.x0;
                 while (x < bounds.x1) : (x += 1) {
-                    self.setPixel(x, y, text_style.color);
+                    self.setPixel(x, y, text_style.color orelse Color.black);
                 }
             }
         }

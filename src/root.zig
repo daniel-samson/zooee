@@ -28,6 +28,10 @@ pub const platform = struct {
         @import("platform/win32.zig")
     else
         struct {};
+    pub const win32_console = if (@import("builtin").os.tag == .windows)
+        @import("platform/win32_console.zig")
+    else
+        struct {};
     pub const posix_tty = if (@import("builtin").os.tag != .windows)
         @import("platform/posix_tty.zig")
     else
@@ -41,6 +45,7 @@ test {
     // skipped and never compile-checked or run.
     if (@import("builtin").os.tag == .windows) {
         std.testing.refAllDecls(platform.win32);
+        std.testing.refAllDecls(platform.win32_console);
     } else {
         std.testing.refAllDecls(platform.posix_tty);
     }

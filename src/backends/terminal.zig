@@ -229,7 +229,7 @@ pub const TerminalBackend = struct {
             if (x >= clip.x1) break;
             const cell = self.cellAt(x, y);
             cell.cp = cp;
-            cell.fg = text_style.color;
+            cell.fg = text_style.color; // null = terminal default fg
             cell.bold = text_style.bold;
         }
     }
