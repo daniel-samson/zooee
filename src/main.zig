@@ -25,6 +25,16 @@ const items = [_][]const u8{ "Terminal backend", "Raster backend", "Win32 window
 const State = struct {
     selected: usize = 0,
     checked: [items.len]bool = .{ true, true, true, true, false },
+    /// Screen rects of each item row from the last layout, for mouse
+    /// hit-testing. The widget layer (#4) will own this eventually.
+    item_rects: [items.len]zooee.Rect = @splat(.{}),
+
+    fn hitItem(self: *const State, p: zooee.Point) ?usize {
+        for (self.item_rects, 0..) |r, i| {
+            if (r.contains(p)) return i;
+        }
+        return null;
+    }
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -51,7 +61,12 @@ pub fn main(init: std.process.Init) !void {
     try tty.enableRaw();
     defer tty.deinit();
 
-    try out.writeAll("\x1b[?1049h\x1b[?25l"); // alternate screen, hide cursor
+    // Alternate screen, hidden cursor; on POSIX also SGR mouse reporting
+    // (Windows mouse input arrives via ReadConsoleInput instead).
+    if (builtin.os.tag == .windows)
+        try out.writeAll("\x1b[?1049h\x1b[?25l")
+    else
+        try out.writeAll(tty_mod.enter_tui_seq);
     try out.flush();
 
     var dirty = true;
@@ -91,6 +106,24 @@ pub fn main(init: std.process.Init) !void {
                 },
                 else => {},
             },
+            .pointer_move => |p| {
+                // Hover highlights the row under the cursor.
+                if (state.hitItem(p.position)) |i| {
+                    if (state.selected != i) {
+                        state.selected = i;
+                        dirty = true;
+                    }
+                }
+            },
+            .pointer_down => |p| {
+                if (p.buttons.primary) {
+                    if (state.hitItem(p.position)) |i| {
+                        state.selected = i;
+                        state.checked[i] = !state.checked[i];
+                        dirty = true;
+                    }
+                }
+            },
             else => {},
         };
 
@@ -102,7 +135,7 @@ fn renderFrame(
     gpa: std.mem.Allocator,
     b: zooee.Backend,
     term: *zooee.backends.terminal.TerminalBackend,
-    state: *const State,
+    state: *State,
     viewport: zooee.Size,
 ) !void {
     _ = term;
@@ -126,7 +159,7 @@ fn renderFrame(
     var rows_ptrs: [items.len]*const L.Element = undefined;
     for (&rows, 0..) |*r, i| rows_ptrs[i] = r;
 
-    const title: L.Element = .{ .text = "zooee demo — ↑/↓ move · space toggle · q quit", .text_style = .{ .bold = true } };
+    const title: L.Element = .{ .text = "zooee demo — ↑/↓/hover move · space/click toggle · q quit", .text_style = .{ .bold = true } };
     const list: L.Element = .{
         .direction = .column,
         .padding = .symmetric(2, 1),
@@ -142,6 +175,14 @@ fn renderFrame(
 
     var result = try L.layout(gpa, b, &root, viewport);
     defer result.deinit(gpa);
+
+    // Record item-row rects for mouse hit-testing.
+    for (result.placements) |p| {
+        for (rows_ptrs, 0..) |row_ptr, i| {
+            if (p.element == row_ptr) state.item_rects[i] = p.rect;
+        }
+    }
+
     try b.beginFrame(viewport);
     L.render(b, result);
     try b.endFrame();

@@ -117,12 +117,18 @@ pub fn restoreNow() void {
     if (saved_termios) |orig| {
         posix.tcsetattr(raw_fd, .NOW, orig) catch {};
         saved_termios = null;
-        // Leave alternate screen, show cursor, reset attributes.
-        // Raw syscall: must stay signal/panic-safe (no Io, no allocation).
-        const out: []const u8 = "\x1b[0m\x1b[?25h\x1b[?1049l";
+        // Disable mouse reporting, leave alternate screen, show cursor,
+        // reset attributes. Raw syscall: signal/panic-safe only.
+        const out: []const u8 = "\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[0m\x1b[?25h\x1b[?1049l";
         _ = posix.system.write(posix.STDOUT_FILENO, out.ptr, out.len);
     }
 }
+
+/// Escape sequence enabling the TUI session: alternate screen, hidden
+/// cursor, SGR mouse reporting (button presses + drag motion, 1006
+/// coordinates — the modern protocol, supported by every relevant
+/// terminal). Write once after enableRaw; restoreNow undoes it.
+pub const enter_tui_seq = "\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1002h\x1b[?1006h";
 
 /// Panic handler that restores the terminal before the default panic
 /// prints its stack trace (#25). Install in the app root:
@@ -195,6 +201,9 @@ fn parseEscape(bytes: []const u8) ?EscResult {
     }
     if (bytes.len < 3) return null;
 
+    // SGR mouse report: ESC [ < b ; x ; y (M=press/motion | m=release).
+    if (kind == '[' and bytes[2] == '<') return parseSgrMouse(bytes);
+
     // Find the final byte (0x40–0x7e) of the CSI sequence.
     var i: usize = 2;
     while (i < bytes.len) : (i += 1) {
@@ -221,6 +230,55 @@ fn parseEscape(bytes: []const u8) ?EscResult {
             return .{ .ev = ev, .len = i + 1 };
         }
         if (i > 16) return .{ .ev = null, .len = i }; // runaway; bail
+    }
+    return null; // incomplete
+}
+
+fn parseSgrMouse(bytes: []const u8) ?EscResult {
+    // bytes = ESC [ < btn ; col ; row M|m   (cols/rows 1-based)
+    var nums: [3]u32 = .{ 0, 0, 0 };
+    var n: usize = 0;
+    var i: usize = 3;
+    while (i < bytes.len) : (i += 1) {
+        const c = bytes[i];
+        if (c >= '0' and c <= '9') {
+            nums[n] = nums[n] * 10 + (c - '0');
+        } else if (c == ';') {
+            n += 1;
+            if (n >= nums.len) return .{ .ev = null, .len = i + 1 }; // malformed
+        } else if (c == 'M' or c == 'm') {
+            if (n != 2) return .{ .ev = null, .len = i + 1 }; // malformed
+            const btn = nums[0];
+            const pos: geometry.Point = .{
+                .x = @floatFromInt(nums[1] -| 1),
+                .y = @floatFromInt(nums[2] -| 1),
+            };
+            // Wheel: 64=up, 65=down → reuse key events (scroll as arrows
+            // until ScrollView exists; recorded as such in the demo).
+            if (btn & 64 != 0) {
+                const key: event.Key = if (btn & 1 == 0) .up else .down;
+                return .{ .ev = .{ .key_down = .{ .key = key } }, .len = i + 1 };
+            }
+            const motion = btn & 32 != 0;
+            var buttons: event.Buttons = .{};
+            switch (btn & 3) {
+                0 => buttons.primary = true,
+                1 => buttons.middle = true,
+                2 => buttons.secondary = true,
+                else => {}, // 3 = release marker in legacy; SGR uses 'm'
+            }
+            const pe: event.PointerEvent = .{ .position = pos, .buttons = buttons };
+            const ev: event.Event = if (motion)
+                .{ .pointer_move = pe }
+            else if (c == 'M')
+                .{ .pointer_down = pe }
+            else
+                .{ .pointer_up = pe };
+            return .{ .ev = ev, .len = i + 1 };
+        } else {
+            return .{ .ev = null, .len = i + 1 }; // malformed
+        }
+        if (i > 24) return .{ .ev = null, .len = i }; // runaway
     }
     return null; // incomplete
 }
@@ -290,4 +348,31 @@ test "lone escape is the escape key" {
     var evs = try parseAll("\x1b");
     defer evs.deinit(testing.allocator);
     try testing.expectEqual(event.Key.escape, evs.items[0].key_down.key);
+}
+
+test "SGR mouse press, release, motion decode to pointer events" {
+    var evs = try parseAll("\x1b[<0;10;5M\x1b[<0;10;5m\x1b[<32;11;5M");
+    defer evs.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 3), evs.items.len);
+    try testing.expect(evs.items[0] == .pointer_down);
+    try testing.expectEqual(@as(f32, 9), evs.items[0].pointer_down.position.x); // 1-based → 0-based
+    try testing.expectEqual(@as(f32, 4), evs.items[0].pointer_down.position.y);
+    try testing.expect(evs.items[0].pointer_down.buttons.primary);
+    try testing.expect(evs.items[1] == .pointer_up);
+    try testing.expect(evs.items[2] == .pointer_move);
+}
+
+test "SGR wheel maps to arrow keys for now" {
+    var evs = try parseAll("\x1b[<64;3;3M\x1b[<65;3;3M");
+    defer evs.deinit(testing.allocator);
+    try testing.expectEqual(event.Key.up, evs.items[0].key_down.key);
+    try testing.expectEqual(event.Key.down, evs.items[1].key_down.key);
+}
+
+test "partial SGR mouse sequence stays pending" {
+    var events: std.ArrayList(event.Event) = .empty;
+    defer events.deinit(testing.allocator);
+    const consumed = try parseInput("\x1b[<0;10", &events, testing.allocator);
+    try testing.expectEqual(@as(usize, 0), consumed);
+    try testing.expectEqual(@as(usize, 0), events.items.len);
 }
