@@ -142,6 +142,51 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
+    // --- visual testing (#13) ---------------------------------------------
+
+    // visual-diff: standalone image comparison (PPM/BMP, tolerance or
+    // --expect-solid). Used by the e2e capture check on self-hosted CI.
+    const visual_diff = b.addExecutable(.{
+        .name = "visual-diff",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/visual_diff.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(visual_diff);
+
+    // visual-test: render scene fixtures through the raster backend and
+    // compare byte-exactly against checked-in goldens.
+    const visual_test = b.addExecutable(.{
+        .name = "visual-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/visual_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zooee", .module = mod }},
+        }),
+    });
+    const run_visual_test = b.addRunArtifact(visual_test);
+    run_visual_test.addArg(b.pathFromRoot("testdata/visual"));
+    if (b.args) |args| run_visual_test.addArgs(args); // forward --update
+    const visual_step = b.step("visual-test", "Render scene fixtures and compare against PPM goldens");
+    visual_step.dependOn(&run_visual_test.step);
+
+    // Native window demo, Windows targets only — the e2e visual subject.
+    if (target.result.os.tag == .windows) {
+        const window_demo = b.addExecutable(.{
+            .name = "zooee-window-demo",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("examples/window_demo.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "zooee", .module = mod }},
+            }),
+        });
+        b.installArtifact(window_demo);
+    }
+
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means
