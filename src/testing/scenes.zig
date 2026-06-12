@@ -30,6 +30,7 @@ pub const all = [_]Scene{
     .{ .name = "overlap", .width = 16, .height = 6, .draw = drawOverlap },
     .{ .name = "sides", .width = 14, .height = 6, .draw = drawSides },
     .{ .name = "layout_card", .width = 24, .height = 8, .draw = drawLayoutCard },
+    .{ .name = "hello_text", .width = 20, .height = 4, .draw = drawHelloText },
 };
 
 /// A bordered, rounded "card" with a title — the hello-world scene.
@@ -80,6 +81,12 @@ fn drawSides(b: Backend, s: f32) !void {
             .corner_radius = .{ .top_left = 2 * s },
         },
     );
+}
+
+/// Real text rendering (#10): glyphs on raster (font set by the
+/// harness), plain characters on the terminal.
+fn drawHelloText(b: Backend, s: f32) !void {
+    b.drawText(.{ .x = 1 * s, .y = 1 * s }, "Zooee 1.0!", .{ .size = 2.5 * s });
 }
 
 /// Built via the layout engine (#3) rather than hand-placed draws: a

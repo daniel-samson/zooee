@@ -45,6 +45,10 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .macos) {
         mod.linkFramework("AppKit", .{});
     }
+    // Test font for the font pipeline (#10): OFL Poppins, tests/goldens only.
+    mod.addAnonymousImport("poppins", .{
+        .root_source_file = b.path("testdata/fonts/Poppins-Regular.ttf"),
+    });
 
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function

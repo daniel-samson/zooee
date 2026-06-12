@@ -229,7 +229,7 @@ fn quadTo(gpa: std.mem.Allocator, edges: *std.ArrayList(Edge), cur: *[2]f32, ctr
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
-const poppins = @embedFile("../../testdata/fonts/Poppins-Regular.ttf");
+const poppins = @embedFile("poppins");
 
 test "rasterized 'A' has plausible ink" {
     const font = try ttf.Font.parse(poppins);

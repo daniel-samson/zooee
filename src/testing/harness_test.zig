@@ -89,6 +89,13 @@ const terminal_goldens = [_]TerminalGolden{
     \\
     \\
     },
+    .{ .name = "hello_text", .text =
+    \\
+    \\ Zooee 1.0!
+    \\
+    \\
+    \\
+    },
     .{ .name = "layout_card", .text =
     \\
     \\ ┌────────┐
@@ -132,11 +139,12 @@ const RasterGolden = struct {
 // FNV-1a of the RGBA framebuffer at scale 8. On mismatch the actual hash
 // is printed; update deliberately when a scene/renderer change is intended.
 const raster_goldens = [_]RasterGolden{
-    .{ .name = "card", .hash = 0x295ce3b589adc575 },
+    .{ .name = "card", .hash = 0x72977d425223cbb },
     .{ .name = "nested_clip", .hash = 0x802b0f2a3db4bb25 },
     .{ .name = "overlap", .hash = 0xc6478bd603cbc525 },
     .{ .name = "sides", .hash = 0xcc939316ad5d00b9 },
-    .{ .name = "layout_card", .hash = 0xdf8670ab6dac1405 },
+    .{ .name = "layout_card", .hash = 0xb69813e5bdc834c },
+    .{ .name = "hello_text", .hash = 0xc72d0c60fbbb6bbb },
 };
 
 test "raster renders all scenes to golden hashes" {
@@ -144,6 +152,7 @@ test "raster renders all scenes to golden hashes" {
         const scene = findScene(golden.name);
         var ras = raster.RasterBackend.init(testing.allocator);
         defer ras.deinit();
+        try ras.setFont(@embedFile("poppins"));
         try scenes.run(scene, ras.interface(), 8);
         const actual = std.hash.Fnv1a_64.hash(ras.pixels);
         testing.expectEqual(golden.hash, actual) catch |err| {
