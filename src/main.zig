@@ -118,7 +118,7 @@ fn renderFrame(
             .text_style = if (state.selected == i)
                 .{ .color = .{ .r = 0, .g = 120, .b = 255 }, .bold = true }
             else
-                .{ .color = .black },
+                .{},
         };
     }
 
