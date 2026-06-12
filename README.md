@@ -15,7 +15,7 @@ Most UI frameworks lock you into one rendering target. Zooee separates *what* yo
 - **OpenGL backend** — GPU-accelerated rendering on Linux and macOS.
 - **Web backend** — compile to WebAssembly and render to a `<canvas>` in the browser.
 
-The same widget tree, layout, and event handling drive all of them. Build a dashboard once; ship it as both a terminal tool and a desktop app.
+The same widget tree, layout, and event handling drive all of them. Build a dashboard once; ship it as a terminal tool, a native desktop app, and a web app — from one codebase, in binaries under 2MB.
 
 ## Goals
 
@@ -75,7 +75,7 @@ Tracked as [milestones](https://github.com/daniel-samson/zooee/milestones), buil
 
 ## Acknowledgements
 
-Zooee is heavily inspired by [Textual](https://github.com/Textualize/textual), Will McGugan and Textualize's Python framework that proved a modern, component-based UI framework can treat the terminal as a first-class rendering target — and run the same app in the browser. Zooee borrows that spirit (and ambition) in Zig.
+Zooee is heavily inspired by [Textual](https://github.com/Textualize/textual), Will McGugan and Textualize's Python framework that proved a modern, component-based UI framework can treat the terminal as a first-class rendering target — and run the same app in the browser. Zooee borrows that spirit (and ambition) in Zig — and extends it with native GUI backends: the same app can also run as a GPU-accelerated desktop application with real windows, not just in the terminal and browser.
 
 ## Contributing
 
