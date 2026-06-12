@@ -193,6 +193,80 @@ pub const Window = struct {
     }
 };
 
+// --- raster blit (GDI) -------------------------------------------------------
+// Windows twin of the macOS CoreGraphics blit: present a CPU-rendered
+// RGBA framebuffer in the client area until D3D11 (#12) replaces it.
+
+const BITMAPINFOHEADER = extern struct {
+    size: u32 = @sizeOf(BITMAPINFOHEADER),
+    width: i32,
+    height: i32, // negative = top-down, matching the raster buffer
+    planes: u16 = 1,
+    bit_count: u16 = 32,
+    compression: u32 = 0, // BI_RGB
+    size_image: u32 = 0,
+    x_ppm: i32 = 0,
+    y_ppm: i32 = 0,
+    clr_used: u32 = 0,
+    clr_important: u32 = 0,
+};
+
+extern "user32" fn GetDC(HWND) callconv(WINAPI) ?*anyopaque;
+extern "user32" fn ReleaseDC(HWND, ?*anyopaque) callconv(WINAPI) i32;
+extern "user32" fn GetClientRect(HWND, *RECT) callconv(WINAPI) win.BOOL;
+extern "gdi32" fn StretchDIBits(?*anyopaque, i32, i32, i32, i32, i32, i32, i32, i32, ?*const anyopaque, *const BITMAPINFOHEADER, u32, u32) callconv(WINAPI) i32;
+
+const RECT = extern struct { left: i32, top: i32, right: i32, bottom: i32 };
+const SRCCOPY: u32 = 0x00CC0020;
+const DIB_RGB_COLORS: u32 = 0;
+
+/// Present an RGBA8 framebuffer (row-major, top-down) in the client
+/// area. GDI wants BGRA, so the caller's buffer is converted in place
+/// of a copy — pass a scratch buffer the same size.
+pub fn blit(window: *Window, rgba: []const u8, width: usize, height: usize, bgra_scratch: []u8) void {
+    std.debug.assert(rgba.len == width * height * 4);
+    std.debug.assert(bgra_scratch.len >= rgba.len);
+    var i: usize = 0;
+    while (i < rgba.len) : (i += 4) {
+        bgra_scratch[i + 0] = rgba[i + 2];
+        bgra_scratch[i + 1] = rgba[i + 1];
+        bgra_scratch[i + 2] = rgba[i + 0];
+        bgra_scratch[i + 3] = rgba[i + 3];
+    }
+    const hdr: BITMAPINFOHEADER = .{ .width = @intCast(width), .height = -@as(i32, @intCast(height)) };
+    const dc = GetDC(window.hwnd) orelse return;
+    defer _ = ReleaseDC(window.hwnd, dc);
+    var rect: RECT = undefined;
+    _ = GetClientRect(window.hwnd, &rect);
+    _ = StretchDIBits(
+        dc,
+        0,
+        0,
+        rect.right - rect.left,
+        rect.bottom - rect.top,
+        0,
+        0,
+        @intCast(width),
+        @intCast(height),
+        bgra_scratch.ptr,
+        &hdr,
+        DIB_RGB_COLORS,
+        SRCCOPY,
+    );
+}
+
+/// Content size in pixels for rendering (per-monitor DPI is #27;
+/// v1 reports raw client pixels, scale 1).
+pub fn contentPixelSize(window: *Window) struct { width: usize, height: usize, scale: f64 } {
+    var rect: RECT = undefined;
+    _ = GetClientRect(window.hwnd, &rect);
+    return .{
+        .width = @intCast(@max(1, rect.right - rect.left)),
+        .height = @intCast(@max(1, rect.bottom - rect.top)),
+        .scale = 1.0,
+    };
+}
+
 test "create, pump, and destroy a real window" {
     const w = try Window.create(std.testing.allocator, .{
         .title = "zooee smoke test",

@@ -178,10 +178,10 @@ pub fn build(b: *std.Build) void {
     const visual_step = b.step("visual-test", "Render scene fixtures and compare against PPM goldens");
     visual_step.dependOn(&run_visual_test.step);
 
-    // macOS GUI demo, assembled as a .app bundle by plain `zig build`
-    // (Daniel's requirement, #9): bare Mach-O binaries are second-class
-    // citizens on macOS (no Dock identity, focus quirks).
-    if (target.result.os.tag == .macos) {
+    // GUI demo: on macOS assembled as a .app bundle by plain `zig build`
+    // (Daniel's requirement, #9 — bare Mach-O binaries are second-class
+    // citizens); on Windows a GUI-subsystem exe.
+    if (target.result.os.tag == .macos or target.result.os.tag == .windows) {
         const gui_demo = b.addExecutable(.{
             .name = "zooee-gui-demo",
             .root_module = b.createModule(.{
@@ -191,6 +191,11 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{.{ .name = "zooee", .module = mod }},
             }),
         });
+
+        if (target.result.os.tag == .windows) {
+            gui_demo.subsystem = .Windows;
+            b.installArtifact(gui_demo);
+        }
 
         const plist = b.addWriteFiles().add("Info.plist",
             \\<?xml version="1.0" encoding="UTF-8"?>
@@ -204,14 +209,16 @@ pub fn build(b: *std.Build) void {
             \\</dict></plist>
             \\
         );
-        const app_bin = b.addInstallArtifact(gui_demo, .{
-            .dest_dir = .{ .override = .{ .custom = "Zooee Demo.app/Contents/MacOS" } },
-        });
-        const app_plist = b.addInstallFile(plist, "Zooee Demo.app/Contents/Info.plist");
-        b.getInstallStep().dependOn(&app_bin.step);
-        b.getInstallStep().dependOn(&app_plist.step);
+        if (target.result.os.tag == .macos) {
+            const app_bin = b.addInstallArtifact(gui_demo, .{
+                .dest_dir = .{ .override = .{ .custom = "Zooee Demo.app/Contents/MacOS" } },
+            });
+            const app_plist = b.addInstallFile(plist, "Zooee Demo.app/Contents/Info.plist");
+            b.getInstallStep().dependOn(&app_bin.step);
+            b.getInstallStep().dependOn(&app_plist.step);
+        }
 
-        const run_gui = b.step("run-gui", "Run the native GUI demo (macOS)");
+        const run_gui = b.step("run-gui", "Run the native GUI demo");
         const run_gui_cmd = b.addRunArtifact(gui_demo);
         run_gui.dependOn(&run_gui_cmd.step);
     }
