@@ -80,7 +80,8 @@ pub const RectStyle = struct {
 };
 
 pub const TextStyle = struct {
-    color: Color = .black,
+    /// null = the backend default (terminal theme foreground; black on raster).
+    color: ?Color = null,
     /// Font size in the backend's native units. Terminal backends ignore it
     /// (glyphs are cell-sized); GPU backends select/rasterize accordingly.
     size: f32 = 16,
