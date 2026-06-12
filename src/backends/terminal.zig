@@ -174,19 +174,15 @@ pub const TerminalBackend = struct {
             }
         }
 
-        if (rect_style.border.width > 0 and r.x1 - r.x0 >= 2 and r.y1 - r.y0 >= 2) {
+        if (!rect_style.border.isNone() and r.x1 - r.x0 >= 2 and r.y1 - r.y0 >= 2) {
             self.drawBorder(r, clip, rect_style);
         }
     }
 
     fn drawBorder(self: *TerminalBackend, r: CellRect, clip: CellRect, rect_style: style.RectStyle) void {
-        const rounded = rect_style.corner_radius > 0;
-        const fg = rect_style.border.color;
+        const b = rect_style.border;
+        const radius = rect_style.corner_radius;
         const bg = rect_style.background;
-        const tl: u21 = if (rounded) '╭' else '┌';
-        const tr: u21 = if (rounded) '╮' else '┐';
-        const bl: u21 = if (rounded) '╰' else '└';
-        const br: u21 = if (rounded) '╯' else '┘';
 
         const put = struct {
             fn put(s: *TerminalBackend, c: CellRect, x: i32, y: i32, cp: u21, fg_: Color, bg_: ?Color) void {
@@ -195,20 +191,29 @@ pub const TerminalBackend = struct {
             }
         }.put;
 
+        // Sides: a side with width 0 simply isn't drawn (terminal
+        // quantizes any positive width to one cell).
         var x = r.x0 + 1;
         while (x < r.x1 - 1) : (x += 1) {
-            put(self, clip, x, r.y0, '─', fg, bg);
-            put(self, clip, x, r.y1 - 1, '─', fg, bg);
+            if (b.top.width > 0) put(self, clip, x, r.y0, '─', b.top.color, bg);
+            if (b.bottom.width > 0) put(self, clip, x, r.y1 - 1, '─', b.bottom.color, bg);
         }
         var y = r.y0 + 1;
         while (y < r.y1 - 1) : (y += 1) {
-            put(self, clip, r.x0, y, '│', fg, bg);
-            put(self, clip, r.x1 - 1, y, '│', fg, bg);
+            if (b.left.width > 0) put(self, clip, r.x0, y, '│', b.left.color, bg);
+            if (b.right.width > 0) put(self, clip, r.x1 - 1, y, '│', b.right.color, bg);
         }
-        put(self, clip, r.x0, r.y0, tl, fg, bg);
-        put(self, clip, r.x1 - 1, r.y0, tr, fg, bg);
-        put(self, clip, r.x0, r.y1 - 1, bl, fg, bg);
-        put(self, clip, r.x1 - 1, r.y1 - 1, br, fg, bg);
+
+        // Corners: drawn where both adjacent sides exist; rounded per
+        // corner; color precedence: the horizontal (top/bottom) side wins.
+        if (b.top.width > 0 and b.left.width > 0)
+            put(self, clip, r.x0, r.y0, if (radius.top_left > 0) '╭' else '┌', b.top.color, bg);
+        if (b.top.width > 0 and b.right.width > 0)
+            put(self, clip, r.x1 - 1, r.y0, if (radius.top_right > 0) '╮' else '┐', b.top.color, bg);
+        if (b.bottom.width > 0 and b.left.width > 0)
+            put(self, clip, r.x0, r.y1 - 1, if (radius.bottom_left > 0) '╰' else '└', b.bottom.color, bg);
+        if (b.bottom.width > 0 and b.right.width > 0)
+            put(self, clip, r.x1 - 1, r.y1 - 1, if (radius.bottom_right > 0) '╯' else '┘', b.bottom.color, bg);
     }
 
     fn drawText(ptr: *anyopaque, origin: geometry.Point, text: []const u8, text_style: style.TextStyle) void {
@@ -361,7 +366,7 @@ test "bordered rect with rounded corners" {
     try b.beginFrame(.{ .width = 12, .height = 4 });
     b.drawRect(
         .{ .x = 1, .y = 0, .width = 8, .height = 4 },
-        .{ .border = .{ .width = 1 }, .corner_radius = 2 },
+        .{ .border = .all(1, .black), .corner_radius = .all(2) },
     );
     try b.endFrame();
 
@@ -380,7 +385,7 @@ test "square corners when radius is zero" {
     const b = term.interface();
 
     try b.beginFrame(.{ .width = 6, .height = 3 });
-    b.drawRect(.{ .x = 0, .y = 0, .width = 5, .height = 3 }, .{ .border = .{ .width = 1 } });
+    b.drawRect(.{ .x = 0, .y = 0, .width = 5, .height = 3 }, .{ .border = .all(1, .black) });
     try b.endFrame();
 
     try expectScreen(&term,
@@ -397,7 +402,7 @@ test "text inside a box" {
     const b = term.interface();
 
     try b.beginFrame(.{ .width = 20, .height = 3 });
-    b.drawRect(.{ .x = 0, .y = 0, .width = 11, .height = 3 }, .{ .border = .{ .width = 1 }, .corner_radius = 1 });
+    b.drawRect(.{ .x = 0, .y = 0, .width = 11, .height = 3 }, .{ .border = .all(1, .black), .corner_radius = .all(1) });
     b.drawText(.{ .x = 2, .y = 1 }, "zooee", .{});
     try b.endFrame();
 
