@@ -18,6 +18,9 @@ pub const Rect = geometry.Rect;
 pub const Point = geometry.Point;
 pub const Size = geometry.Size;
 
+pub const fixtures = @import("testing/scenes.zig");
+
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("testing/harness_test.zig");
 }
