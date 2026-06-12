@@ -73,8 +73,6 @@ pub fn main(init: std.process.Init) !void {
     defer raster.deinit();
     var frame_arena = std.heap.ArenaAllocator.init(gpa);
     defer frame_arena.deinit();
-    var bgra_scratch: std.ArrayList(u8) = .empty;
-    defer bgra_scratch.deinit(gpa);
 
     var dirty = true;
     outer: while (true) {
@@ -102,14 +100,7 @@ pub fn main(init: std.process.Init) !void {
             try b.beginFrame(viewport);
             L.render(b, result);
             try b.endFrame();
-            switch (builtin.os.tag) {
-                .macos => platform.blit(w, raster.pixels, raster.width, raster.height),
-                .windows => {
-                    try bgra_scratch.resize(gpa, raster.pixels.len);
-                    platform.blit(w, raster.pixels, raster.width, raster.height, bgra_scratch.items);
-                },
-                else => unreachable,
-            }
+            platform.blit(w, raster.pixels, raster.width, raster.height);
             dirty = false;
         }
 
