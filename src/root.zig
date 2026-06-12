@@ -22,6 +22,9 @@ pub const Size = geometry.Size;
 
 pub const fixtures = @import("testing/scenes.zig");
 
+/// OFL test font (tests/goldens only — runtime apps use OS fonts, #10).
+pub const test_font_ttf = @embedFile("poppins");
+
 pub const event = @import("event.zig");
 pub const font = struct {
     pub const ttf = @import("font/ttf.zig");

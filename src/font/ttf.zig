@@ -344,7 +344,7 @@ pub const Font = struct {
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
-const poppins = @embedFile("../../testdata/fonts/Poppins-Regular.ttf");
+const poppins = @embedFile("poppins");
 
 test "parses Poppins header tables" {
     const font = try Font.parse(poppins);
