@@ -26,10 +26,17 @@ const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
 const ENABLE_LINE_INPUT: u32 = 0x0002;
 const ENABLE_ECHO_INPUT: u32 = 0x0004;
 const ENABLE_WINDOW_INPUT: u32 = 0x0008;
+const ENABLE_MOUSE_INPUT: u32 = 0x0010;
+const ENABLE_QUICK_EDIT_MODE: u32 = 0x0040; // swallows mouse input; must be off
+const ENABLE_EXTENDED_FLAGS: u32 = 0x0080;
 const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
 
 const KEY_EVENT: u16 = 0x0001;
+const MOUSE_EVENT: u16 = 0x0002;
 const WINDOW_BUFFER_SIZE_EVENT: u16 = 0x0004;
+
+const MOUSE_MOVED: u32 = 0x0001;
+const MOUSE_WHEELED: u32 = 0x0004;
 
 const COORD = extern struct { x: i16, y: i16 };
 const SMALL_RECT = extern struct { left: i16, top: i16, right: i16, bottom: i16 };
@@ -48,9 +55,17 @@ const INPUT_RECORD = extern struct {
     _pad: u16 = 0,
     data: extern union {
         key: KEY_EVENT_RECORD,
+        mouse: MOUSE_EVENT_RECORD,
         window_size: extern struct { size: COORD },
         raw: [16]u8,
     },
+};
+
+const MOUSE_EVENT_RECORD = extern struct {
+    position: COORD,
+    button_state: u32,
+    control_key_state: u32,
+    event_flags: u32,
 };
 
 const CONSOLE_SCREEN_BUFFER_INFO = extern struct {
@@ -78,6 +93,7 @@ pub const Console = struct {
     in: HANDLE,
     out: HANDLE,
     last_size: geometry.Size = .{},
+    last_buttons: event.Buttons = .{},
 
     pub fn init() !Console {
         const in = GetStdHandle(STD_INPUT_HANDLE) orelse return error.NotATty;
@@ -97,7 +113,8 @@ pub const Console = struct {
         saved_in = self.in;
         saved_out = self.out;
 
-        const raw_in = (in_mode & ~(ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT)) | ENABLE_WINDOW_INPUT;
+        const raw_in = (in_mode & ~(ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_QUICK_EDIT_MODE)) |
+            ENABLE_WINDOW_INPUT | ENABLE_MOUSE_INPUT | ENABLE_EXTENDED_FLAGS;
         if (SetConsoleMode(self.in, raw_in) == .FALSE) return error.BackendFailure;
         // VT processing makes the ANSI present() path work on conhost.
         _ = SetConsoleMode(self.out, out_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
@@ -140,7 +157,7 @@ pub const Console = struct {
             if (got == 0) break;
             pending -= got;
             for (records[0..got]) |rec| {
-                try translateRecord(rec, &events, gpa);
+                try translateRecord(rec, &self.last_buttons, &events, gpa);
             }
             if (GetNumberOfConsoleInputEvents(self.in, &pending) == .FALSE) break;
         }
@@ -148,8 +165,36 @@ pub const Console = struct {
     }
 };
 
-fn translateRecord(rec: INPUT_RECORD, events: *std.ArrayList(event.Event), gpa: std.mem.Allocator) !void {
+fn translateRecord(rec: INPUT_RECORD, last_buttons: *event.Buttons, events: *std.ArrayList(event.Event), gpa: std.mem.Allocator) !void {
     switch (rec.event_type) {
+        MOUSE_EVENT => {
+            const m = rec.data.mouse;
+            const pos: geometry.Point = .{
+                .x = @floatFromInt(m.position.x),
+                .y = @floatFromInt(m.position.y),
+            };
+            if (m.event_flags & MOUSE_WHEELED != 0) {
+                // High word of button_state is the signed wheel delta.
+                const delta: i16 = @bitCast(@as(u16, @truncate(m.button_state >> 16)));
+                const key: event.Key = if (delta > 0) .up else .down;
+                try events.append(gpa, .{ .key_down = .{ .key = key } });
+                return;
+            }
+            const buttons: event.Buttons = .{
+                .primary = m.button_state & 0x1 != 0,
+                .secondary = m.button_state & 0x2 != 0,
+                .middle = m.button_state & 0x4 != 0,
+            };
+            const pe: event.PointerEvent = .{ .position = pos, .buttons = buttons };
+            if (m.event_flags & MOUSE_MOVED != 0) {
+                try events.append(gpa, .{ .pointer_move = pe });
+            } else if (@as(u8, @bitCast(buttons)) != 0 and @as(u8, @bitCast(last_buttons.*)) == 0) {
+                try events.append(gpa, .{ .pointer_down = pe });
+            } else if (@as(u8, @bitCast(buttons)) == 0 and @as(u8, @bitCast(last_buttons.*)) != 0) {
+                try events.append(gpa, .{ .pointer_up = pe });
+            }
+            last_buttons.* = buttons;
+        },
         WINDOW_BUFFER_SIZE_EVENT => {
             // Size events are also caught by polling; emitting here keeps
             // latency low. last_size dedup happens at the poll.
@@ -225,6 +270,7 @@ pub fn panicRestore(msg: []const u8, first_trace_addr: ?usize) noreturn {
 }
 
 test "key translation: arrows and text" {
+    var test_buttons: event.Buttons = .{};
     var events: std.ArrayList(event.Event) = .empty;
     defer events.deinit(std.testing.allocator);
 
@@ -239,7 +285,7 @@ test "key translation: arrows and text" {
             .control_key_state = 0,
         } },
     };
-    try translateRecord(down_arrow, &events, std.testing.allocator);
+    try translateRecord(down_arrow, &test_buttons, &events, std.testing.allocator);
     try std.testing.expectEqual(event.Key.down, events.items[0].key_down.key);
 
     const q_key: INPUT_RECORD = .{
@@ -253,12 +299,40 @@ test "key translation: arrows and text" {
             .control_key_state = 0,
         } },
     };
-    try translateRecord(q_key, &events, std.testing.allocator);
+    try translateRecord(q_key, &test_buttons, &events, std.testing.allocator);
     try std.testing.expectEqual(@as(u21, 'q'), events.items[1].text.codepoint);
 
     // key-up must be ignored
     var up_rec = q_key;
     up_rec.data.key.key_down = .FALSE;
-    try translateRecord(up_rec, &events, std.testing.allocator);
+    try translateRecord(up_rec, &test_buttons, &events, std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 2), events.items.len);
+}
+
+test "mouse translation: press, release, wheel" {
+    var test_buttons: event.Buttons = .{};
+    var events: std.ArrayList(event.Event) = .empty;
+    defer events.deinit(std.testing.allocator);
+
+    var press: INPUT_RECORD = .{
+        .event_type = MOUSE_EVENT,
+        .data = .{ .mouse = .{
+            .position = .{ .x = 10, .y = 5 },
+            .button_state = 0x1,
+            .control_key_state = 0,
+            .event_flags = 0,
+        } },
+    };
+    try translateRecord(press, &test_buttons, &events, std.testing.allocator);
+    try std.testing.expect(events.items[0] == .pointer_down);
+    try std.testing.expectEqual(@as(f32, 10), events.items[0].pointer_down.position.x);
+
+    press.data.mouse.button_state = 0;
+    try translateRecord(press, &test_buttons, &events, std.testing.allocator);
+    try std.testing.expect(events.items[1] == .pointer_up);
+
+    press.data.mouse.event_flags = MOUSE_WHEELED;
+    press.data.mouse.button_state = @as(u32, @as(u16, @bitCast(@as(i16, 120)))) << 16;
+    try translateRecord(press, &test_buttons, &events, std.testing.allocator);
+    try std.testing.expectEqual(event.Key.up, events.items[2].key_down.key);
 }
