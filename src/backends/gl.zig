@@ -651,6 +651,205 @@ pub const RoundedRectRenderer = struct {
     }
 };
 
+// === Exact rect renderer (per-side borders, per-corner radii) ===============
+// The slice-4 SDF renderer (RoundedRectRenderer) gives anti-aliased uniform
+// corners/border — but raster.zig (the golden reference, #13) draws rects
+// HARD-edged with per-side border colors and per-corner radii. To match it
+// pixel-exact through the Backend, this renderer replicates raster's
+// insideRounded() + borderColorAt() per fragment: same pixel-center sampling,
+// same corner-square side attribution, no AA. gl_FragCoord gives the pixel
+// center (x+0.5); we flip y (FBO is bottom-up) so p matches raster's (px,py).
+
+const exact_vert: [*:0]const u8 =
+    \\#version 120
+    \\attribute vec2 pos;
+    \\uniform vec2 viewport;
+    \\void main() {
+    \\  vec2 ndc = vec2(pos.x / viewport.x * 2.0 - 1.0, 1.0 - pos.y / viewport.y * 2.0);
+    \\  gl_Position = vec4(ndc, 0.0, 1.0);
+    \\}
+;
+const exact_frag: [*:0]const u8 =
+    \\#version 120
+    \\uniform vec2 viewport;
+    \\uniform vec4 rect;   // x,y,w,h (top-down px)
+    \\uniform vec4 rad;    // outer radii: tl,tr,br,bl
+    \\uniform vec4 inner;  // x,y,w,h
+    \\uniform vec4 irad;   // inner radii: tl,tr,br,bl
+    \\uniform vec4 bw;     // border widths: top,right,bottom,left
+    \\uniform float has_bg;
+    \\uniform vec4 bg;
+    \\uniform vec4 ct;     // border colors: top,right,bottom,left
+    \\uniform vec4 cr;
+    \\uniform vec4 cb;
+    \\uniform vec4 cl;
+    \\bool cornerOut(vec2 p, float orad, float trad, float cx, float cy, vec2 r0, vec2 rsz) {
+    \\  // p is outside the shape if it lies past this corner's quarter-circle.
+    \\  if (trad <= 0.0) return false;
+    \\  bool in_x = (cx <= r0.x + rsz.x*0.5) ? (p.x < cx) : (p.x > cx);
+    \\  bool in_y = (cy <= r0.y + rsz.y*0.5) ? (p.y < cy) : (p.y > cy);
+    \\  if (in_x && in_y) { float dx = p.x-cx; float dy = p.y-cy; return dx*dx+dy*dy > trad*trad; }
+    \\  return false;
+    \\}
+    \\bool insideRounded(vec4 r, vec4 rd, vec2 p) {
+    \\  if (p.x < r.x || p.x >= r.x + r.z || p.y < r.y || p.y >= r.y + r.w) return false;
+    \\  float mx = min(r.z, r.w) * 0.5;
+    \\  vec2 r0 = r.xy; vec2 rsz = r.zw;
+    \\  if (cornerOut(p, rd.x, min(rd.x, mx), r.x + rd.x,        r.y + rd.x,        r0, rsz)) return false; // tl
+    \\  if (cornerOut(p, rd.y, min(rd.y, mx), r.x + r.z - rd.y,  r.y + rd.y,        r0, rsz)) return false; // tr
+    \\  if (cornerOut(p, rd.z, min(rd.z, mx), r.x + r.z - rd.z,  r.y + r.w - rd.z,  r0, rsz)) return false; // br
+    \\  if (cornerOut(p, rd.w, min(rd.w, mx), r.x + rd.w,        r.y + r.w - rd.w,  r0, rsz)) return false; // bl
+    \\  return true;
+    \\}
+    \\vec4 borderColorAt(vec2 p) {
+    \\  if (p.x < rect.x + rad.x && p.y < rect.y + rad.x) return (bw.x > 0.0) ? ct : cl;
+    \\  if (p.x >= rect.x + rect.z - rad.y && p.y < rect.y + rad.y) return (bw.x > 0.0) ? ct : cr;
+    \\  if (p.x >= rect.x + rect.z - rad.z && p.y >= rect.y + rect.w - rad.z) return (bw.z > 0.0) ? cb : cr;
+    \\  if (p.x < rect.x + rad.w && p.y >= rect.y + rect.w - rad.w) return (bw.z > 0.0) ? cb : cl;
+    \\  if (p.y < inner.y) return ct;
+    \\  if (p.y >= inner.y + inner.w) return cb;
+    \\  if (p.x < inner.x) return cl;
+    \\  return cr;
+    \\}
+    \\void main() {
+    \\  vec2 p = vec2(gl_FragCoord.x, viewport.y - gl_FragCoord.y);
+    \\  if (!insideRounded(rect, rad, p)) discard;
+    \\  bool has_border = (bw.x + bw.y + bw.z + bw.w) > 0.0;
+    \\  if (has_border && !insideRounded(inner, irad, p)) { gl_FragColor = borderColorAt(p); return; }
+    \\  if (has_bg > 0.5) { gl_FragColor = bg; return; }
+    \\  discard;
+    \\}
+;
+
+pub const ExactRectRenderer = struct {
+    gl: Gl,
+    program: GLuint,
+    vao: GLuint,
+    vbo: GLuint,
+    pos_loc: GLuint,
+    u: struct {
+        viewport: GLint,
+        rect: GLint,
+        rad: GLint,
+        inner: GLint,
+        irad: GLint,
+        bw: GLint,
+        has_bg: GLint,
+        bg: GLint,
+        ct: GLint,
+        cr: GLint,
+        cb: GLint,
+        cl: GLint,
+    },
+
+    pub fn init() Error!ExactRectRenderer {
+        const gl = try Gl.load();
+        const vs = QuadRenderer.compile(gl, GL_VERTEX_SHADER, exact_vert) orelse return error.NoContext;
+        const fs = QuadRenderer.compile(gl, GL_FRAGMENT_SHADER, exact_frag) orelse return error.NoContext;
+        const prog = gl.createProgram();
+        gl.attachShader(prog, vs);
+        gl.attachShader(prog, fs);
+        gl.linkProgram(prog);
+        var ok: GLint = 0;
+        gl.getProgramiv(prog, GL_LINK_STATUS, &ok);
+        if (ok == 0) return error.NoContext;
+
+        var vao: GLuint = 0;
+        gl.genVertexArrays(1, @ptrCast(&vao));
+        gl.bindVertexArray(vao);
+        var vbo: GLuint = 0;
+        gl.genBuffers(1, @ptrCast(&vbo));
+
+        return .{
+            .gl = gl,
+            .program = prog,
+            .vao = vao,
+            .vbo = vbo,
+            .pos_loc = @intCast(gl.getAttribLocation(prog, "pos")),
+            .u = .{
+                .viewport = gl.getUniformLocation(prog, "viewport"),
+                .rect = gl.getUniformLocation(prog, "rect"),
+                .rad = gl.getUniformLocation(prog, "rad"),
+                .inner = gl.getUniformLocation(prog, "inner"),
+                .irad = gl.getUniformLocation(prog, "irad"),
+                .bw = gl.getUniformLocation(prog, "bw"),
+                .has_bg = gl.getUniformLocation(prog, "has_bg"),
+                .bg = gl.getUniformLocation(prog, "bg"),
+                .ct = gl.getUniformLocation(prog, "ct"),
+                .cr = gl.getUniformLocation(prog, "cr"),
+                .cb = gl.getUniformLocation(prog, "cb"),
+                .cl = gl.getUniformLocation(prog, "cl"),
+            },
+        };
+    }
+
+    /// Draw one styled rect, replicating raster pixel-exact. `vw`/`vh` are
+    /// the viewport (framebuffer) size in pixels.
+    pub fn draw(self: *ExactRectRenderer, vw: f32, vh: f32, rect: geometry.Rect, rs: style.RectStyle) void {
+        const gl = self.gl;
+        const b = rs.border;
+        // Inner rect (border-box → content-box) and inner radii, matching
+        // raster.drawRect exactly.
+        const inner = [4]f32{
+            rect.x + b.left.width,
+            rect.y + b.top.width,
+            @max(0, rect.width - b.left.width - b.right.width),
+            @max(0, rect.height - b.top.width - b.bottom.width),
+        };
+        const cr_ = rs.corner_radius;
+        const irad = [4]f32{
+            @max(0, cr_.top_left - @max(b.top.width, b.left.width)),
+            @max(0, cr_.top_right - @max(b.top.width, b.right.width)),
+            @max(0, cr_.bottom_right - @max(b.bottom.width, b.right.width)),
+            @max(0, cr_.bottom_left - @max(b.bottom.width, b.left.width)),
+        };
+
+        gl.useProgram(self.program);
+        gl.uniform2f(self.u.viewport, vw, vh);
+        gl.uniform4f(self.u.rect, rect.x, rect.y, rect.width, rect.height);
+        gl.uniform4f(self.u.rad, cr_.top_left, cr_.top_right, cr_.bottom_right, cr_.bottom_left);
+        gl.uniform4f(self.u.inner, inner[0], inner[1], inner[2], inner[3]);
+        gl.uniform4f(self.u.irad, irad[0], irad[1], irad[2], irad[3]);
+        gl.uniform4f(self.u.bw, b.top.width, b.right.width, b.bottom.width, b.left.width);
+        if (rs.background) |bg| {
+            const c = col4(bg);
+            gl.uniform1f(self.u.has_bg, 1);
+            gl.uniform4f(self.u.bg, c[0], c[1], c[2], c[3]);
+        } else {
+            gl.uniform1f(self.u.has_bg, 0);
+        }
+        const ct = col4(b.top.color);
+        const crr = col4(b.right.color);
+        const cb = col4(b.bottom.color);
+        const cll = col4(b.left.color);
+        gl.uniform4f(self.u.ct, ct[0], ct[1], ct[2], ct[3]);
+        gl.uniform4f(self.u.cr, crr[0], crr[1], crr[2], crr[3]);
+        gl.uniform4f(self.u.cb, cb[0], cb[1], cb[2], cb[3]);
+        gl.uniform4f(self.u.cl, cll[0], cll[1], cll[2], cll[3]);
+
+        const x0 = rect.x;
+        const y0 = rect.y;
+        const x1 = rect.x + rect.width;
+        const y1 = rect.y + rect.height;
+        const verts = [_]f32{ x0, y0, x1, y0, x0, y1, x1, y1 };
+        gl.bindVertexArray(self.vao);
+        gl.bindBuffer(GL_ARRAY_BUFFER, self.vbo);
+        gl.bufferData(GL_ARRAY_BUFFER, @sizeOf(@TypeOf(verts)), &verts, GL_STATIC_DRAW);
+        gl.vertexAttribPointer(self.pos_loc, 2, GL_FLOAT, GL_FALSE, 0, @ptrFromInt(0));
+        gl.enableVertexAttribArray(self.pos_loc);
+        gl.drawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
+};
+
+fn col4(c: style.Color) [4]f32 {
+    return .{
+        @as(f32, @floatFromInt(c.r)) / 255,
+        @as(f32, @floatFromInt(c.g)) / 255,
+        @as(f32, @floatFromInt(c.b)) / 255,
+        @as(f32, @floatFromInt(c.a)) / 255,
+    };
+}
+
 /// Offscreen FBO render for the rounded-rect renderer (mirrors
 /// renderRectsOffscreen). Readback is top-down.
 pub fn renderRoundedOffscreen(
@@ -963,7 +1162,7 @@ pub const GlBackend = struct {
     gpa: std.mem.Allocator,
     win: GlWindow,
     rect: RectRenderer,
-    rounded: RoundedRectRenderer,
+    exact: ExactRectRenderer,
     fbo: GLuint = 0,
     target: GLuint = 0,
     width: u32 = 0,
@@ -979,7 +1178,7 @@ pub const GlBackend = struct {
             .gpa = gpa,
             .win = win,
             .rect = try RectRenderer.init(),
-            .rounded = try RoundedRectRenderer.init(),
+            .exact = try ExactRectRenderer.init(),
         };
     }
 
@@ -1079,15 +1278,10 @@ pub const GlBackend = struct {
             }
             return;
         }
-        // bg + border + radius via the SDF renderer. Per-side/per-corner
-        // approximated to uniform (top side, top-left radius).
-        const rr = &self.rounded;
-        rr.gl.useProgram(rr.program);
-        rr.vw = w;
-        rr.vh = h;
-        rr.gl.uniform2f(rr.u_viewport, w, h);
-        const bg = if (rs.background) |b| col(b) else [4]f32{ 0, 0, 0, 0 };
-        rr.draw(rect.x, rect.y, rect.width, rect.height, rs.corner_radius.top_left, rs.border.top.width, bg, col(rs.border.top.color));
+        // bg + border + radius via the exact renderer: replicates raster's
+        // per-side borders and per-corner radii pixel-exact (hard-edged).
+        enableBlend();
+        self.exact.draw(w, h, rect, rs);
     }
 
     fn glyphFor(self: *GlBackend, size_px: u16) ?*GlyphRenderer {
