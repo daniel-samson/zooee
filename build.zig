@@ -97,10 +97,6 @@ pub fn build(b: *std.Build) void {
             const gui = guiDemo(b, mod, target, optimize, "zooee-gui-demo", false);
             gui.subsystem = .Windows; // no console window for a GUI app
             demos_step.dependOn(&b.addInstallArtifact(gui, .{}).step);
-            // Bare-window e2e visual subject for the self-hosted runner.
-            const window_demo = addExe(b, target, optimize, mod, "zooee-window-demo", "examples/window_demo.zig");
-            window_demo.subsystem = .Windows;
-            demos_step.dependOn(&b.addInstallArtifact(window_demo, .{}).step);
         },
         .linux => {
             const gui = guiDemo(b, mod, target, optimize, "zooee-gui-demo", false);

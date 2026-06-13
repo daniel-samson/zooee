@@ -53,6 +53,7 @@ const MSG = extern struct {
 
 const WM_DESTROY = 0x0002;
 const WM_PAINT = 0x000F;
+const WM_ERASEBKGND = 0x0014;
 const WM_SIZE = 0x0005;
 const WM_CLOSE = 0x0010;
 const PM_REMOVE = 0x0001;
@@ -60,10 +61,8 @@ const WS_OVERLAPPEDWINDOW = 0x00CF0000;
 const CW_USEDEFAULT: i32 = @bitCast(@as(u32, 0x80000000));
 const SW_SHOWNORMAL = 1;
 const GWLP_USERDATA = -21;
-const WHITE_BRUSH = 0;
 const IDC_ARROW: usize = 32512;
 
-extern "gdi32" fn GetStockObject(i32) callconv(WINAPI) ?*anyopaque;
 extern "user32" fn LoadCursorW(?HINSTANCE, ?*const anyopaque) callconv(WINAPI) ?*anyopaque;
 
 extern "user32" fn RegisterClassExW(*const WNDCLASSEXW) callconv(WINAPI) u16;
@@ -155,10 +154,13 @@ pub const Window = struct {
                 .lpfnWndProc = wndProc,
                 .hInstance = hinstance,
                 .lpszClassName = class_name,
-                // Defined clear color before any backend paints. Without a
-                // background brush the client area is undefined (renders
-                // black) — caught by the e2e window visual test.
-                .hbrBackground = GetStockObject(WHITE_BRUSH),
+                // No background brush: the client area is owned entirely by
+                // the renderer — either the GDI raster blit (WM_PAINT below)
+                // or the D3D11 swapchain present (#12). A WHITE_BRUSH here
+                // erases white over the swapchain on every WM_PAINT, which is
+                // exactly the "GPU window opens blank" bug. WM_ERASEBKGND is
+                // swallowed below so the OS never paints the client itself.
+                .hbrBackground = null,
                 // Arrow cursor for the client area. Without a class cursor
                 // the window never resets the pointer, so the launch
                 // "app-starting" hourglass lingers over our window.
@@ -279,14 +281,18 @@ pub const Window = struct {
                     self.queue.append(self.gpa, .{ .text = .{ .codepoint = ch } }) catch {};
                 }
             },
+            // Swallow background erase: the renderer owns every client pixel.
+            // Without this the OS would erase (white/gray) over the swapchain.
+            WM_ERASEBKGND => return 1,
             WM_PAINT => {
-                if (self.frame_width > 0) {
-                    var ps: PAINTSTRUCT = undefined;
-                    const dc = BeginPaint(hwnd, &ps);
-                    defer _ = EndPaint(hwnd, &ps);
-                    self.presentFrame(dc);
-                    return 0;
-                }
+                // Validate the update region without erasing. When a GDI raster
+                // frame is retained, re-present it; the D3D path (frame_width==0)
+                // leaves the swapchain's presented pixels untouched.
+                var ps: PAINTSTRUCT = undefined;
+                const dc = BeginPaint(hwnd, &ps);
+                defer _ = EndPaint(hwnd, &ps);
+                if (self.frame_width > 0) self.presentFrame(dc);
+                return 0;
             },
             WM_DESTROY => self.destroyed = true,
             else => {},

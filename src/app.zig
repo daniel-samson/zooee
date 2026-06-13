@@ -176,9 +176,14 @@ pub fn runWindow(
         if (want_gpu) {
             const px0 = platform.contentPixelSize(window);
             if (d3d_backend.D3dSwapchain.create(window.hwnd, @intCast(px0.width), @intCast(px0.height))) |sc| {
+                winlog(init, "path=d3d swapchain=ok size={d}x{d}", .{ px0.width, px0.height });
                 var swapchain = sc;
                 return runWindowD3d(Model, Msg, model, window, &swapchain, init);
-            } else |_| {}
+            } else |err| {
+                winlog(init, "path=raster swapchain_err={t} size={d}x{d}", .{ err, px0.width, px0.height });
+            }
+        } else {
+            winlog(init, "path=raster want_gpu=false", .{});
         }
     }
 
@@ -371,6 +376,16 @@ fn writePpm(gpa: std.mem.Allocator, io: std.Io, path: []const u8, rgba: []const 
     var i: usize = 0;
     while (i < rgba.len) : (i += 4) try buf.appendSlice(gpa, rgba[i .. i + 3]);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = buf.items });
+}
+
+/// Opt-in window-path diagnostic: when ZOOEE_WINLOG names a file, record
+/// which present path runWindow chose (the GUI demo is subsystem=.Windows,
+/// so it has no console). One line per run; truncates. No-op otherwise.
+fn winlog(init: std.process.Init, comptime fmt: []const u8, args: anytype) void {
+    const path = init.environ_map.get("ZOOEE_WINLOG") orelse return;
+    var buf: [256]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, fmt ++ "\n", args) catch return;
+    std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = path, .data = line }) catch {};
 }
 
 pub const WindowOptions = struct {
