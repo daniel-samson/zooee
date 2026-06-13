@@ -21,6 +21,7 @@ const Size = geometry.Size;
 const Rect = geometry.Rect;
 const RectStyle = style.RectStyle;
 const TextStyle = style.TextStyle;
+const CornerRadius = style.CornerRadius;
 
 pub const Backend = struct {
     ptr: *anyopaque,
@@ -45,6 +46,12 @@ pub const Backend = struct {
 
         push_clip: *const fn (ptr: *anyopaque, rect: Rect) void,
         pop_clip: *const fn (ptr: *anyopaque) void,
+
+        // Rounded-rect clipping (#117). A backend that can clip to per-corner
+        // radii registers this; the rest leave it null and `pushClipRounded`
+        // degrades to a rectangular `pushClip` (corners not cut). Paired with
+        // the same `popClip` — it pushes one clip entry either way.
+        push_clip_rounded: ?*const fn (ptr: *anyopaque, rect: Rect, radius: CornerRadius) void = null,
 
         // Group opacity / offscreen layers (#121). A backend that can
         // composite an isolated layer registers these; the rest leave them
@@ -88,6 +95,13 @@ pub const Backend = struct {
 
     pub fn popClip(self: Backend) void {
         self.vtable.pop_clip(self.ptr);
+    }
+
+    /// Clip subsequent draws to a rounded rect (#117). Backends without
+    /// rounded-clip support fall back to a rectangular clip (corners not cut).
+    /// Pop with `popClip`, exactly like `pushClip`.
+    pub fn pushClipRounded(self: Backend, rect: Rect, radius: CornerRadius) void {
+        if (self.vtable.push_clip_rounded) |f| f(self.ptr, rect, radius) else self.vtable.push_clip(self.ptr, rect);
     }
 
     /// Begin an isolated layer: subsequent draws accumulate into an offscreen
