@@ -44,6 +44,19 @@ pub fn build(b: *std.Build) void {
     const lib = b.addLibrary(.{ .name = "zooee", .linkage = .static, .root_module = mod });
     b.installArtifact(lib);
 
+    // --- clean -------------------------------------------------------------
+    // Removes the install output (zig-out). The incremental cache (.zig-cache)
+    // is held open by the build runner, so it can't be cleared from within a
+    // step — delete it by hand for a fully cold build:
+    //   rm -rf .zig-cache zig-out
+    const clean_step = b.step("clean", "Remove the build output (zig-out)");
+    const rm = if (@import("builtin").os.tag == .windows)
+        b.addSystemCommand(&.{ "cmd", "/c", "if exist zig-out rmdir /s /q zig-out" })
+    else
+        b.addSystemCommand(&.{ "rm", "-rf", "zig-out" });
+    rm.has_side_effects = true; // always run; never cached
+    clean_step.dependOn(&rm.step);
+
     // --- test --------------------------------------------------------------
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mod })).step);
