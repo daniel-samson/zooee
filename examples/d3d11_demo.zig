@@ -152,7 +152,8 @@ pub fn main(init: std.process.Init) !void {
         };
         defer db.deinit();
         try db.setFont(zooee.test_font_ttf);
-        for ([_][]const u8{ "overlap", "nested_clip", "image", "hello_text" }) |name| {
+        const text_scenes = [_][]const u8{ "hello_text", "card", "layout_card" };
+        for ([_][]const u8{ "overlap", "nested_clip", "sides", "image", "hello_text", "card", "layout_card" }) |name| {
             const scene = findScene(name) orelse continue;
             try zooee.fixtures.run(scene, db.interface(), 8);
             const dpx = try db.readPixels();
@@ -173,7 +174,11 @@ pub fn main(init: std.process.Init) !void {
                 if (md > 32) bad += 1;
             }
             const frac = @as(f32, @floatFromInt(bad)) / @as(f32, @floatFromInt(n));
-            const scene_ok = frac < if (std.mem.eql(u8, name, "hello_text")) @as(f32, 0.05) else 0.03;
+            var is_text = false;
+            for (text_scenes) |t| {
+                if (std.mem.eql(u8, name, t)) is_text = true;
+            }
+            const scene_ok = frac < if (is_text) @as(f32, 0.05) else 0.03;
             if (!scene_ok) backend_ok = false;
             try out.print("D3D11 Backend vs raster [{s}]: bad_frac={d:.4} {s}\n", .{ name, frac, if (scene_ok) "PASS" else "FAIL" });
         }
