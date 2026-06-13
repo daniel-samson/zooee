@@ -147,8 +147,11 @@ pub fn main(init: std.process.Init) !void {
         try glb.setFont(zooee.test_font_ttf);
         // hello_text proves GL TEXT through the Backend matches raster
         // (both use the same Poppins rasterizer → near-exact). overlap/
-        // nested_clip are pixel-exact (hard rects + scissor).
-        for ([_][]const u8{ "overlap", "nested_clip", "hello_text" }) |name| {
+        // nested_clip/sides are pixel-exact (hard rects + scissor); `sides`
+        // exercises per-side border colors + a single rounded corner via the
+        // exact renderer. card/layout_card mix border + text.
+        const text_scenes = [_][]const u8{ "hello_text", "card", "layout_card" };
+        for ([_][]const u8{ "overlap", "nested_clip", "sides", "hello_text", "card", "layout_card" }) |name| {
             const scene = findScene(name) orelse continue;
             try zooee.fixtures.run(scene, glb.interface(), 8);
             const glpx = try glb.readPixels();
@@ -171,7 +174,11 @@ pub fn main(init: std.process.Init) !void {
             }
             const frac = @as(f32, @floatFromInt(bad)) / @as(f32, @floatFromInt(n));
             // Text edges can sample 1px differently; allow a small frac.
-            const scene_ok = frac < if (std.mem.eql(u8, name, "hello_text")) @as(f32, 0.05) else 0.03;
+            var is_text = false;
+            for (text_scenes) |t| {
+                if (std.mem.eql(u8, name, t)) is_text = true;
+            }
+            const scene_ok = frac < if (is_text) @as(f32, 0.05) else 0.03;
             if (!scene_ok) backend_ok = false;
             try out.print("GL Backend vs raster [{s}]: bad_frac={d:.4} {s}\n", .{ name, frac, if (scene_ok) "PASS" else "FAIL" });
         }
