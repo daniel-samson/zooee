@@ -132,6 +132,17 @@ pub const Window = struct {
     frame_bgra: std.ArrayList(u8) = .empty,
     frame_width: usize = 0,
     frame_height: usize = 0,
+    /// Render-one-frame callback (set by runWindow). WM_SIZE fires inside the
+    /// modal WM_ENTERSIZEMOVE loop, so calling this there redraws live during
+    /// a resize drag instead of stretching the stale blit. See the macOS twin.
+    redraw_ctx: ?*anyopaque = null,
+    redraw_fn: ?*const fn (?*anyopaque) void = null,
+
+    /// Register the live-resize redraw callback (mirrors macos/x11 setRedraw).
+    pub fn setRedraw(self: *Window, ctx: ?*anyopaque, f: *const fn (?*anyopaque) void) void {
+        self.redraw_ctx = ctx;
+        self.redraw_fn = f;
+    }
 
     const class_name = std.unicode.utf8ToUtf16LeStringLiteral("zooee_window");
     var class_registered = false;
@@ -248,6 +259,9 @@ pub const Window = struct {
                     .width = @floatFromInt(dims & 0xFFFF),
                     .height = @floatFromInt((dims >> 16) & 0xFFFF),
                 } } }) catch {};
+                // Redraw live during the modal WM_ENTERSIZEMOVE loop (which
+                // parks our pump loop) so the frame tracks the size.
+                if (self.redraw_fn) |f| f(self.redraw_ctx);
             },
             WM_MOUSEMOVE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP => {
                 const lp: usize = @bitCast(lparam);
