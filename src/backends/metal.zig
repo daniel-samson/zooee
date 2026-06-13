@@ -236,9 +236,15 @@ pub const MetalLayer = struct {
 
 // --- pipeline / resource helpers --------------------------------------------
 
+// MTLBlendFactor / MTLBlendOperation for standard (straight-alpha) source-over.
+const MTLBlendFactorOne: u64 = 1;
+const MTLBlendFactorSourceAlpha: u64 = 4;
+const MTLBlendFactorOneMinusSourceAlpha: u64 = 5;
+
 /// Compile an MSL source string and build a render pipeline state from its
-/// `v_main`/`f_main` functions, targeting `pixel_format`.
-fn compilePipeline(device: id, source: [*:0]const u8, pixel_format: u64) Error!id {
+/// `v_main`/`f_main` functions, targeting `pixel_format`. With `blend`, the
+/// color attachment uses straight-alpha source-over (AA edges, text, images).
+fn compilePipeline(device: id, source: [*:0]const u8, pixel_format: u64, blend: bool) Error!id {
     var err: id = null;
     const library = msg(id, struct { id, id, *id }, device, sel("newLibraryWithSource:options:error:"), .{ nsString(source), null, &err });
     if (library == null) return error.ShaderFailed;
@@ -252,6 +258,13 @@ fn compilePipeline(device: id, source: [*:0]const u8, pixel_format: u64) Error!i
     const attachments = msg(id, struct {}, desc, sel("colorAttachments"), .{});
     const a0 = msg(id, struct { u64 }, attachments, sel("objectAtIndexedSubscript:"), .{0});
     _ = msg(void, struct { u64 }, a0, sel("setPixelFormat:"), .{pixel_format});
+    if (blend) {
+        _ = msg(void, struct { bool }, a0, sel("setBlendingEnabled:"), .{true});
+        _ = msg(void, struct { u64 }, a0, sel("setSourceRGBBlendFactor:"), .{MTLBlendFactorSourceAlpha});
+        _ = msg(void, struct { u64 }, a0, sel("setDestinationRGBBlendFactor:"), .{MTLBlendFactorOneMinusSourceAlpha});
+        _ = msg(void, struct { u64 }, a0, sel("setSourceAlphaBlendFactor:"), .{MTLBlendFactorOne});
+        _ = msg(void, struct { u64 }, a0, sel("setDestinationAlphaBlendFactor:"), .{MTLBlendFactorOneMinusSourceAlpha});
+    }
 
     const pipeline = msg(id, struct { id, *id }, device, sel("newRenderPipelineStateWithDescriptor:error:"), .{ desc, &err });
     if (pipeline == null) return error.ShaderFailed;
@@ -308,7 +321,7 @@ pub const MetalQuadRenderer = struct {
     pub fn init() Error!MetalQuadRenderer {
         var ctx = try MetalContext.create();
         errdefer ctx.destroy();
-        const pipeline = try compilePipeline(ctx.device, shader, MTLPixelFormatRGBA8Unorm);
+        const pipeline = try compilePipeline(ctx.device, shader, MTLPixelFormatRGBA8Unorm, false);
         const sampler = makeSampler(ctx.device);
         const verts = msg(id, struct { [*]const f32, u64, u64 }, ctx.device, sel("newBufferWithBytes:length:options:"), .{ &quad, @as(u64, @sizeOf(@TypeOf(quad))), 0 });
         return .{ .ctx = ctx, .pipeline = pipeline, .sampler = sampler, .verts = verts };
@@ -387,7 +400,7 @@ pub const MetalRectRenderer = struct {
     pub fn init() Error!MetalRectRenderer {
         var ctx = try MetalContext.create();
         errdefer ctx.destroy();
-        const pipeline = try compilePipeline(ctx.device, shader, MTLPixelFormatRGBA8Unorm);
+        const pipeline = try compilePipeline(ctx.device, shader, MTLPixelFormatRGBA8Unorm, false);
         return .{ .ctx = ctx, .pipeline = pipeline };
     }
 
@@ -408,6 +421,115 @@ pub const MetalRectRenderer = struct {
     /// Render a scene of rects into a w×h target (cleared to `clear`) and read
     /// it back — the headless harness for the self-check and goldens.
     pub fn renderOffscreen(self: *MetalRectRenderer, gpa: std.mem.Allocator, w: u32, h: u32, clear: [4]f32, scene: *const fn (*MetalRectRenderer) void) ![]u8 {
+        const target = try makeTexture(self.ctx.device, w, h, MTLPixelFormatRGBA8Unorm);
+        defer release(target);
+
+        const rpd = msg(id, struct {}, cls("MTLRenderPassDescriptor"), sel("renderPassDescriptor"), .{});
+        const a0 = msg(id, struct { u64 }, msg(id, struct {}, rpd, sel("colorAttachments"), .{}), sel("objectAtIndexedSubscript:"), .{0});
+        _ = msg(void, struct { id }, a0, sel("setTexture:"), .{target});
+        _ = msg(void, struct { u64 }, a0, sel("setLoadAction:"), .{MTLLoadActionClear});
+        _ = msg(void, struct { u64 }, a0, sel("setStoreAction:"), .{MTLStoreActionStore});
+        _ = msg(void, struct { MTLClearColor }, a0, sel("setClearColor:"), .{.{ .red = clear[0], .green = clear[1], .blue = clear[2], .alpha = clear[3] }});
+
+        const cmdbuf = msg(id, struct {}, self.ctx.queue, sel("commandBuffer"), .{});
+        const enc = msg(id, struct { id }, cmdbuf, sel("renderCommandEncoderWithDescriptor:"), .{rpd});
+        _ = msg(void, struct { id }, enc, sel("setRenderPipelineState:"), .{self.pipeline});
+        self.enc = enc;
+        self.vw = @floatFromInt(w);
+        self.vh = @floatFromInt(h);
+        scene(self);
+        self.enc = null;
+        _ = msg(void, struct {}, enc, sel("endEncoding"), .{});
+        _ = msg(void, struct {}, cmdbuf, sel("commit"), .{});
+        _ = msg(void, struct {}, cmdbuf, sel("waitUntilCompleted"), .{});
+
+        const buf = try gpa.alloc(u8, @as(usize, w) * h * 4);
+        errdefer gpa.free(buf);
+        const region: MTLRegion = .{ .origin = .{ .x = 0, .y = 0, .z = 0 }, .size = .{ .width = w, .height = h, .depth = 1 } };
+        _ = msg(void, struct { [*]u8, u64, MTLRegion, u64 }, target, sel("getBytes:bytesPerRow:fromRegion:mipmapLevel:"), .{ buf.ptr, @as(u64, w) * 4, region, 0 });
+        return buf;
+    }
+};
+
+// --- slice 4: rounded rect + border (SDF) -----------------------------------
+
+const RoundUniform = extern struct {
+    rect: [4]f32, // x, y, w, h px
+    viewport: [2]f32,
+    radius: f32,
+    border: f32,
+    bg: [4]f32,
+    border_color: [4]f32,
+};
+
+/// Anti-aliased rounded rect with a uniform border in one blended draw —
+/// matches raster's RectStyle (bg + corner_radius + border), the card/button
+/// case. A signed-distance fragment gives the corners + border; AA over ~1px
+/// via smoothstep (no fwidth — we render at known pixel scale). Ported from
+/// the GL RoundedRectRenderer (#11). Per-side borders are a later refinement.
+pub const MetalRoundedRectRenderer = struct {
+    ctx: MetalContext,
+    pipeline: id,
+    enc: id = null,
+    vw: f32 = 0,
+    vh: f32 = 0,
+
+    const shader =
+        \\#include <metal_stdlib>
+        \\using namespace metal;
+        \\struct RoundU { float4 rect; float2 viewport; float radius; float border; float4 bg; float4 border_color; };
+        \\struct VOut { float4 pos [[position]]; float2 local; };
+        \\vertex VOut v_main(uint vid [[vertex_id]], constant RoundU& u [[buffer(0)]]) {
+        \\    float2 corner[4] = { float2(0,0), float2(1,0), float2(0,1), float2(1,1) };
+        \\    float2 c = corner[vid];
+        \\    float2 px = u.rect.xy + c * u.rect.zw;
+        \\    VOut o;
+        \\    o.pos = float4(px.x / u.viewport.x * 2.0 - 1.0, 1.0 - px.y / u.viewport.y * 2.0, 0, 1);
+        \\    o.local = (c - 0.5) * u.rect.zw;
+        \\    return o;
+        \\}
+        \\static float sdRoundBox(float2 p, float2 b, float r) {
+        \\    float2 q = abs(p) - b + float2(r);
+        \\    return min(max(q.x, q.y), 0.0) + length(max(q, float2(0.0))) - r;
+        \\}
+        \\fragment float4 f_main(VOut in [[stage_in]], constant RoundU& u [[buffer(0)]]) {
+        \\    float2 half_size = u.rect.zw * 0.5;
+        \\    float d = sdRoundBox(in.local, half_size, u.radius);
+        \\    float outer = smoothstep(1.0, -1.0, d);
+        \\    float fill = smoothstep(1.0, -1.0, d + u.border);
+        \\    float4 col = mix(u.border_color, u.bg, fill);
+        \\    col.a *= outer;
+        \\    return col;
+        \\}
+    ;
+
+    pub fn init() Error!MetalRoundedRectRenderer {
+        var ctx = try MetalContext.create();
+        errdefer ctx.destroy();
+        const pipeline = try compilePipeline(ctx.device, shader, MTLPixelFormatRGBA8Unorm, true);
+        return .{ .ctx = ctx, .pipeline = pipeline };
+    }
+
+    pub fn deinit(self: *MetalRoundedRectRenderer) void {
+        release(self.pipeline);
+        self.ctx.destroy();
+    }
+
+    pub fn draw(self: *MetalRoundedRectRenderer, x: f32, y: f32, w: f32, h: f32, radius: f32, border: f32, bg: [4]f32, border_color: [4]f32) void {
+        var u: RoundUniform = .{
+            .rect = .{ x, y, w, h },
+            .viewport = .{ self.vw, self.vh },
+            .radius = radius,
+            .border = border,
+            .bg = bg,
+            .border_color = border_color,
+        };
+        _ = msg(void, struct { *const RoundUniform, u64, u64 }, self.enc, sel("setVertexBytes:length:atIndex:"), .{ &u, @as(u64, @sizeOf(RoundUniform)), 0 });
+        _ = msg(void, struct { *const RoundUniform, u64, u64 }, self.enc, sel("setFragmentBytes:length:atIndex:"), .{ &u, @as(u64, @sizeOf(RoundUniform)), 0 });
+        _ = msg(void, struct { u64, u64, u64 }, self.enc, sel("drawPrimitives:vertexStart:vertexCount:"), .{ MTLPrimitiveTypeTriangleStrip, 0, 4 });
+    }
+
+    pub fn renderOffscreen(self: *MetalRoundedRectRenderer, gpa: std.mem.Allocator, w: u32, h: u32, clear: [4]f32, scene: *const fn (*MetalRoundedRectRenderer) void) ![]u8 {
         const target = try makeTexture(self.ctx.device, w, h, MTLPixelFormatRGBA8Unorm);
         defer release(target);
 
