@@ -143,6 +143,28 @@ const Demo = struct {
         };
         const card_wrap = try arena.create(L.Element);
         card_wrap.* = .{ .margin = .{ .bottom = 12 * scale }, .children = try arena.dupe(*const L.Element, &.{card}) };
+        // Filled path (#120): a gold star icon (concave, even-odd fill).
+        const star_pts = try arena.alloc(zooee.Point, 10);
+        {
+            const cx = 20 * scale;
+            const cy = 20 * scale;
+            var i: usize = 0;
+            while (i < 5) : (i += 1) {
+                const fi: f32 = @floatFromInt(i);
+                const ao = -std.math.pi / 2.0 + fi * (2.0 * std.math.pi / 5.0);
+                const ai = ao + std.math.pi / 5.0;
+                star_pts[i * 2] = .{ .x = cx + 18 * scale * @cos(ao), .y = cy + 18 * scale * @sin(ao) };
+                star_pts[i * 2 + 1] = .{ .x = cx + 7 * scale * @cos(ai), .y = cy + 7 * scale * @sin(ai) };
+            }
+        }
+        const star = try arena.create(L.Element);
+        star.* = .{
+            .width = 40 * scale,
+            .height = 40 * scale,
+            .margin = .{ .bottom = 12 * scale },
+            .path = star_pts,
+            .path_color = Color.rgb(230, 170, 30),
+        };
         // Unicode (#114): accents + em-dash exercise the dynamic glyph atlas.
         const uni = try arena.create(L.Element);
         uni.* = .{
@@ -159,7 +181,7 @@ const Demo = struct {
                 .border = .all(2 * scale, Color.rgb(120, 120, 130)),
                 .corner_radius = .all(10 * scale),
             },
-            .children = try arena.dupe(*const L.Element, &.{ grad_bar, swatches, card_wrap, uni }),
+            .children = try arena.dupe(*const L.Element, &.{ grad_bar, swatches, card_wrap, star, uni }),
         };
         return panel;
     }

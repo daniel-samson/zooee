@@ -186,6 +186,9 @@ pub fn main(init: std.process.Init) !void {
         // tolerance for float-precision differences in the blur gradient.
         const box_shadow_scene: zooee.fixtures.Scene = .{ .name = "box_shadow", .width = 12, .height = 12, .draw = zooee.fixtures.drawBoxShadow };
         if (!(try compareScene(gpa, out, &mb, box_shadow_scene, true))) backend_ok = false;
+        // Filled path (#120): concave star via even-odd, hard edges (0.03).
+        const path_scene: zooee.fixtures.Scene = .{ .name = "path", .width = 10, .height = 10, .draw = zooee.fixtures.drawPath };
+        if (!(try compareScene(gpa, out, &mb, path_scene, false))) backend_ok = false;
     }
 
     try out.flush();
