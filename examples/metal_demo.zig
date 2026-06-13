@@ -164,7 +164,7 @@ pub fn main(init: std.process.Init) !void {
         // Non-ASCII (#114): café — déjà exercises the dynamic glyph atlas.
         // Local scene (not in fixtures.all, which requires cross-harness
         // goldens); proves Metal renders arbitrary Unicode == raster.
-        const unicode_scene: zooee.fixtures.Scene = .{ .name = "unicode_text", .width = 20, .height = 4, .draw = drawUnicode };
+        const unicode_scene: zooee.fixtures.Scene = .{ .name = "unicode_text", .width = 20, .height = 4, .draw = zooee.fixtures.drawUnicode };
         if (!(try compareScene(gpa, out, &mb, unicode_scene, true))) backend_ok = false;
     }
 
@@ -198,10 +198,6 @@ fn compareScene(gpa: std.mem.Allocator, out: *std.Io.Writer, mb: *metal.MetalBac
     const scene_ok = frac < if (is_text) @as(f32, 0.05) else 0.03;
     try out.print("Metal Backend vs raster [{s}]: bad_frac={d:.4} {s}\n", .{ scene.name, frac, if (scene_ok) "PASS" else "FAIL" });
     return scene_ok;
-}
-
-fn drawUnicode(b: zooee.Backend, s: f32) !void {
-    b.drawText(.{ .x = 1 * s, .y = 1 * s }, "café — déjà", .{ .size = 2.5 * s });
 }
 
 fn findScene(name: []const u8) ?zooee.fixtures.Scene {
