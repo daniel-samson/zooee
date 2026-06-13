@@ -150,6 +150,16 @@ pub fn drawRoundedClip(b: Backend, s: f32) !void {
     b.popClip();
 }
 
+/// Box shadow (#119): a filled rect with an offset, blurred shadow behind it.
+/// Not in `all` (cross-harness goldens); the GPU checks build a local Scene and
+/// compare the analytic shadow coverage vs the raster reference.
+pub fn drawBoxShadow(b: Backend, s: f32) !void {
+    b.drawRect(.{ .x = 3 * s, .y = 3 * s, .width = 5 * s, .height = 5 * s }, .{
+        .background = Color.rgb(60, 130, 240),
+        .shadow = .{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 160 }, .dx = 1 * s, .dy = 1.5 * s, .blur = 2 * s },
+    });
+}
+
 /// Layout-integrated effects (#117/#121/#118): a column of three leaves built
 /// through the layout engine — a gradient header, a rounded-clipped fill, and
 /// a half-opacity group — exercising Element.gradient/clip_radius/opacity and
