@@ -30,7 +30,10 @@ pub const RasterBackend = struct {
     height: usize = 0,
     /// RGBA8, row-major.
     pixels: []u8 = &.{},
-    clip_stack: std.ArrayList(IRect) = .empty,
+    clip_stack: std.ArrayList(Clip) = .empty,
+    /// Count of clip entries with a corner radius (#117); the per-pixel rounded
+    /// test in setPixel is skipped entirely when zero.
+    rounded_clips: usize = 0,
     /// Active group-opacity layers (#121). Each entry holds the parent target
     /// `self.pixels` was redirected from, plus the opacity to composite at.
     layers: std.ArrayList(Layer) = .empty,
@@ -85,6 +88,13 @@ pub const RasterBackend = struct {
         }
     };
 
+    /// A clip-stack entry: an integer bounds rect plus, for rounded clips
+    /// (#117), the float rect + per-corner radii its pixels are tested against.
+    const Clip = struct {
+        bounds: IRect,
+        round: ?struct { rect: Rect, radius: style.CornerRadius } = null,
+    };
+
     pub fn init(gpa: std.mem.Allocator) RasterBackend {
         return .{ .gpa = gpa };
     }
@@ -131,6 +141,7 @@ pub const RasterBackend = struct {
         .draw_image = drawImage,
         .push_clip = pushClip,
         .pop_clip = popClip,
+        .push_clip_rounded = pushClipRounded,
         .push_layer = pushLayer,
         .pop_layer = popLayer,
         .create_texture = createTexture,
@@ -149,6 +160,15 @@ pub const RasterBackend = struct {
     }
 
     fn setPixel(self: *RasterBackend, x: i32, y: i32, color: Color) void {
+        if (self.rounded_clips > 0) {
+            const px = @as(f32, @floatFromInt(x)) + 0.5;
+            const py = @as(f32, @floatFromInt(y)) + 0.5;
+            for (self.clip_stack.items) |c| {
+                if (c.round) |r| {
+                    if (!insideRounded(r.rect, r.radius, px, py)) return;
+                }
+            }
+        }
         const i = (@as(usize, @intCast(y)) * self.width + @as(usize, @intCast(x))) * 4;
         if (color.a == 255) {
             self.pixels[i + 0] = color.r;
@@ -172,7 +192,7 @@ pub const RasterBackend = struct {
 
     fn currentClip(self: *const RasterBackend) IRect {
         var clip = self.screenRect();
-        for (self.clip_stack.items) |c| clip = clip.intersect(c);
+        for (self.clip_stack.items) |c| clip = clip.intersect(c.bounds);
         return clip;
     }
 
@@ -382,13 +402,26 @@ pub const RasterBackend = struct {
 
     fn pushClip(ptr: *anyopaque, rect: Rect) void {
         const self = self_(ptr);
-        self.clip_stack.append(self.gpa, IRect.fromRect(rect)) catch {};
+        self.clip_stack.append(self.gpa, .{ .bounds = IRect.fromRect(rect) }) catch {};
+    }
+
+    /// Rounded clip (#117): the bounds rect still bounds iteration; the
+    /// per-corner radii are enforced per-pixel in setPixel.
+    fn pushClipRounded(ptr: *anyopaque, rect: Rect, radius: style.CornerRadius) void {
+        const self = self_(ptr);
+        if (radius.isNone()) return pushClip(ptr, rect);
+        self.clip_stack.append(self.gpa, .{
+            .bounds = IRect.fromRect(rect),
+            .round = .{ .rect = rect, .radius = radius },
+        }) catch return;
+        self.rounded_clips += 1;
     }
 
     fn popClip(ptr: *anyopaque) void {
         const self = self_(ptr);
         std.debug.assert(self.clip_stack.items.len > 0);
-        _ = self.clip_stack.pop();
+        const c = self.clip_stack.pop().?;
+        if (c.round != null) self.rounded_clips -= 1;
     }
 
     /// Redirect draws into a fresh transparent buffer (#121). The buffer is
@@ -592,6 +625,25 @@ test "alpha blending source-over" {
 
     const p = raster.pixelAt(2, 2);
     try testing.expect(p.r > 120 and p.r < 132); // ~127
+}
+
+test "rounded clip cuts the corner of clipped content" {
+    var raster = RasterBackend.init(testing.allocator);
+    defer raster.deinit();
+    const b = raster.interface();
+
+    try b.beginFrame(.{ .width = 16, .height = 16 });
+    b.pushClipRounded(.{ .x = 0, .y = 0, .width = 16, .height = 16 }, .all(6));
+    // A full-viewport fill is clipped to the rounded region.
+    b.drawRect(.{ .x = 0, .y = 0, .width = 16, .height = 16 }, .{ .background = Color.rgb(255, 0, 0) });
+    b.popClip();
+    try b.endFrame();
+
+    try expectPixel(&raster, 0, 0, Color.white); // corner cut by the clip
+    try expectPixel(&raster, 8, 8, Color.rgb(255, 0, 0)); // center kept
+    try expectPixel(&raster, 8, 0, Color.rgb(255, 0, 0)); // top edge midpoint kept
+    try expectPixel(&raster, 15, 15, Color.white); // opposite corner cut
+    try testing.expectEqual(@as(usize, 0), raster.rounded_clips); // balanced pop
 }
 
 test "group opacity composites layer over backdrop" {
