@@ -12,7 +12,7 @@ pub const backends = struct {
     pub const record = @import("backends/record.zig");
     pub const terminal = @import("backends/terminal.zig");
     pub const raster = @import("backends/raster.zig");
-    pub const gl = if (@import("builtin").os.tag == .linux or @import("builtin").os.tag == .macos) @import("backends/gl.zig") else struct {};
+    pub const gl = if (@import("builtin").os.tag == .linux) @import("backends/gl.zig") else struct {};
     pub const d3d11 = if (@import("builtin").os.tag == .windows) @import("backends/d3d11.zig") else struct {};
     pub const metal = if (@import("builtin").os.tag == .macos) @import("backends/metal.zig") else struct {};
 };

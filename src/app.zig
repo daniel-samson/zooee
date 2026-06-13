@@ -48,9 +48,10 @@ const session_mod = if (builtin.os.tag == .windows)
 else
     @import("platform/posix_tty.zig");
 
-/// GL backend (#11) — the GPU-present path for runWindow. Linux/GLX and
-/// macOS/NSOpenGL; empty struct elsewhere so it only compiles where valid.
-const gl_backend = if (builtin.os.tag == .linux or builtin.os.tag == .macos)
+/// GL backend (#11) — the GPU-present path for runWindow on Linux (GLX).
+/// macOS uses Metal (#101) and Windows uses D3D11 (#12), so GL is Linux-only;
+/// empty struct elsewhere so it only compiles where valid.
+const gl_backend = if (builtin.os.tag == .linux)
     @import("backends/gl.zig")
 else
     struct {};
@@ -61,17 +62,17 @@ const d3d_backend = if (builtin.os.tag == .windows)
 else
     struct {};
 
-/// Metal backend (#101) — the primary GPU-present path for runWindow on
-/// macOS (display-synced CAMetalLayer → lag-free live resize). GL stays as
-/// the macOS fallback only via the offscreen self-checks; runWindow prefers
-/// Metal → raster here.
+/// Metal backend (#101) — the GPU-present path for runWindow on macOS
+/// (display-synced CAMetalLayer → lag-free live resize). macOS is Metal-only:
+/// runWindow picks Metal → raster (no GL on macOS).
 const metal_backend = if (builtin.os.tag == .macos)
     @import("backends/metal.zig")
 else
     struct {};
 
-/// OSes whose native window can carry a GL context (the GPU-present path).
-const has_gl_window = builtin.os.tag == .linux or builtin.os.tag == .macos;
+/// OSes whose native window carries a GL context (Linux/GLX only; macOS=Metal,
+/// Windows=D3D11).
+const has_gl_window = builtin.os.tag == .linux;
 /// OSes with a native GPU window backend (GL or D3D11).
 const has_gpu_window = has_gl_window or builtin.os.tag == .windows;
 
@@ -170,8 +171,8 @@ pub fn runWindow(
     // ZOOEE_SOFTWARE forces the CPU raster path (deterministic CI, debugging).
     const want_gpu = has_gpu_window and !opts.force_software and !init.environ_map.contains("ZOOEE_SOFTWARE");
 
-    // macOS uses Metal (#101), not a GL context — so don't create one there.
-    const want_gl_ctx = want_gpu and builtin.os.tag != .macos;
+    // Only Linux carries a GL context on the window (macOS=Metal, Windows=D3D).
+    const want_gl_ctx = want_gpu and builtin.os.tag == .linux;
     const window = try platform.Window.create(gpa, .{ .title = opts.title, .width = opts.width, .height = opts.height, .gl = want_gl_ctx });
     defer window.destroy();
 
