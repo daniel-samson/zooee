@@ -88,6 +88,20 @@ extern "GL" fn glClear(c_uint) void;
 extern "GL" fn glViewport(c_int, c_int, c_uint, c_uint) void;
 extern "GL" fn glFinish() void;
 extern "GL" fn glReadPixels(c_int, c_int, c_uint, c_uint, c_uint, c_uint, [*]u8) void;
+extern "GL" fn glEnable(c_uint) void;
+extern "GL" fn glBlendFunc(c_uint, c_uint) void;
+
+const GL_BLEND: c_uint = 0x0BE2;
+const GL_SRC_ALPHA: c_uint = 0x0302;
+const GL_ONE_MINUS_SRC_ALPHA: c_uint = 0x0303;
+
+/// Source-over blending. Required for SDF coverage/AA to composite
+/// against the background — without it the quad's full area writes color
+/// regardless of fragment alpha.
+fn enableBlend() void {
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+}
 
 // GLX visual attribute tokens.
 const GLX_RGBA: c_int = 4;
@@ -226,6 +240,7 @@ const Gl = struct {
     bindFramebuffer: *const fn (GLenum, GLuint) callconv(.c) void,
     framebufferTexture2D: *const fn (GLenum, GLenum, GLenum, GLuint, GLint) callconv(.c) void,
     checkFramebufferStatus: *const fn (GLenum) callconv(.c) GLenum,
+    uniform1f: *const fn (GLint, f32) callconv(.c) void,
     uniform2f: *const fn (GLint, f32, f32) callconv(.c) void,
     uniform4f: *const fn (GLint, f32, f32, f32, f32) callconv(.c) void,
     getAttribLocation: *const fn (GLuint, [*:0]const u8) callconv(.c) GLint,
@@ -494,6 +509,170 @@ pub fn renderRectsOffscreen(
     scene(rr);
     glFinish();
 
+    const out = try gpa.alloc(u8, @as(usize, w) * h * 4);
+    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, out.ptr);
+    flipY(out, w, h);
+    return out;
+}
+
+// === Slice 4: SDF rounded rects + border ====================================
+// A signed-distance fragment shader gives anti-aliased rounded corners
+// and a uniform border in one draw — matching raster's RectStyle (bg +
+// corner_radius + border). Per-side borders / per-corner radii are a
+// refinement; this covers the common card/button case.
+
+const round_vert: [*:0]const u8 =
+    \\#version 120
+    \\attribute vec2 pos;
+    \\attribute vec2 local;
+    \\uniform vec2 viewport;
+    \\varying vec2 v_local;
+    \\void main() {
+    \\  v_local = local;
+    \\  vec2 ndc = vec2(pos.x / viewport.x * 2.0 - 1.0, 1.0 - pos.y / viewport.y * 2.0);
+    \\  gl_Position = vec4(ndc, 0.0, 1.0);
+    \\}
+;
+// AA over ~1px via smoothstep (no fwidth — avoids GLSL 120 extension needs;
+// we render at known pixel scale). sdRoundBox: standard rounded-box SDF.
+const round_frag: [*:0]const u8 =
+    \\#version 120
+    \\varying vec2 v_local;
+    \\uniform vec2 half_size;
+    \\uniform float radius;
+    \\uniform float border;
+    \\uniform vec4 bg;
+    \\uniform vec4 border_color;
+    \\float sdRoundBox(vec2 p, vec2 b, float r) {
+    \\  vec2 q = abs(p) - b + vec2(r);
+    \\  return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - r;
+    \\}
+    \\void main() {
+    \\  float d = sdRoundBox(v_local, half_size, radius);
+    \\  float outer = smoothstep(1.0, -1.0, d);        // 1 inside shape
+    \\  float fill = smoothstep(1.0, -1.0, d + border); // 1 inside the bg (past border)
+    \\  vec4 col = mix(border_color, bg, fill);
+    \\  col.a *= outer;
+    \\  gl_FragColor = col;
+    \\}
+;
+
+pub const RoundedRectRenderer = struct {
+    gl: Gl,
+    program: GLuint,
+    vao: GLuint,
+    vbo: GLuint,
+    pos_loc: GLuint,
+    local_loc: GLuint,
+    u_viewport: GLint,
+    u_half: GLint,
+    u_radius: GLint,
+    u_border: GLint,
+    u_bg: GLint,
+    u_border_color: GLint,
+    vw: f32 = 0,
+    vh: f32 = 0,
+
+    pub fn init() Error!RoundedRectRenderer {
+        const gl = try Gl.load();
+        const vs = QuadRenderer.compile(gl, GL_VERTEX_SHADER, round_vert) orelse return error.NoContext;
+        const fs = QuadRenderer.compile(gl, GL_FRAGMENT_SHADER, round_frag) orelse return error.NoContext;
+        const prog = gl.createProgram();
+        gl.attachShader(prog, vs);
+        gl.attachShader(prog, fs);
+        gl.linkProgram(prog);
+        var ok: GLint = 0;
+        gl.getProgramiv(prog, GL_LINK_STATUS, &ok);
+        if (ok == 0) return error.NoContext;
+
+        var vao: GLuint = 0;
+        gl.genVertexArrays(1, @ptrCast(&vao));
+        gl.bindVertexArray(vao);
+        var vbo: GLuint = 0;
+        gl.genBuffers(1, @ptrCast(&vbo));
+
+        return .{
+            .gl = gl,
+            .program = prog,
+            .vao = vao,
+            .vbo = vbo,
+            .pos_loc = @intCast(gl.getAttribLocation(prog, "pos")),
+            .local_loc = @intCast(gl.getAttribLocation(prog, "local")),
+            .u_viewport = gl.getUniformLocation(prog, "viewport"),
+            .u_half = gl.getUniformLocation(prog, "half_size"),
+            .u_radius = gl.getUniformLocation(prog, "radius"),
+            .u_border = gl.getUniformLocation(prog, "border"),
+            .u_bg = gl.getUniformLocation(prog, "bg"),
+            .u_border_color = gl.getUniformLocation(prog, "border_color"),
+        };
+    }
+
+    pub fn begin(self: *RoundedRectRenderer, w: u32, h: u32, clear: [4]f32) void {
+        self.vw = @floatFromInt(w);
+        self.vh = @floatFromInt(h);
+        glViewport(0, 0, w, h);
+        glClearColor(clear[0], clear[1], clear[2], clear[3]);
+        glClear(GL_COLOR_BUFFER_BIT);
+        self.gl.useProgram(self.program);
+        self.gl.uniform2f(self.u_viewport, self.vw, self.vh);
+        enableBlend();
+    }
+
+    /// Rounded rect with uniform corner radius + uniform border, pixel
+    /// coords (y-down). bg/border are RGBA 0..1.
+    pub fn draw(self: *RoundedRectRenderer, x: f32, y: f32, w: f32, h: f32, radius: f32, border: f32, bg: [4]f32, border_color: [4]f32) void {
+        const gl = self.gl;
+        const hw = w / 2;
+        const hh = h / 2;
+        const p = 1.0; // AA padding
+        // Interleaved pos.xy, local.xy for the 4 padded corners.
+        const verts = [_]f32{
+            x - p,     y - p,     -(hw + p), -(hh + p),
+            x + w + p, y - p,     hw + p,    -(hh + p),
+            x - p,     y + h + p, -(hw + p), hh + p,
+            x + w + p, y + h + p, hw + p,    hh + p,
+        };
+        gl.bindVertexArray(self.vao);
+        gl.bindBuffer(GL_ARRAY_BUFFER, self.vbo);
+        gl.bufferData(GL_ARRAY_BUFFER, @sizeOf(@TypeOf(verts)), &verts, GL_STATIC_DRAW);
+        gl.vertexAttribPointer(self.pos_loc, 2, GL_FLOAT, GL_FALSE, 16, @ptrFromInt(0));
+        gl.enableVertexAttribArray(self.pos_loc);
+        gl.vertexAttribPointer(self.local_loc, 2, GL_FLOAT, GL_FALSE, 16, @ptrFromInt(8));
+        gl.enableVertexAttribArray(self.local_loc);
+        gl.uniform2f(self.u_half, hw, hh);
+        gl.uniform1f(self.u_radius, radius);
+        gl.uniform1f(self.u_border, border);
+        gl.uniform4f(self.u_bg, bg[0], bg[1], bg[2], bg[3]);
+        gl.uniform4f(self.u_border_color, border_color[0], border_color[1], border_color[2], border_color[3]);
+        gl.drawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
+};
+
+/// Offscreen FBO render for the rounded-rect renderer (mirrors
+/// renderRectsOffscreen). Readback is top-down.
+pub fn renderRoundedOffscreen(
+    gpa: std.mem.Allocator,
+    rr: *RoundedRectRenderer,
+    w: u32,
+    h: u32,
+    clear: [4]f32,
+    scene: *const fn (*RoundedRectRenderer) void,
+) ![]u8 {
+    const gl = rr.gl;
+    var fbo: GLuint = 0;
+    gl.genFramebuffers(1, @ptrCast(&fbo));
+    gl.bindFramebuffer(GL_FRAMEBUFFER, fbo);
+    var target: GLuint = 0;
+    gl.genTextures(1, @ptrCast(&target));
+    gl.bindTexture(GL_TEXTURE_2D, target);
+    gl.texImage2D(GL_TEXTURE_2D, 0, GL_RGBA, @intCast(w), @intCast(h), 0, GL_RGBA, GL_UNSIGNED_BYTE, null);
+    gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    gl.framebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target, 0);
+    if (gl.checkFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) return error.NoContext;
+    rr.begin(w, h, clear);
+    scene(rr);
+    glFinish();
     const out = try gpa.alloc(u8, @as(usize, w) * h * 4);
     glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, out.ptr);
     flipY(out, w, h);

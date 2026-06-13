@@ -83,13 +83,35 @@ pub fn main(init: std.process.Init) !void {
     const rect_ok = approx(rpx[li], 255) and approx(rpx[li + 1], 0) and approx(rpx[li + 2], 0) and
         approx(rpx[ri], 0) and approx(rpx[ri + 1], 0) and approx(rpx[ri + 2], 255);
     try out.print("GL native rects: left=({d},{d},{d}) right=({d},{d},{d}) {s}\n", .{ rpx[li], rpx[li + 1], rpx[li + 2], rpx[ri], rpx[ri + 1], rpx[ri + 2], if (rect_ok) "PASS" else "FAIL" });
+
+    // Slice 4: SDF rounded rect + border. White rounded card, blue border,
+    // on black. center=white(bg), mid-left edge=blue(border), corner=cut.
+    var rrr = gl.RoundedRectRenderer.init() catch |err| {
+        try out.print("GL-ROUND-INIT-FAILED: {t}\n", .{err});
+        try out.flush();
+        std.process.exit(1);
+    };
+    const sw: u32 = 40;
+    const sh: u32 = 32;
+    const spx = try gl.renderRoundedOffscreen(gpa, &rrr, sw, sh, .{ 0, 0, 0, 1 }, &roundedScene);
+    const ci = ((sh / 2) * sw + sw / 2) * 4; // center → bg white
+    const ei = ((sh / 2) * sw + 5) * 4; // mid-left edge → border blue
+    const corner = (5 * sw + 5) * 4; // near top-left corner → cut (black)
+    const round_ok = approx(spx[ci], 255) and approx(spx[ci + 1], 255) and approx(spx[ci + 2], 255) and
+        spx[ei] < 40 and spx[ei + 2] > 200 and
+        spx[corner] < 40 and spx[corner + 2] < 70;
+    try out.print("GL rounded+border: center=({d},{d},{d}) edge=({d},{d},{d}) corner=({d},{d},{d}) {s}\n", .{ spx[ci], spx[ci + 1], spx[ci + 2], spx[ei], spx[ei + 1], spx[ei + 2], spx[corner], spx[corner + 1], spx[corner + 2], if (round_ok) "PASS" else "FAIL" });
     try out.flush();
-    if (!ok or !quad_ok or !rect_ok) std.process.exit(1);
+    if (!ok or !quad_ok or !rect_ok or !round_ok) std.process.exit(1);
 }
 
 fn rectScene(rr: *gl.RectRenderer) void {
     rr.fillRect(0, 0, rr.vw / 2, rr.vh, .{ 1, 0, 0, 1 }); // left half red
     rr.fillRect(rr.vw / 2, 0, rr.vw / 2, rr.vh, .{ 0, 0, 1, 1 }); // right half blue
+}
+
+fn roundedScene(rr: *gl.RoundedRectRenderer) void {
+    rr.draw(4, 4, 32, 24, 6, 3, .{ 1, 1, 1, 1 }, .{ 0, 0.47, 1, 1 });
 }
 
 fn approx(a: u8, b: u8) bool {
