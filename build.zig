@@ -45,6 +45,12 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .macos) {
         mod.linkFramework("AppKit", .{});
     }
+    if (target.result.os.tag == .linux) {
+        // Xlib is the Linux platform windowing API (like AppKit/user32),
+        // dynamically linked — no bytes in our binary.
+        mod.link_libc = true;
+        mod.linkSystemLibrary("X11", .{});
+    }
     // Test font for the font pipeline (#10): OFL Poppins, tests/goldens only.
     mod.addAnonymousImport("poppins", .{
         .root_source_file = b.path("testdata/fonts/Poppins-Regular.ttf"),
@@ -182,10 +188,9 @@ pub fn build(b: *std.Build) void {
     const visual_step = b.step("visual-test", "Render scene fixtures and compare against PPM goldens");
     visual_step.dependOn(&run_visual_test.step);
 
-    // GUI demo: on macOS assembled as a .app bundle by plain `zig build`
-    // (Daniel's requirement, #9 — bare Mach-O binaries are second-class
-    // citizens); on Windows a GUI-subsystem exe.
-    if (target.result.os.tag == .macos or target.result.os.tag == .windows) {
+    // GUI demo: macOS → .app bundle by plain `zig build` (Daniel's
+    // requirement, #9); Windows → GUI-subsystem exe; Linux → X11 exe.
+    if (target.result.os.tag == .macos or target.result.os.tag == .windows or target.result.os.tag == .linux) {
         const gui_demo = b.addExecutable(.{
             .name = "zooee-gui-demo",
             .root_module = b.createModule(.{
@@ -198,6 +203,9 @@ pub fn build(b: *std.Build) void {
 
         if (target.result.os.tag == .windows) {
             gui_demo.subsystem = .Windows;
+            b.installArtifact(gui_demo);
+        }
+        if (target.result.os.tag == .linux) {
             b.installArtifact(gui_demo);
         }
 

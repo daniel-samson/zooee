@@ -116,5 +116,5 @@ const Demo = struct {
 
 pub fn main(init: std.process.Init) !void {
     var demo: Demo = .{};
-    try zooee.app.runWindow(Demo, Msg, &demo, init, .{ .title = "zooee — native window", .width = 520, .height = 320 });
+    try zooee.app.runWindow(Demo, Msg, &demo, init, .{ .title = "zooee - native window", .width = 520, .height = 320 });
 }

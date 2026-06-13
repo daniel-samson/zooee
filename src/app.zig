@@ -28,11 +28,13 @@ pub const Command = enum { none, redraw, quit };
 /// Native window platform for the GUI runner. X11 is the #9 follow-up;
 /// unsupported OSes get an empty struct (runWindow @compileErrors before
 /// touching it). Comptime if only analyzes the taken arm.
-const has_window_platform = builtin.os.tag == .windows or builtin.os.tag == .macos;
+const has_window_platform = builtin.os.tag == .windows or builtin.os.tag == .macos or builtin.os.tag == .linux;
 const WindowPlatform = if (builtin.os.tag == .windows)
     @import("platform/win32.zig")
 else if (builtin.os.tag == .macos)
     @import("platform/macos.zig")
+else if (builtin.os.tag == .linux)
+    @import("platform/x11.zig")
 else
     struct {};
 
