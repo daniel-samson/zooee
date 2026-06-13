@@ -236,8 +236,8 @@ pub fn main(init: std.process.Init) !void {
             // DIAG: sample blue-over-red (36,30), blue-over-white (60,30), red-only (16,30).
             const W = 80;
             inline for ([_][2]usize{ .{ 36, 30 }, .{ 60, 30 }, .{ 16, 30 } }) |pt| {
-                const i = (pt[1] * W + pt[0]) * 4;
-                try out.print("  DIAG ({d},{d}) d3d=({d},{d},{d}) raster=({d},{d},{d})\n", .{ pt[0], pt[1], dpx[i], dpx[i + 1], dpx[i + 2], ras.pixels[i], ras.pixels[i + 1], ras.pixels[i + 2] });
+                const di = (pt[1] * W + pt[0]) * 4;
+                try out.print("  DIAG ({d},{d}) d3d=({d},{d},{d}) raster=({d},{d},{d})\n", .{ pt[0], pt[1], dpx[di], dpx[di + 1], dpx[di + 2], ras.pixels[di], ras.pixels[di + 1], ras.pixels[di + 2] });
             }
         }
         // Gradients (#118): linear fills via the gradient pipeline, vs raster.
