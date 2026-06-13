@@ -1339,6 +1339,134 @@ const D3dImageRenderer = struct {
     }
 };
 
+// === Group opacity / offscreen layers (#121) ================================
+// Mirrors the Metal/GL layer compositors: a full-viewport textured quad whose
+// PS samples the layer SRV and emits (rgb, a*opacity) under standard
+// source-over blend, matching raster's straight-alpha popLayer.
+
+const comp_hlsl =
+    \\cbuffer CB : register(b0) { float2 viewport; float opacity; float pad; };
+    \\struct VSIn  { float2 pos : POSITION; float2 uv : TEXCOORD; };
+    \\struct VSOut { float4 pos : SV_POSITION; float2 uv : TEXCOORD; };
+    \\VSOut VSMain(VSIn i) {
+    \\  VSOut o;
+    \\  o.pos = float4(i.pos.x / viewport.x * 2.0 - 1.0, 1.0 - i.pos.y / viewport.y * 2.0, 0, 1);
+    \\  o.uv = i.uv;
+    \\  return o;
+    \\}
+    \\Texture2D tex : register(t0);
+    \\SamplerState smp : register(s0);
+    \\float4 PSMain(VSOut i) : SV_TARGET { float4 c = tex.Sample(smp, i.uv); return float4(c.rgb, c.a * opacity); }
+;
+const CompCB = extern struct { vw: f32, vh: f32, opacity: f32, pad: f32 = 0 };
+
+fn srcOverBlend(device: *IDevice) Error!*IBlendState {
+    var bdesc: D3D11_BLEND_DESC = .{ .render_target = [_]D3D11_RENDER_TARGET_BLEND_DESC{.{}} ** 8 };
+    bdesc.render_target[0] = .{
+        .blend_enable = 1,
+        .src_blend = D3D11_BLEND_SRC_ALPHA,
+        .dest_blend = D3D11_BLEND_INV_SRC_ALPHA,
+        .blend_op = D3D11_BLEND_OP_ADD,
+        .src_blend_alpha = D3D11_BLEND_ONE,
+        .dest_blend_alpha = D3D11_BLEND_INV_SRC_ALPHA,
+        .blend_op_alpha = D3D11_BLEND_OP_ADD,
+    };
+    var blend: ?*IBlendState = null;
+    if (!ok(device.vtbl.CreateBlendState(device, &bdesc, &blend)) or blend == null) return error.ShaderFailed;
+    return blend.?;
+}
+
+pub const D3dLayerCompositor = struct {
+    device: *IDevice,
+    context: *IContext,
+    vs: *IVertexShader,
+    ps: *IPixelShader,
+    layout: *IInputLayout,
+    raster: *IRasterizerState,
+    sampler: *ISampler,
+    blend: *IBlendState,
+
+    pub fn init(device: *IDevice, context: *IContext) Error!D3dLayerCompositor {
+        const d3d_compile = loadD3DCompile() orelse return error.ShaderFailed;
+        const vs_blob = compileSrc(d3d_compile, comp_hlsl, "VSMain", "vs_4_0") orelse return error.ShaderFailed;
+        defer release(vs_blob);
+        const ps_blob = compileSrc(d3d_compile, comp_hlsl, "PSMain", "ps_4_0") orelse return error.ShaderFailed;
+        defer release(ps_blob);
+        const vs_ptr = vs_blob.vtbl.GetBufferPointer(vs_blob).?;
+        const vs_len = vs_blob.vtbl.GetBufferSize(vs_blob);
+        var vs: ?*IVertexShader = null;
+        if (!ok(device.vtbl.CreateVertexShader(device, vs_ptr, vs_len, null, &vs)) or vs == null) return error.ShaderFailed;
+        var ps: ?*IPixelShader = null;
+        if (!ok(device.vtbl.CreatePixelShader(device, ps_blob.vtbl.GetBufferPointer(ps_blob).?, ps_blob.vtbl.GetBufferSize(ps_blob), null, &ps)) or ps == null) return error.ShaderFailed;
+        var elems = [_]D3D11_INPUT_ELEMENT_DESC{
+            .{ .semantic_name = "POSITION", .format = DXGI_FORMAT_R32G32_FLOAT, .aligned_byte_offset = 0 },
+            .{ .semantic_name = "TEXCOORD", .format = DXGI_FORMAT_R32G32_FLOAT, .aligned_byte_offset = 8 },
+        };
+        var layout: ?*IInputLayout = null;
+        if (!ok(device.vtbl.CreateInputLayout(device, &elems, 2, vs_ptr, vs_len, &layout)) or layout == null) return error.ShaderFailed;
+        var rdesc: D3D11_RASTERIZER_DESC = .{ .scissor_enable = 0 };
+        var raster: ?*IRasterizerState = null;
+        if (!ok(device.vtbl.CreateRasterizerState(device, &rdesc, &raster)) or raster == null) return error.ShaderFailed;
+        var sdesc: D3D11_SAMPLER_DESC = .{ .filter = D3D11_FILTER_MIN_MAG_MIP_POINT, .address_u = D3D11_TEXTURE_ADDRESS_CLAMP, .address_v = D3D11_TEXTURE_ADDRESS_CLAMP, .address_w = D3D11_TEXTURE_ADDRESS_CLAMP };
+        var sampler: ?*ISampler = null;
+        if (!ok(device.vtbl.CreateSamplerState(device, &sdesc, &sampler)) or sampler == null) return error.ShaderFailed;
+        const blend = try srcOverBlend(device);
+        return .{ .device = device, .context = context, .vs = vs.?, .ps = ps.?, .layout = layout.?, .raster = raster.?, .sampler = sampler.?, .blend = blend };
+    }
+
+    pub fn deinit(self: *D3dLayerCompositor) void {
+        release(self.blend);
+        release(self.sampler);
+        release(self.raster);
+        release(self.layout);
+        release(self.ps);
+        release(self.vs);
+    }
+
+    /// Composite the whole `srv` over `rtv` at `opacity`.
+    pub fn composite(self: *D3dLayerCompositor, rtv: *IRtv, vw: f32, vh: f32, srv: *ISrv, opacity: f32) Error!void {
+        const dev = self.device;
+        const ctx = self.context;
+        const verts = [_]f32{ 0, 0, 0, 0, vw, 0, 1, 0, 0, vh, 0, 1, vw, vh, 1, 1 };
+        var vb_data: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = &verts };
+        var vb_desc: D3D11_BUFFER_DESC = .{ .byte_width = @sizeOf(@TypeOf(verts)), .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_VERTEX_BUFFER };
+        var vb: ?*IBuffer = null;
+        if (!ok(dev.vtbl.CreateBuffer(dev, &vb_desc, &vb_data, &vb)) or vb == null) return error.ShaderFailed;
+        defer release(vb.?);
+        var cbv: CompCB = .{ .vw = vw, .vh = vh, .opacity = opacity };
+        var cb_data: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = &cbv };
+        var cb_desc: D3D11_BUFFER_DESC = .{ .byte_width = @sizeOf(CompCB), .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_CONSTANT_BUFFER };
+        var cb: ?*IBuffer = null;
+        if (!ok(dev.vtbl.CreateBuffer(dev, &cb_desc, &cb_data, &cb)) or cb == null) return error.ShaderFailed;
+        defer release(cb.?);
+
+        var vp: D3D11_VIEWPORT = .{ .width = vw, .height = vh };
+        ctx.vtbl.RSSetViewports(ctx, 1, &vp);
+        ctx.vtbl.RSSetState(ctx, self.raster);
+        ctx.vtbl.OMSetBlendState(ctx, self.blend, null, 0xffffffff);
+        var rtv_slot: ?*IRtv = rtv;
+        ctx.vtbl.OMSetRenderTargets(ctx, 1, &rtv_slot, null);
+        ctx.vtbl.IASetInputLayout(ctx, self.layout);
+        var vb_slot: ?*IBuffer = vb.?;
+        const stride: UINT = 16;
+        const offset: UINT = 0;
+        ctx.vtbl.IASetVertexBuffers(ctx, 0, 1, &vb_slot, &stride, &offset);
+        ctx.vtbl.IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        ctx.vtbl.VSSetShader(ctx, self.vs, null, 0);
+        var cb_slot: ?*IBuffer = cb.?;
+        ctx.vtbl.VSSetConstantBuffers(ctx, 0, 1, &cb_slot);
+        ctx.vtbl.PSSetShader(ctx, self.ps, null, 0);
+        var srv_slot: ?*ISrv = srv;
+        ctx.vtbl.PSSetShaderResources(ctx, 0, 1, &srv_slot);
+        var samp_slot: ?*ISampler = self.sampler;
+        ctx.vtbl.PSSetSamplers(ctx, 0, 1, &samp_slot);
+        ctx.vtbl.Draw(ctx, 4, 0);
+        // Unbind the SRV so the texture can be released / reused as an RT.
+        var none: ?*ISrv = null;
+        ctx.vtbl.PSSetShaderResources(ctx, 0, 1, &none);
+    }
+};
+
 // === Slice 7: exact rect renderer (per-side borders, per-corner radii) ======
 // Ports gl.zig's ExactRectRenderer: a pixel shader that replicates
 // raster.zig's insideRounded() + borderColorAt() per fragment (pixel-center
@@ -1543,6 +1671,10 @@ pub const D3dExactRectRenderer = struct {
 
 const ScissorRect = struct { x0: i32, y0: i32, x1: i32, y1: i32 };
 
+/// A pushed group-opacity layer (#121): the rtv draws were redirected from,
+/// the offscreen layer texture + its views, and the composite opacity.
+const LayerState = struct { parent_rtv: *IRtv, tex: *ITexture2D, rtv: *IRtv, srv: *ISrv, opacity: f32 };
+
 fn col(c: style.Color) [4]f32 {
     return .{
         @as(f32, @floatFromInt(c.r)) / 255,
@@ -1559,9 +1691,14 @@ pub const D3dBackend = struct {
     exact: D3dExactRectRenderer,
     image: D3dImageRenderer,
     grad: D3dGradientRenderer,
+    comp: D3dLayerCompositor,
     font: ?ttf.Font = null,
     glyphs: std.AutoHashMapUnmanaged(u32, D3dGlyphRenderer) = .empty,
     clips: std.ArrayList(ScissorRect) = .empty,
+    /// The render target current draws go to: the frame RT, or a layer's RT
+    /// while a group-opacity layer (#121) is active.
+    cur_rtv: ?*IRtv = null,
+    layers: std.ArrayList(LayerState) = .empty,
 
     /// Headless D3D11 Backend over an offscreen render target (golden tests).
     pub fn initOffscreen(gpa: std.mem.Allocator) !D3dBackend {
@@ -1587,7 +1724,37 @@ pub const D3dBackend = struct {
             .exact = try D3dExactRectRenderer.init(off.device, off.context, true),
             .image = try D3dImageRenderer.init(off.device, off.context),
             .grad = try D3dGradientRenderer.init(off.device, off.context, true),
+            .comp = try D3dLayerCompositor.init(off.device, off.context),
         };
+    }
+
+    /// Create a transparent-cleared offscreen layer texture with both an RTV
+    /// (to draw into) and an SRV (to composite from), at the frame size.
+    fn createLayer(self: *D3dBackend) Error!struct { tex: *ITexture2D, rtv: *IRtv, srv: *ISrv } {
+        const dev = self.off.device;
+        var tdesc: D3D11_TEXTURE2D_DESC = .{
+            .width = self.off.width,
+            .height = self.off.height,
+            .format = DXGI_FORMAT_R8G8B8A8_UNORM,
+            .usage = D3D11_USAGE_DEFAULT,
+            .bind_flags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
+        };
+        var tex: ?*ITexture2D = null;
+        if (!ok(dev.vtbl.CreateTexture2D(dev, &tdesc, null, &tex)) or tex == null) return error.NoBackBuffer;
+        errdefer release(tex.?);
+        var rtv: ?*IRtv = null;
+        if (!ok(dev.vtbl.CreateRenderTargetView(dev, tex.?, null, &rtv)) or rtv == null) return error.NoRtv;
+        errdefer release(rtv.?);
+        var srv: ?*ISrv = null;
+        if (!ok(dev.vtbl.CreateShaderResourceView(dev, tex.?, null, &srv)) or srv == null) return error.ShaderFailed;
+        const transparent = [4]f32{ 0, 0, 0, 0 };
+        self.off.context.vtbl.ClearRenderTargetView(self.off.context, rtv.?, &transparent);
+        return .{ .tex = tex.?, .rtv = rtv.?, .srv = srv.? };
+    }
+
+    /// The render target current draws should target (layer RT or frame RT).
+    fn target(self: *D3dBackend) *IRtv {
+        return self.cur_rtv orelse self.off.rtv;
     }
 
     /// Copy the rendered frame to the swapchain's back buffer and present it
@@ -1605,6 +1772,13 @@ pub const D3dBackend = struct {
         while (it.next()) |g| g.deinit();
         self.glyphs.deinit(self.gpa);
         self.clips.deinit(self.gpa);
+        for (self.layers.items) |l| {
+            release(l.srv);
+            release(l.rtv);
+            release(l.tex);
+        }
+        self.layers.deinit(self.gpa);
+        self.comp.deinit();
         self.image.deinit();
         self.grad.deinit();
         self.exact.deinit();
@@ -1633,6 +1807,8 @@ pub const D3dBackend = struct {
         .draw_image = drawImage,
         .push_clip = pushClip,
         .pop_clip = popClip,
+        .push_layer = pushLayer,
+        .pop_layer = popLayer,
         .create_texture = createTexture,
         .destroy_texture = destroyTexture,
         .measure_text = measureText,
@@ -1654,6 +1830,7 @@ pub const D3dBackend = struct {
         const h: u32 = @intFromFloat(@max(1, @round(viewport.height)));
         self.off.resize(w, h) catch return error.OutOfMemory;
         self.off.clear(1, 1, 1, 1); // match raster's white clear
+        self.cur_rtv = self.off.rtv;
         self.clips.clearRetainingCapacity();
         self.fullScissor();
     }
@@ -1667,18 +1844,18 @@ pub const D3dBackend = struct {
         const w: f32 = @floatFromInt(self.off.width);
         const h: f32 = @floatFromInt(self.off.height);
         if (rs.gradient) |g| {
-            self.grad.fill(self.off.rtv, w, h, rect, if (g.axis == .vertical) 1 else 0, col(g.from), col(g.to)) catch {};
+            self.grad.fill(self.target(), w, h, rect, if (g.axis == .vertical) 1 else 0, col(g.from), col(g.to)) catch {};
             return;
         }
         if (rs.corner_radius.isNone() and rs.border.isNone()) {
             if (rs.background) |bg| {
-                self.rect.fillRect(self.off.rtv, w, h, rect.x, rect.y, rect.width, rect.height, col(bg)) catch {};
+                self.rect.fillRect(self.target(), w, h, rect.x, rect.y, rect.width, rect.height, col(bg)) catch {};
             }
             return;
         }
         // bg + border + radius via the exact renderer: per-side borders +
         // per-corner radii, pixel-exact vs raster (hard-edged).
-        self.exact.draw(self.off.rtv, w, h, rect, rs) catch {};
+        self.exact.draw(self.target(), w, h, rect, rs) catch {};
     }
 
     fn glyphFor(self: *D3dBackend, size_px: u16) ?*D3dGlyphRenderer {
@@ -1696,7 +1873,7 @@ pub const D3dBackend = struct {
         const w: f32 = @floatFromInt(self.off.width);
         const h: f32 = @floatFromInt(self.off.height);
         const color = ts.color orelse style.Color.black;
-        gr.drawText(self.gpa, self.off.rtv, w, h, origin.x, origin.y, text, col(color)) catch {};
+        gr.drawText(self.gpa, self.target(), w, h, origin.x, origin.y, text, col(color)) catch {};
     }
 
     fn drawImage(ptr: *anyopaque, rect: geometry.Rect, texture: *Backend.Texture) void {
@@ -1704,7 +1881,7 @@ pub const D3dBackend = struct {
         const w: f32 = @floatFromInt(self.off.width);
         const h: f32 = @floatFromInt(self.off.height);
         const srv: *ISrv = @ptrCast(@alignCast(texture));
-        self.image.draw(self.off.rtv, w, h, rect, srv) catch {};
+        self.image.draw(self.target(), w, h, rect, srv) catch {};
     }
 
     fn applyScissor(self: *D3dBackend) void {
@@ -1735,6 +1912,32 @@ pub const D3dBackend = struct {
         const self = self_(ptr);
         if (self.clips.items.len > 0) _ = self.clips.pop();
         self.applyScissor();
+    }
+
+    /// Redirect draws into a fresh transparent offscreen layer (#121); popLayer
+    /// composites it back over the parent RT at the layer opacity.
+    fn pushLayer(ptr: *anyopaque, opacity: f32) Backend.Error!void {
+        const self = self_(ptr);
+        const l = self.createLayer() catch return error.OutOfMemory;
+        self.layers.append(self.gpa, .{ .parent_rtv = self.target(), .tex = l.tex, .rtv = l.rtv, .srv = l.srv, .opacity = opacity }) catch {
+            release(l.srv);
+            release(l.rtv);
+            release(l.tex);
+            return error.OutOfMemory;
+        };
+        self.cur_rtv = l.rtv;
+    }
+
+    fn popLayer(ptr: *anyopaque) void {
+        const self = self_(ptr);
+        const l = self.layers.pop() orelse return;
+        self.cur_rtv = l.parent_rtv;
+        const w: f32 = @floatFromInt(self.off.width);
+        const h: f32 = @floatFromInt(self.off.height);
+        self.comp.composite(l.parent_rtv, w, h, l.srv, l.opacity) catch {};
+        release(l.srv);
+        release(l.rtv);
+        release(l.tex);
     }
 
     fn createTexture(ptr: *anyopaque, width: u32, height: u32, rgba: []const u8) Backend.Error!*Backend.Texture {
