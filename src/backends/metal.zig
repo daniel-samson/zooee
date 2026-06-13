@@ -354,3 +354,86 @@ pub const MetalQuadRenderer = struct {
         return buf;
     }
 };
+
+// --- slice 3: native rect geometry ------------------------------------------
+
+const RectUniform = extern struct { rect: [4]f32, viewport: [2]f32 }; // rect = x,y,w,h px
+
+/// Fills axis-aligned rects in pixel coordinates (origin top-left) — the
+/// workhorse for backgrounds and solid fills. A unit quad is transformed to
+/// the rect in the vertex shader; the fragment is a flat color. Drives an
+/// externally-supplied render encoder so the Backend can batch many fills
+/// into one pass.
+pub const MetalRectRenderer = struct {
+    ctx: MetalContext,
+    pipeline: id,
+    // Transient per-pass state, set by renderOffscreen / the Backend.
+    enc: id = null,
+    vw: f32 = 0,
+    vh: f32 = 0,
+
+    const shader =
+        \\#include <metal_stdlib>
+        \\using namespace metal;
+        \\struct RectU { float4 rect; float2 viewport; };
+        \\vertex float4 v_main(uint vid [[vertex_id]], constant RectU& u [[buffer(0)]]) {
+        \\    float2 corner[4] = { float2(0,0), float2(1,0), float2(0,1), float2(1,1) };
+        \\    float2 px = u.rect.xy + corner[vid] * u.rect.zw;
+        \\    return float4(px.x / u.viewport.x * 2.0 - 1.0, 1.0 - px.y / u.viewport.y * 2.0, 0, 1);
+        \\}
+        \\fragment float4 f_main(constant float4& color [[buffer(0)]]) { return color; }
+    ;
+
+    pub fn init() Error!MetalRectRenderer {
+        var ctx = try MetalContext.create();
+        errdefer ctx.destroy();
+        const pipeline = try compilePipeline(ctx.device, shader, MTLPixelFormatRGBA8Unorm);
+        return .{ .ctx = ctx, .pipeline = pipeline };
+    }
+
+    pub fn deinit(self: *MetalRectRenderer) void {
+        release(self.pipeline);
+        self.ctx.destroy();
+    }
+
+    /// Fill a pixel-space rect with a solid RGBA color on the active encoder.
+    pub fn fillRect(self: *MetalRectRenderer, x: f32, y: f32, w: f32, h: f32, color: [4]f32) void {
+        var u: RectUniform = .{ .rect = .{ x, y, w, h }, .viewport = .{ self.vw, self.vh } };
+        var c = color;
+        _ = msg(void, struct { *const RectUniform, u64, u64 }, self.enc, sel("setVertexBytes:length:atIndex:"), .{ &u, @as(u64, @sizeOf(RectUniform)), 0 });
+        _ = msg(void, struct { *const [4]f32, u64, u64 }, self.enc, sel("setFragmentBytes:length:atIndex:"), .{ &c, 16, 0 });
+        _ = msg(void, struct { u64, u64, u64 }, self.enc, sel("drawPrimitives:vertexStart:vertexCount:"), .{ MTLPrimitiveTypeTriangleStrip, 0, 4 });
+    }
+
+    /// Render a scene of rects into a w×h target (cleared to `clear`) and read
+    /// it back — the headless harness for the self-check and goldens.
+    pub fn renderOffscreen(self: *MetalRectRenderer, gpa: std.mem.Allocator, w: u32, h: u32, clear: [4]f32, scene: *const fn (*MetalRectRenderer) void) ![]u8 {
+        const target = try makeTexture(self.ctx.device, w, h, MTLPixelFormatRGBA8Unorm);
+        defer release(target);
+
+        const rpd = msg(id, struct {}, cls("MTLRenderPassDescriptor"), sel("renderPassDescriptor"), .{});
+        const a0 = msg(id, struct { u64 }, msg(id, struct {}, rpd, sel("colorAttachments"), .{}), sel("objectAtIndexedSubscript:"), .{0});
+        _ = msg(void, struct { id }, a0, sel("setTexture:"), .{target});
+        _ = msg(void, struct { u64 }, a0, sel("setLoadAction:"), .{MTLLoadActionClear});
+        _ = msg(void, struct { u64 }, a0, sel("setStoreAction:"), .{MTLStoreActionStore});
+        _ = msg(void, struct { MTLClearColor }, a0, sel("setClearColor:"), .{.{ .red = clear[0], .green = clear[1], .blue = clear[2], .alpha = clear[3] }});
+
+        const cmdbuf = msg(id, struct {}, self.ctx.queue, sel("commandBuffer"), .{});
+        const enc = msg(id, struct { id }, cmdbuf, sel("renderCommandEncoderWithDescriptor:"), .{rpd});
+        _ = msg(void, struct { id }, enc, sel("setRenderPipelineState:"), .{self.pipeline});
+        self.enc = enc;
+        self.vw = @floatFromInt(w);
+        self.vh = @floatFromInt(h);
+        scene(self);
+        self.enc = null;
+        _ = msg(void, struct {}, enc, sel("endEncoding"), .{});
+        _ = msg(void, struct {}, cmdbuf, sel("commit"), .{});
+        _ = msg(void, struct {}, cmdbuf, sel("waitUntilCompleted"), .{});
+
+        const buf = try gpa.alloc(u8, @as(usize, w) * h * 4);
+        errdefer gpa.free(buf);
+        const region: MTLRegion = .{ .origin = .{ .x = 0, .y = 0, .z = 0 }, .size = .{ .width = w, .height = h, .depth = 1 } };
+        _ = msg(void, struct { [*]u8, u64, MTLRegion, u64 }, target, sel("getBytes:bytesPerRow:fromRegion:mipmapLevel:"), .{ buf.ptr, @as(u64, w) * 4, region, 0 });
+        return buf;
+    }
+};
