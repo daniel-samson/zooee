@@ -1020,27 +1020,14 @@ pub fn renderRoundedOffscreen(
 
 const ttf = @import("../font/ttf.zig");
 const grast = @import("../font/raster.zig");
+const gatlas = @import("../font/atlas.zig");
 
 const GL_TRIANGLES: GLenum = 0x0004;
-const atlas_w: u32 = 256;
-const first_cp: u21 = 32;
-const last_cp: u21 = 126;
-const glyph_count = last_cp - first_cp + 1;
-
-const GlyphEntry = struct {
-    u0: f32 = 0,
-    v0: f32 = 0,
-    u1: f32 = 0,
-    v1: f32 = 0,
-    w: f32 = 0,
-    h: f32 = 0,
-    x_off: f32 = 0,
-    y_off: f32 = 0,
-    advance: f32 = 0,
-};
+const atlas_dim: u32 = 512;
 
 pub const GlyphRenderer = struct {
     gl: Gl,
+    gpa: std.mem.Allocator,
     program: GLuint,
     vao: GLuint,
     vbo: GLuint,
@@ -1049,8 +1036,7 @@ pub const GlyphRenderer = struct {
     uv_loc: GLuint,
     u_viewport: GLint,
     u_color: GLint,
-    entries: [glyph_count]GlyphEntry,
-    ascent: f32,
+    atlas: gatlas.Atlas,
     vw: f32 = 0,
     vh: f32 = 0,
 
@@ -1066,69 +1052,8 @@ pub const GlyphRenderer = struct {
         gl.getProgramiv(prog, GL_LINK_STATUS, &ok);
         if (ok == 0) return error.NoContext;
 
-        // Rasterize glyphs, shelf-pack, build the atlas RGBA.
-        var entries: [glyph_count]GlyphEntry = undefined;
-        var bmps: [glyph_count]?grast.Bitmap = @splat(null);
-        defer for (&bmps) |*b| if (b.*) |*bb| bb.deinit(gpa);
-
-        const fscale = size_px / @as(f32, @floatFromInt(font.units_per_em));
-        var cx: u32 = 1;
-        var cy: u32 = 1;
-        var row_h: u32 = 0;
-        var atlas_h: u32 = 1;
-        for (0..glyph_count) |i| {
-            const cp: u21 = first_cp + @as(u21, @intCast(i));
-            const gi = font.glyphIndex(cp);
-            const adv = @as(f32, @floatFromInt(font.hMetrics(gi).advance)) * fscale;
-            entries[i] = .{ .advance = adv };
-            const outline = (font.outline(gpa, gi) catch null) orelse continue;
-            var o = outline;
-            defer o.deinit(gpa);
-            const bmp = grast.rasterize(gpa, font, o, size_px) catch continue;
-            bmps[i] = bmp;
-            if (cx + bmp.width + 1 > atlas_w) {
-                cx = 1;
-                cy += row_h + 1;
-                row_h = 0;
-            }
-            entries[i].u0 = @floatFromInt(cx);
-            entries[i].v0 = @floatFromInt(cy);
-            entries[i].w = @floatFromInt(bmp.width);
-            entries[i].h = @floatFromInt(bmp.height);
-            entries[i].x_off = @floatFromInt(bmp.x_off);
-            entries[i].y_off = @floatFromInt(bmp.y_off);
-            cx += @as(u32, @intCast(bmp.width)) + 1;
-            row_h = @max(row_h, @as(u32, @intCast(bmp.height)));
-            atlas_h = @max(atlas_h, cy + row_h + 1);
-        }
-
-        const atlas = try gpa.alloc(u8, atlas_w * atlas_h * 4);
-        defer gpa.free(atlas);
-        @memset(atlas, 0);
-        for (0..glyph_count) |i| {
-            const bmp = bmps[i] orelse continue;
-            const ax: usize = @intFromFloat(entries[i].u0);
-            const ay: usize = @intFromFloat(entries[i].v0);
-            var yy: usize = 0;
-            while (yy < bmp.height) : (yy += 1) {
-                var xx: usize = 0;
-                while (xx < bmp.width) : (xx += 1) {
-                    const a = bmp.alpha[yy * bmp.width + xx];
-                    const k = ((ay + yy) * atlas_w + (ax + xx)) * 4;
-                    atlas[k + 0] = 255;
-                    atlas[k + 1] = 255;
-                    atlas[k + 2] = 255;
-                    atlas[k + 3] = a;
-                }
-            }
-            // Normalize UVs to [0,1].
-            const fw: f32 = @floatFromInt(atlas_w);
-            const fh: f32 = @floatFromInt(atlas_h);
-            entries[i].u1 = (entries[i].u0 + entries[i].w) / fw;
-            entries[i].v1 = (entries[i].v0 + entries[i].h) / fh;
-            entries[i].u0 /= fw;
-            entries[i].v0 /= fh;
-        }
+        var atlas = try gatlas.Atlas.init(gpa, font, size_px, atlas_dim, atlas_dim);
+        errdefer atlas.deinit();
 
         var vao: GLuint = 0;
         gl.genVertexArrays(1, @ptrCast(&vao));
@@ -1137,14 +1062,16 @@ pub const GlyphRenderer = struct {
         var tex: GLuint = 0;
         gl.genTextures(1, @ptrCast(&tex));
         gl.bindTexture(GL_TEXTURE_2D, tex);
-        gl.texImage2D(GL_TEXTURE_2D, 0, GL_RGBA, @intCast(atlas_w), @intCast(atlas_h), 0, GL_RGBA, GL_UNSIGNED_BYTE, atlas.ptr);
+        gl.texImage2D(GL_TEXTURE_2D, 0, GL_RGBA, @intCast(atlas_dim), @intCast(atlas_dim), 0, GL_RGBA, GL_UNSIGNED_BYTE, atlas.pixels.ptr);
         gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        atlas.dirty = false; // just uploaded the (empty) atlas
 
         return .{
             .gl = gl,
+            .gpa = gpa,
             .program = prog,
             .vao = vao,
             .vbo = vbo,
@@ -1153,9 +1080,12 @@ pub const GlyphRenderer = struct {
             .uv_loc = @intCast(gl.getAttribLocation(prog, "uv")),
             .u_viewport = gl.getUniformLocation(prog, "viewport"),
             .u_color = gl.getUniformLocation(prog, "color"),
-            .entries = entries,
-            .ascent = @as(f32, @floatFromInt(font.ascent)) * fscale,
+            .atlas = atlas,
         };
+    }
+
+    pub fn deinit(self: *GlyphRenderer) void {
+        self.atlas.deinit();
     }
 
     pub fn begin(self: *GlyphRenderer, w: u32, h: u32) void {
@@ -1166,19 +1096,19 @@ pub const GlyphRenderer = struct {
         enableBlend();
     }
 
-    /// Draw `text` with its top-left at (x,y) in pixels (baseline = y +
-    /// ascent), tinted `color` (RGBA 0..1). ASCII only for now.
+    /// Draw `text` (UTF-8, any codepoint) with its top-left at (x,y) px
+    /// (baseline = y + ascent), tinted `color`. Glyphs rasterized + packed on
+    /// demand into the dynamic atlas (#114); the texture is re-uploaded before
+    /// the draw when new glyphs appear (GL is immediate; the atlas appends).
     pub fn drawText(self: *GlyphRenderer, gpa: std.mem.Allocator, x: f32, y: f32, text: []const u8, color: [4]f32) !void {
         const gl = self.gl;
         var verts: std.ArrayList(f32) = .empty;
         defer verts.deinit(gpa);
         var pen = x;
-        const baseline = y + self.ascent;
-        for (text) |c| {
-            if (c < first_cp or c > last_cp) {
-                continue;
-            }
-            const e = self.entries[c - first_cp];
+        const baseline = y + self.atlas.ascent;
+        var it = std.unicode.Utf8View.initUnchecked(text).iterator();
+        while (it.nextCodepoint()) |cp| {
+            const e = self.atlas.glyph(self.atlas.font.glyphIndex(cp));
             if (e.w > 0) {
                 const gx = @round(pen) + e.x_off;
                 const gy = @round(baseline) + e.y_off;
@@ -1198,6 +1128,11 @@ pub const GlyphRenderer = struct {
             pen += e.advance;
         }
         if (verts.items.len == 0) return;
+        if (self.atlas.dirty) {
+            gl.bindTexture(GL_TEXTURE_2D, self.atlas_tex);
+            gl.texImage2D(GL_TEXTURE_2D, 0, GL_RGBA, @intCast(self.atlas.width), @intCast(self.atlas.height), 0, GL_RGBA, GL_UNSIGNED_BYTE, self.atlas.pixels.ptr);
+            self.atlas.dirty = false;
+        }
         gl.bindVertexArray(self.vao);
         gl.bindBuffer(GL_ARRAY_BUFFER, self.vbo);
         gl.bufferData(GL_ARRAY_BUFFER, @intCast(verts.items.len * 4), verts.items.ptr, GL_STATIC_DRAW);
@@ -1336,6 +1271,8 @@ pub const GlBackend = struct {
 
     pub fn deinit(self: *GlBackend) void {
         self.clips.deinit(self.gpa);
+        var it = self.glyphs.valueIterator();
+        while (it.next()) |g| g.deinit();
         self.glyphs.deinit(self.gpa);
         if (self.win) |*w| w.destroy();
     }
