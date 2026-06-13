@@ -52,21 +52,34 @@ exe.root_module.addImport("zooee", zooee.module("zooee"));
 
 ### Build from source
 
+`zig build` builds only the library; demos, checks, and tools live under
+explicit steps (`zig build --help` lists them all):
+
 ```sh
 git clone https://github.com/daniel-samson/zooee.git
 cd zooee
-zig build        # build the library and demo executable
-zig build run    # run the demo
-zig build test   # run the test suite
+zig build          # build the library (zig-out/lib/libzooee.a)
+zig build test     # run the unit tests
+zig build demos    # build the demo apps (terminal + native GUI;
+                   #   macOS → "Zooee GL.app" / "Zooee Raster.app")
+zig build run      # run the terminal demo
+zig build run-gui  # run the native GUI demo (GPU-rendered)
+zig build clean    # remove zig-out (the build output)
 ```
+
+Other steps: `check` (headless GPU backend self-checks — `zooee-gl-check` /
+`zooee-d3d11-check`, not demos), `visual-test` (raster golden comparison).
 
 ## Project layout
 
 ```
 src/
-  root.zig   # library entry point (the `zooee` module)
-  main.zig   # demo executable
-build.zig    # build graph
+  root.zig    # library entry point (the `zooee` module)
+  main.zig    # terminal demo
+  backends/   # terminal, raster, GL (#11), D3D11 (#12)
+  platform/   # x11, win32, macos windowing
+examples/     # native GUI demo (examples/gui_demo.zig) + GPU self-checks
+build.zig     # build graph (see `zig build --help`)
 ```
 
 ## Roadmap
