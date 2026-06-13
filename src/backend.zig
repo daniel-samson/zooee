@@ -46,6 +46,13 @@ pub const Backend = struct {
         push_clip: *const fn (ptr: *anyopaque, rect: Rect) void,
         pop_clip: *const fn (ptr: *anyopaque) void,
 
+        // Group opacity / offscreen layers (#121). A backend that can
+        // composite an isolated layer registers these; the rest leave them
+        // null and `pushLayer`/`popLayer` degrade to passthrough (children
+        // draw directly at full opacity). `opacity` is 0..1.
+        push_layer: ?*const fn (ptr: *anyopaque, opacity: f32) Error!void = null,
+        pop_layer: ?*const fn (ptr: *anyopaque) void = null,
+
         create_texture: *const fn (ptr: *anyopaque, width: u32, height: u32, rgba: []const u8) Error!*Texture,
         destroy_texture: *const fn (ptr: *anyopaque, texture: *Texture) void,
 
@@ -81,6 +88,18 @@ pub const Backend = struct {
 
     pub fn popClip(self: Backend) void {
         self.vtable.pop_clip(self.ptr);
+    }
+
+    /// Begin an isolated layer: subsequent draws accumulate into an offscreen
+    /// surface that is composited over the current target at `opacity` (0..1)
+    /// on the matching `popLayer`. Backends without layer support draw the
+    /// children directly at full opacity (degraded, structurally correct).
+    pub fn pushLayer(self: Backend, opacity: f32) Error!void {
+        if (self.vtable.push_layer) |f| return f(self.ptr, opacity);
+    }
+
+    pub fn popLayer(self: Backend) void {
+        if (self.vtable.pop_layer) |f| f(self.ptr);
     }
 
     pub fn createTexture(self: Backend, width: u32, height: u32, rgba: []const u8) Error!*Texture {

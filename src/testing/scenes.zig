@@ -124,6 +124,21 @@ pub fn drawGradient(b: Backend, s: f32) !void {
     });
 }
 
+/// Group opacity / offscreen layers (#121): an opaque red rect, then a
+/// half-opacity layer painting an opaque blue rect across it and onto the
+/// white backdrop. Not in `all` (cross-harness goldens); the GPU checks build
+/// a local Scene and compare the composited result vs the raster reference.
+pub fn drawGroupOpacity(b: Backend, s: f32) !void {
+    b.drawRect(.{ .x = 1 * s, .y = 1 * s, .width = 5 * s, .height = 6 * s }, .{
+        .background = Color.rgb(220, 40, 40),
+    });
+    try b.pushLayer(0.5);
+    b.drawRect(.{ .x = 3 * s, .y = 1 * s, .width = 6 * s, .height = 6 * s }, .{
+        .background = Color.rgb(40, 60, 220),
+    });
+    b.popLayer();
+}
+
 /// Built via the layout engine (#3) rather than hand-placed draws: a
 /// padded column holding a bordered text card and a row of two flex-grow
 /// fills. Exercises box model, gap, text measurement, and remainder
