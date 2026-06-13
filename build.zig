@@ -44,6 +44,10 @@ pub fn build(b: *std.Build) void {
     });
     if (target.result.os.tag == .macos) {
         mod.linkFramework("AppKit", .{});
+        // OpenGL.framework (deprecated but present): the macOS GPU backend
+        // (#11) is GL via CGL/NSOpenGL. Provides the GL + CGL symbols.
+        mod.linkFramework("OpenGL", .{});
+        mod.link_libc = true; // dlsym for GL proc resolution
     }
     if (target.result.os.tag == .linux) {
         // Xlib is the Linux platform windowing API (like AppKit/user32),
@@ -236,9 +240,10 @@ pub fn build(b: *std.Build) void {
         run_gui.dependOn(&run_gui_cmd.step);
     }
 
-    // GL context bring-up demo (#11 slice 1), Linux only — self-checking
-    // GLX clear+readback, runs headless under Xvfb/llvmpipe.
-    if (target.result.os.tag == .linux) {
+    // GL backend demo (#11): self-checking GL-vs-raster golden comparison +
+    // renderer round-trips. Linux uses a hidden GLX window (slice-1 present
+    // check too); macOS uses an offscreen CGL context. Runs headless.
+    if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
         const gl_demo = b.addExecutable(.{
             .name = "zooee-gl-demo",
             .root_module = b.createModule(.{
