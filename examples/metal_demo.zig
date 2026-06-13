@@ -70,8 +70,31 @@ pub fn main(init: std.process.Init) !void {
     const quad_ok = max_diff <= 4;
     try out.print("Metal quad round-trip: max channel diff {d} {s}\n", .{ max_diff, if (quad_ok) "PASS" else "FAIL" });
 
+    // Slice 3: native rect geometry. Render left-half red / right-half blue
+    // via the rect shader; check the halves came out.
+    var rr = metal.MetalRectRenderer.init() catch |err| {
+        try out.print("METAL-RECT-INIT-FAILED: {t}\n", .{err});
+        try out.flush();
+        std.process.exit(1);
+    };
+    defer rr.deinit();
+    const rw: u32 = 40;
+    const rh: u32 = 24;
+    const rpx = try rr.renderOffscreen(gpa, rw, rh, .{ 0, 0, 0, 1 }, &rectScene);
+    defer gpa.free(rpx);
+    const li = ((rh / 2) * rw + rw / 4) * 4; // left quarter
+    const ri = ((rh / 2) * rw + (rw * 3) / 4) * 4; // right quarter
+    const rect_ok = approx(rpx[li], 255) and approx(rpx[li + 1], 0) and approx(rpx[li + 2], 0) and
+        approx(rpx[ri], 0) and approx(rpx[ri + 1], 0) and approx(rpx[ri + 2], 255);
+    try out.print("Metal native rects: left=({d},{d},{d}) right=({d},{d},{d}) {s}\n", .{ rpx[li], rpx[li + 1], rpx[li + 2], rpx[ri], rpx[ri + 1], rpx[ri + 2], if (rect_ok) "PASS" else "FAIL" });
+
     try out.flush();
-    if (!ok or !quad_ok) std.process.exit(1);
+    if (!ok or !quad_ok or !rect_ok) std.process.exit(1);
+}
+
+fn rectScene(rr: *metal.MetalRectRenderer) void {
+    rr.fillRect(0, 0, rr.vw / 2, rr.vh, .{ 1, 0, 0, 1 }); // left half red
+    rr.fillRect(rr.vw / 2, 0, rr.vw / 2, rr.vh, .{ 0, 0, 1, 1 }); // right half blue
 }
 
 fn approx(a: u8, b: u8) bool {
