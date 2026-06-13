@@ -226,6 +226,9 @@ const Gl = struct {
     bindFramebuffer: *const fn (GLenum, GLuint) callconv(.c) void,
     framebufferTexture2D: *const fn (GLenum, GLenum, GLenum, GLuint, GLint) callconv(.c) void,
     checkFramebufferStatus: *const fn (GLenum) callconv(.c) GLenum,
+    uniform2f: *const fn (GLint, f32, f32) callconv(.c) void,
+    uniform4f: *const fn (GLint, f32, f32, f32, f32) callconv(.c) void,
+    getAttribLocation: *const fn (GLuint, [*:0]const u8) callconv(.c) GLint,
 
     fn load() Error!Gl {
         var g: Gl = undefined;
@@ -375,4 +378,124 @@ fn flipY(px: []u8, w: u32, h: u32) void {
         const bot = px[(h - 1 - y) * row ..][0..row];
         for (top, bot) |*t, *b| std.mem.swap(u8, t, b);
     }
+}
+
+// === Slice 3: native rect rendering =========================================
+// Draws solid-color rects as GPU geometry (pixel coords → NDC in the
+// vertex shader) — the first true GPU *drawing*, vs texturing a CPU
+// frame. Rounded corners/borders (SDF), the glyph atlas, and the full
+// Backend impl build on this; batching is a later optimization.
+
+const rect_vert: [*:0]const u8 =
+    \\#version 120
+    \\attribute vec2 pos;
+    \\uniform vec2 viewport;
+    \\void main() {
+    \\  vec2 ndc = vec2(pos.x / viewport.x * 2.0 - 1.0, 1.0 - pos.y / viewport.y * 2.0);
+    \\  gl_Position = vec4(ndc, 0.0, 1.0);
+    \\}
+;
+const rect_frag: [*:0]const u8 =
+    \\#version 120
+    \\uniform vec4 color;
+    \\void main() { gl_FragColor = color; }
+;
+
+pub const RectRenderer = struct {
+    gl: Gl,
+    program: GLuint,
+    vao: GLuint,
+    vbo: GLuint,
+    pos_loc: GLuint,
+    u_viewport: GLint,
+    u_color: GLint,
+    vw: f32 = 0,
+    vh: f32 = 0,
+
+    pub fn init() Error!RectRenderer {
+        const gl = try Gl.load();
+        const vs = QuadRenderer.compile(gl, GL_VERTEX_SHADER, rect_vert) orelse return error.NoContext;
+        const fs = QuadRenderer.compile(gl, GL_FRAGMENT_SHADER, rect_frag) orelse return error.NoContext;
+        const prog = gl.createProgram();
+        gl.attachShader(prog, vs);
+        gl.attachShader(prog, fs);
+        gl.linkProgram(prog);
+        var ok: GLint = 0;
+        gl.getProgramiv(prog, GL_LINK_STATUS, &ok);
+        if (ok == 0) return error.NoContext;
+
+        var vao: GLuint = 0;
+        gl.genVertexArrays(1, @ptrCast(&vao));
+        gl.bindVertexArray(vao);
+        var vbo: GLuint = 0;
+        gl.genBuffers(1, @ptrCast(&vbo));
+
+        const pos_loc = gl.getAttribLocation(prog, "pos");
+        return .{
+            .gl = gl,
+            .program = prog,
+            .vao = vao,
+            .vbo = vbo,
+            .pos_loc = @intCast(pos_loc),
+            .u_viewport = gl.getUniformLocation(prog, "viewport"),
+            .u_color = gl.getUniformLocation(prog, "color"),
+        };
+    }
+
+    /// Begin a frame: bind program, set viewport size (pixels), clear.
+    pub fn begin(self: *RectRenderer, w: u32, h: u32, clear: [4]f32) void {
+        self.vw = @floatFromInt(w);
+        self.vh = @floatFromInt(h);
+        glViewport(0, 0, w, h);
+        glClearColor(clear[0], clear[1], clear[2], clear[3]);
+        glClear(GL_COLOR_BUFFER_BIT);
+        self.gl.useProgram(self.program);
+        self.gl.uniform2f(self.u_viewport, self.vw, self.vh);
+    }
+
+    /// Fill a rect in pixel coords (y-down, origin top-left).
+    pub fn fillRect(self: *RectRenderer, x: f32, y: f32, w: f32, h: f32, color: [4]f32) void {
+        const gl = self.gl;
+        const verts = [_]f32{ x, y, x + w, y, x, y + h, x + w, y + h };
+        gl.bindVertexArray(self.vao);
+        gl.bindBuffer(GL_ARRAY_BUFFER, self.vbo);
+        gl.bufferData(GL_ARRAY_BUFFER, @sizeOf(@TypeOf(verts)), &verts, GL_STATIC_DRAW);
+        gl.vertexAttribPointer(self.pos_loc, 2, GL_FLOAT, GL_FALSE, 0, @ptrFromInt(0));
+        gl.enableVertexAttribArray(self.pos_loc);
+        gl.uniform4f(self.u_color, color[0], color[1], color[2], color[3]);
+        gl.drawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
+};
+
+/// Make a GlWindow context current and return it, for offscreen use.
+/// Renders `scene` into an FBO of size w×h and reads it back (top-down).
+pub fn renderRectsOffscreen(
+    gpa: std.mem.Allocator,
+    rr: *RectRenderer,
+    w: u32,
+    h: u32,
+    clear: [4]f32,
+    scene: *const fn (*RectRenderer) void,
+) ![]u8 {
+    const gl = rr.gl;
+    var fbo: GLuint = 0;
+    gl.genFramebuffers(1, @ptrCast(&fbo));
+    gl.bindFramebuffer(GL_FRAMEBUFFER, fbo);
+    var target: GLuint = 0;
+    gl.genTextures(1, @ptrCast(&target));
+    gl.bindTexture(GL_TEXTURE_2D, target);
+    gl.texImage2D(GL_TEXTURE_2D, 0, GL_RGBA, @intCast(w), @intCast(h), 0, GL_RGBA, GL_UNSIGNED_BYTE, null);
+    gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    gl.framebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target, 0);
+    if (gl.checkFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) return error.NoContext;
+
+    rr.begin(w, h, clear);
+    scene(rr);
+    glFinish();
+
+    const out = try gpa.alloc(u8, @as(usize, w) * h * 4);
+    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, out.ptr);
+    flipY(out, w, h);
+    return out;
 }
