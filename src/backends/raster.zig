@@ -139,6 +139,7 @@ pub const RasterBackend = struct {
         .draw_rect = drawRect,
         .draw_text = drawText,
         .draw_image = drawImage,
+        .fill_path = fillPath,
         .push_clip = pushClip,
         .pop_clip = popClip,
         .push_clip_rounded = pushClipRounded,
@@ -399,6 +400,34 @@ pub const RasterBackend = struct {
                 }
             }
             pen_x += @as(f32, @floatFromInt(metrics.advance)) * fscale;
+        }
+    }
+
+    /// Fill a closed polygon (#120) with the even-odd rule
+    /// (geometry.pointInPolygon, the shared reference) over its bounding box.
+    fn fillPath(ptr: *anyopaque, points: []const geometry.Point, color: Color) void {
+        const self = self_(ptr);
+        if (points.len < 3) return;
+        var minx: f32 = points[0].x;
+        var miny: f32 = points[0].y;
+        var maxx: f32 = points[0].x;
+        var maxy: f32 = points[0].y;
+        for (points[1..]) |p| {
+            minx = @min(minx, p.x);
+            miny = @min(miny, p.y);
+            maxx = @max(maxx, p.x);
+            maxy = @max(maxy, p.y);
+        }
+        const bounds = IRect.fromRect(.{ .x = minx, .y = miny, .width = maxx - minx, .height = maxy - miny }).intersect(self.currentClip());
+        if (bounds.isEmpty()) return;
+        var y = bounds.y0;
+        while (y < bounds.y1) : (y += 1) {
+            var x = bounds.x0;
+            while (x < bounds.x1) : (x += 1) {
+                const px = @as(f32, @floatFromInt(x)) + 0.5;
+                const py = @as(f32, @floatFromInt(y)) + 0.5;
+                if (geometry.pointInPolygon(points, px, py)) self.setPixel(x, y, color);
+            }
         }
     }
 

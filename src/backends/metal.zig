@@ -971,6 +971,93 @@ pub const MetalShadowRenderer = struct {
     }
 };
 
+// Filled-path uniform (#120). quad = bbox to rasterize; count = point count
+// (≤64); pts = polygon points (pixel space). The PS runs the same even-odd
+// test as geometry.pointInPolygon, so the fill matches raster pixel-exact.
+const max_path_pts = 64;
+// meta.x = point count (as float). A float4 (not uint+uint3) so the MSL and Zig
+// layouts agree — an int-3 vector aligns to 16 in MSL and would shift `pts`.
+const PathUniform = extern struct {
+    quad: [4]f32,
+    color: [4]f32,
+    vp: [4]f32,
+    meta: [4]f32,
+    pts: [max_path_pts][2]f32,
+};
+
+pub const MetalPathRenderer = struct {
+    device: id,
+    queue: id,
+    pipeline: id,
+    enc: id = null,
+    vw: f32 = 0,
+    vh: f32 = 0,
+
+    const shader =
+        \\#include <metal_stdlib>
+        \\using namespace metal;
+        \\struct PathU { float4 quad; float4 color; float4 vp; float4 meta; float2 pts[64]; };
+        \\vertex float4 v_main(uint vid [[vertex_id]], constant PathU& u [[buffer(0)]]) {
+        \\    float2 corner[4] = { float2(0,0), float2(1,0), float2(0,1), float2(1,1) };
+        \\    float2 px = u.quad.xy + corner[vid] * u.quad.zw;
+        \\    return float4(px.x / u.vp.x * 2.0 - 1.0, 1.0 - px.y / u.vp.y * 2.0, 0, 1);
+        \\}
+        \\fragment float4 f_main(float4 fp [[position]], constant PathU& u [[buffer(0)]]) {
+        \\    float px = fp.x, py = fp.y;
+        \\    bool inside = false;
+        \\    uint n = uint(u.meta.x);
+        \\    uint j = n - 1;
+        \\    for (uint i = 0; i < n; i++) {
+        \\        float2 b = u.pts[i]; float2 a = u.pts[j];
+        \\        if ((b.y > py) != (a.y > py)) {
+        \\            float lhs = (a.x - b.x) * (py - b.y);
+        \\            float rhs = (px - b.x) * (a.y - b.y);
+        \\            bool left = (a.y > b.y) ? (rhs < lhs) : (rhs > lhs);
+        \\            if (left) inside = !inside;
+        \\        }
+        \\        j = i;
+        \\    }
+        \\    if (!inside) discard_fragment();
+        \\    return u.color;
+        \\}
+    ;
+
+    pub fn init(device: id, queue: id) Error!MetalPathRenderer {
+        const pipeline = try compilePipeline(device, shader, MTLPixelFormatRGBA8Unorm, true);
+        return .{ .device = device, .queue = queue, .pipeline = pipeline };
+    }
+
+    pub fn deinit(self: *MetalPathRenderer) void {
+        release(self.pipeline);
+    }
+
+    pub fn fill(self: *MetalPathRenderer, points: []const geometry.Point, color: [4]f32) void {
+        if (points.len < 3) return;
+        const n = @min(points.len, max_path_pts);
+        var minx = points[0].x;
+        var miny = points[0].y;
+        var maxx = points[0].x;
+        var maxy = points[0].y;
+        for (points[1..n]) |p| {
+            minx = @min(minx, p.x);
+            miny = @min(miny, p.y);
+            maxx = @max(maxx, p.x);
+            maxy = @max(maxy, p.y);
+        }
+        var u: PathUniform = .{
+            .quad = .{ minx, miny, maxx - minx, maxy - miny },
+            .color = color,
+            .vp = .{ self.vw, self.vh, 0, 0 },
+            .meta = .{ @floatFromInt(n), 0, 0, 0 },
+            .pts = undefined,
+        };
+        for (0..n) |i| u.pts[i] = .{ points[i].x, points[i].y };
+        _ = msg(void, struct { *const PathUniform, u64, u64 }, self.enc, sel("setVertexBytes:length:atIndex:"), .{ &u, @as(u64, @sizeOf(PathUniform)), 0 });
+        _ = msg(void, struct { *const PathUniform, u64, u64 }, self.enc, sel("setFragmentBytes:length:atIndex:"), .{ &u, @as(u64, @sizeOf(PathUniform)), 0 });
+        _ = msg(void, struct { u64, u64, u64 }, self.enc, sel("drawPrimitives:vertexStart:vertexCount:"), .{ MTLPrimitiveTypeTriangleStrip, 0, 4 });
+    }
+};
+
 // Compositor uniform. vp_op = {vw, vh, opacity, 0}.
 const CompUniform = extern struct { rect: [4]f32, vp_op: [4]f32 };
 
@@ -1121,6 +1208,7 @@ pub const MetalBackend = struct {
     image: MetalImageRenderer,
     grad: MetalGradientRenderer,
     shadow: MetalShadowRenderer,
+    path: MetalPathRenderer,
     comp: MetalLayerCompositor,
     rclip: MetalRoundClipCompositor,
     glyphs: std.AutoHashMapUnmanaged(u16, MetalGlyphRenderer) = .empty,
@@ -1179,6 +1267,7 @@ pub const MetalBackend = struct {
             .image = try MetalImageRenderer.init(ctx.device, ctx.queue),
             .grad = try MetalGradientRenderer.init(ctx.device, ctx.queue),
             .shadow = try MetalShadowRenderer.init(ctx.device, ctx.queue),
+            .path = try MetalPathRenderer.init(ctx.device, ctx.queue),
             .comp = try MetalLayerCompositor.init(ctx.device, ctx.queue),
             .rclip = try MetalRoundClipCompositor.init(ctx.device, ctx.queue),
         };
@@ -1201,6 +1290,7 @@ pub const MetalBackend = struct {
         self.rect.deinit();
         self.grad.deinit();
         self.shadow.deinit();
+        self.path.deinit();
         self.comp.deinit();
         self.rclip.deinit();
         if (self.present_sampler != null) release(self.present_sampler);
@@ -1262,6 +1352,7 @@ pub const MetalBackend = struct {
         .draw_rect = drawRect,
         .draw_text = drawText,
         .draw_image = drawImage,
+        .fill_path = fillPath,
         .push_clip = pushClip,
         .pop_clip = popClip,
         .push_clip_rounded = pushClipRounded,
@@ -1293,6 +1384,9 @@ pub const MetalBackend = struct {
         self.shadow.enc = enc;
         self.shadow.vw = w;
         self.shadow.vh = h;
+        self.path.enc = enc;
+        self.path.vw = w;
+        self.path.vh = h;
         self.comp.enc = enc;
         self.comp.vw = w;
         self.comp.vh = h;
@@ -1413,6 +1507,12 @@ pub const MetalBackend = struct {
         const self = self_(ptr);
         _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{self.image.pipeline});
         self.image.draw(rect.x, rect.y, rect.width, rect.height, @ptrCast(texture));
+    }
+
+    fn fillPath(ptr: *anyopaque, points: []const geometry.Point, color: style.Color) void {
+        const self = self_(ptr);
+        _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{self.path.pipeline});
+        self.path.fill(points, col4(color));
     }
 
     fn applyScissor(self: *MetalBackend) void {

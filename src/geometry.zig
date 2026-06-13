@@ -19,6 +19,32 @@ pub const Size = struct {
     height: f32 = 0,
 };
 
+/// Even-odd point-in-polygon test (#120): a horizontal ray to the right of
+/// (px,py) toggles `inside` at each crossed edge. This is THE canonical
+/// definition of a filled path's interior — every backend (raster reference +
+/// each shader) must replicate this exact logic so fills match pixel-exact.
+/// Concave shapes and self-intersections resolve by even-odd parity.
+pub fn pointInPolygon(pts: []const Point, px: f32, py: f32) bool {
+    if (pts.len < 3) return false;
+    var inside = false;
+    var j: usize = pts.len - 1;
+    for (pts, 0..) |b, i| {
+        const a = pts[j];
+        if ((b.y > py) != (a.y > py)) {
+            // px < x-intersection, division-free (cross-multiply by a.y-b.y,
+            // flipping the comparison by its sign). Both products are computed
+            // identically on CPU and GPU, so the fill matches pixel-exact —
+            // unlike the float division it replaces.
+            const lhs = (a.x - b.x) * (py - b.y);
+            const rhs = (px - b.x) * (a.y - b.y);
+            const left = if (a.y > b.y) rhs < lhs else rhs > lhs;
+            if (left) inside = !inside;
+        }
+        j = i;
+    }
+    return inside;
+}
+
 pub const Rect = struct {
     x: f32 = 0,
     y: f32 = 0,
@@ -69,4 +95,17 @@ test "disjoint rects intersect to empty" {
     const a: Rect = .{ .x = 0, .y = 0, .width = 4, .height = 4 };
     const b: Rect = .{ .x = 10, .y = 10, .width = 4, .height = 4 };
     try std.testing.expect(a.intersect(b).isEmpty());
+}
+
+test "even-odd point-in-polygon handles concavity" {
+    // An L-shape: bottom bar y[0,2]×x[0,6] plus left bar x[0,2]×y[0,6]. The
+    // top-right quadrant is the concave notch (outside).
+    const l = [_]Point{
+        .{ .x = 0, .y = 0 }, .{ .x = 6, .y = 0 }, .{ .x = 6, .y = 2 },
+        .{ .x = 2, .y = 2 }, .{ .x = 2, .y = 6 }, .{ .x = 0, .y = 6 },
+    };
+    try std.testing.expect(pointInPolygon(&l, 1, 4)); // left bar → inside
+    try std.testing.expect(pointInPolygon(&l, 4, 1)); // bottom bar → inside
+    try std.testing.expect(!pointInPolygon(&l, 4, 4)); // notch → outside
+    try std.testing.expect(!pointInPolygon(&l, 10, 10)); // far → outside
 }

@@ -44,6 +44,11 @@ pub const Backend = struct {
         draw_text: *const fn (ptr: *anyopaque, origin: Point, text: []const u8, text_style: TextStyle) void,
         draw_image: *const fn (ptr: *anyopaque, rect: Rect, texture: *Texture) void,
 
+        // Filled arbitrary path (#120): fill the closed polygon `points` with
+        // `color` using the even-odd rule (geometry.pointInPolygon). Optional —
+        // backends that can't (terminal) leave it null and `fillPath` no-ops.
+        fill_path: ?*const fn (ptr: *anyopaque, points: []const Point, color: style.Color) void = null,
+
         push_clip: *const fn (ptr: *anyopaque, rect: Rect) void,
         pop_clip: *const fn (ptr: *anyopaque) void,
 
@@ -87,6 +92,12 @@ pub const Backend = struct {
 
     pub fn drawImage(self: Backend, rect: Rect, texture: *Texture) void {
         self.vtable.draw_image(self.ptr, rect, texture);
+    }
+
+    /// Fill a closed polygon (#120) with `color`, even-odd rule. Backends
+    /// without path support (terminal) no-op.
+    pub fn fillPath(self: Backend, points: []const Point, color: style.Color) void {
+        if (self.vtable.fill_path) |f| f(self.ptr, points, color);
     }
 
     pub fn pushClip(self: Backend, rect: Rect) void {
