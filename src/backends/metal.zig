@@ -190,38 +190,27 @@ fn makeTexture(device: id, width: u32, height: u32, pixel_format: u64) Error!id 
 
 const CGSize = extern struct { width: f64, height: f64 };
 
-/// A CAMetalLayer attached to an NSView, for on-screen present. Slice 1 only
-/// clears-and-presents to prove the layer reaches the screen; later slices
-/// render the UI into the drawable.
+/// A CAMetalLayer attached to an NSView for on-screen present (BGRA8). Borrows
+/// a device (must be the same one the MetalBackend renders on, so its RT can
+/// be sampled into the drawable). MetalBackend.presentTo drives the drawable.
 pub const MetalLayer = struct {
-    ctx: MetalContext,
     layer: id, // CAMetalLayer
     width: u32,
     height: u32,
 
-    /// Attach a CAMetalLayer to `view` (an NSView id) sized `width`x`height`
-    /// device pixels. Returns null-ish errors if Metal is unavailable so the
-    /// caller can fall back to GL/raster.
-    pub fn createOnView(view: id, width: u32, height: u32) Error!MetalLayer {
-        var ctx = try MetalContext.create();
-        errdefer ctx.destroy();
-
+    /// Attach a CAMetalLayer (on `device`) to `view` (an NSView id), sized
+    /// `width`x`height` device pixels. `framebufferOnly=false` so the drawable
+    /// can be a render target.
+    pub fn createOnView(device: id, view: id, width: u32, height: u32) Error!MetalLayer {
         const layer = msg(id, struct {}, cls("CAMetalLayer"), sel("layer"), .{});
         if (layer == null) return error.NoDrawable;
-        _ = msg(void, struct { id }, layer, sel("setDevice:"), .{ctx.device});
+        _ = msg(void, struct { id }, layer, sel("setDevice:"), .{device});
         _ = msg(void, struct { u64 }, layer, sel("setPixelFormat:"), .{MTLPixelFormatBGRA8Unorm});
         _ = msg(void, struct { bool }, layer, sel("setFramebufferOnly:"), .{false});
         _ = msg(void, struct { CGSize }, layer, sel("setDrawableSize:"), .{.{ .width = @floatFromInt(width), .height = @floatFromInt(height) }});
-
-        // Host the layer in the view (layer-backed).
         _ = msg(void, struct { bool }, view, sel("setWantsLayer:"), .{true});
         _ = msg(void, struct { id }, view, sel("setLayer:"), .{layer});
-
-        return .{ .ctx = ctx, .layer = layer, .width = width, .height = height };
-    }
-
-    pub fn destroy(self: *MetalLayer) void {
-        self.ctx.destroy();
+        return .{ .layer = layer, .width = width, .height = height };
     }
 
     pub fn resize(self: *MetalLayer, width: u32, height: u32) void {
@@ -231,12 +220,8 @@ pub const MetalLayer = struct {
         _ = msg(void, struct { CGSize }, self.layer, sel("setDrawableSize:"), .{.{ .width = @floatFromInt(width), .height = @floatFromInt(height) }});
     }
 
-    /// Slice 1: clear the next drawable to a color and present it.
-    pub fn clearAndPresent(self: *MetalLayer, r: f32, g: f32, b: f32, a: f32) Error!void {
-        const drawable = msg(id, struct {}, self.layer, sel("nextDrawable"), .{});
-        if (drawable == null) return error.NoDrawable;
-        const texture = msg(id, struct {}, drawable, sel("texture"), .{});
-        clearPass(self.ctx.queue, texture, .{ .red = r, .green = g, .blue = b, .alpha = a }, drawable, false);
+    fn nextDrawable(self: *MetalLayer) id {
+        return msg(id, struct {}, self.layer, sel("nextDrawable"), .{});
     }
 };
 
@@ -968,14 +953,44 @@ pub const MetalBackend = struct {
     font: ?ttf.Font = null,
     enc: id = null,
     cmdbuf: id = null,
+    owns_ctx: bool = true,
+    // Present pipeline (slice 7): draws the RGBA RT into the BGRA8 drawable.
+    present_pipeline: id = null,
+    present_sampler: id = null,
 
-    /// Headless Backend over an offscreen render target (golden tests).
+    const present_shader =
+        \\#include <metal_stdlib>
+        \\using namespace metal;
+        \\struct VOut { float4 pos [[position]]; float2 uv; };
+        \\vertex VOut v_main(uint vid [[vertex_id]]) {
+        \\    float2 p[4] = { float2(-1,-1), float2(1,-1), float2(-1,1), float2(1,1) };
+        \\    float2 t[4] = { float2(0,1), float2(1,1), float2(0,0), float2(1,0) };
+        \\    VOut o; o.pos = float4(p[vid], 0, 1); o.uv = t[vid]; return o;
+        \\}
+        \\fragment float4 f_main(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]], sampler s [[sampler(0)]]) {
+        \\    return tex.sample(s, in.uv);
+        \\}
+    ;
+
+    /// Headless Backend over an offscreen render target (golden tests). Owns
+    /// its own device/queue.
     pub fn initOffscreen(gpa: std.mem.Allocator) !MetalBackend {
         var ctx = try MetalContext.create();
         errdefer ctx.destroy();
+        return initWith(gpa, ctx, true);
+    }
+
+    /// Backend on a borrowed device/queue (the windowed path shares the
+    /// CAMetalLayer's device so its RT can be sampled into the drawable).
+    pub fn initOn(gpa: std.mem.Allocator, device: id, queue: id) !MetalBackend {
+        return initWith(gpa, .{ .device = device, .queue = queue }, false);
+    }
+
+    fn initWith(gpa: std.mem.Allocator, ctx: MetalContext, owns: bool) !MetalBackend {
         return .{
             .gpa = gpa,
             .ctx = ctx,
+            .owns_ctx = owns,
             .rect = try MetalRectRenderer.init(ctx.device, ctx.queue),
             .exact = try MetalExactRectRenderer.init(ctx.device, ctx.queue),
             .image = try MetalImageRenderer.init(ctx.device, ctx.queue),
@@ -990,8 +1005,40 @@ pub const MetalBackend = struct {
         self.image.deinit();
         self.exact.deinit();
         self.rect.deinit();
+        if (self.present_sampler != null) release(self.present_sampler);
+        if (self.present_pipeline != null) release(self.present_pipeline);
         if (self.target != null) release(self.target);
-        self.ctx.destroy();
+        if (self.owns_ctx) self.ctx.destroy();
+    }
+
+    /// Draw the offscreen RT into the layer's next drawable (RGBA→BGRA via the
+    /// framebuffer store) and present it — the windowed GPU path (slice 7).
+    pub fn presentTo(self: *MetalBackend, layer: *MetalLayer) void {
+        if (self.target == null) return;
+        if (self.present_pipeline == null) {
+            self.present_pipeline = compilePipeline(self.ctx.device, present_shader, MTLPixelFormatBGRA8Unorm, false) catch return;
+            self.present_sampler = makeSampler(self.ctx.device);
+        }
+        const drawable = layer.nextDrawable();
+        if (drawable == null) return;
+        const texture = msg(id, struct {}, drawable, sel("texture"), .{});
+
+        const rpd = msg(id, struct {}, cls("MTLRenderPassDescriptor"), sel("renderPassDescriptor"), .{});
+        const a0 = msg(id, struct { u64 }, msg(id, struct {}, rpd, sel("colorAttachments"), .{}), sel("objectAtIndexedSubscript:"), .{0});
+        _ = msg(void, struct { id }, a0, sel("setTexture:"), .{texture});
+        _ = msg(void, struct { u64 }, a0, sel("setLoadAction:"), .{MTLLoadActionClear});
+        _ = msg(void, struct { u64 }, a0, sel("setStoreAction:"), .{MTLStoreActionStore});
+        _ = msg(void, struct { MTLClearColor }, a0, sel("setClearColor:"), .{.{ .red = 1, .green = 1, .blue = 1, .alpha = 1 }});
+
+        const cmdbuf = msg(id, struct {}, self.ctx.queue, sel("commandBuffer"), .{});
+        const enc = msg(id, struct { id }, cmdbuf, sel("renderCommandEncoderWithDescriptor:"), .{rpd});
+        _ = msg(void, struct { id }, enc, sel("setRenderPipelineState:"), .{self.present_pipeline});
+        _ = msg(void, struct { id, u64 }, enc, sel("setFragmentTexture:atIndex:"), .{ self.target, 0 });
+        _ = msg(void, struct { id, u64 }, enc, sel("setFragmentSamplerState:atIndex:"), .{ self.present_sampler, 0 });
+        _ = msg(void, struct { u64, u64, u64 }, enc, sel("drawPrimitives:vertexStart:vertexCount:"), .{ MTLPrimitiveTypeTriangleStrip, 0, 4 });
+        _ = msg(void, struct {}, enc, sel("endEncoding"), .{});
+        _ = msg(void, struct { id }, cmdbuf, sel("presentDrawable:"), .{drawable});
+        _ = msg(void, struct {}, cmdbuf, sel("commit"), .{});
     }
 
     pub fn setFont(self: *MetalBackend, data: []const u8) !void {

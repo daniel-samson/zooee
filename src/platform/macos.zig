@@ -232,6 +232,12 @@ pub const Window = struct {
         self.gpa.destroy(self);
     }
 
+    /// The window's content NSView (id) — where the Metal layer (#101) or GL
+    /// context attaches.
+    pub fn contentView(self: *Window) ?*anyopaque {
+        return msg(id, struct {}, self.ns_window, sel("contentView"), .{});
+    }
+
     /// Present the GL back buffer (GPU-present path). No-op for raster windows.
     pub fn glSwap(self: *Window) void {
         if (self.gl_ctx != null) _ = msg(void, struct {}, self.gl_ctx, sel("flushBuffer"), .{});

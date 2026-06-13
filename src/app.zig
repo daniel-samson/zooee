@@ -61,6 +61,15 @@ const d3d_backend = if (builtin.os.tag == .windows)
 else
     struct {};
 
+/// Metal backend (#101) — the primary GPU-present path for runWindow on
+/// macOS (display-synced CAMetalLayer → lag-free live resize). GL stays as
+/// the macOS fallback only via the offscreen self-checks; runWindow prefers
+/// Metal → raster here.
+const metal_backend = if (builtin.os.tag == .macos)
+    @import("backends/metal.zig")
+else
+    struct {};
+
 /// OSes whose native window can carry a GL context (the GPU-present path).
 const has_gl_window = builtin.os.tag == .linux or builtin.os.tag == .macos;
 /// OSes with a native GPU window backend (GL or D3D11).
@@ -161,8 +170,20 @@ pub fn runWindow(
     // ZOOEE_SOFTWARE forces the CPU raster path (deterministic CI, debugging).
     const want_gpu = has_gpu_window and !opts.force_software and !init.environ_map.contains("ZOOEE_SOFTWARE");
 
-    const window = try platform.Window.create(gpa, .{ .title = opts.title, .width = opts.width, .height = opts.height, .gl = want_gpu });
+    // macOS uses Metal (#101), not a GL context — so don't create one there.
+    const want_gl_ctx = want_gpu and builtin.os.tag != .macos;
+    const window = try platform.Window.create(gpa, .{ .title = opts.title, .width = opts.width, .height = opts.height, .gl = want_gl_ctx });
     defer window.destroy();
+
+    // macOS: Metal is the primary GPU path (display-synced → lag-free resize).
+    // If Metal is unavailable, fall through to the CPU raster path below.
+    if (comptime builtin.os.tag == .macos) {
+        if (want_gpu) {
+            if (runWindowMetal(Model, Msg, model, window, init)) {
+                return;
+            } else |_| {}
+        }
+    }
 
     // GL window + current context succeeded → drive the GPU-present loop.
     // Otherwise fall through to the CPU raster + OS blit path below.
@@ -326,6 +347,109 @@ fn runWindowGl(
                 var pw: std.Io.Writer.Allocating = .fromArrayList(gpa, &ppm);
                 try gl_backend.writePpmRgba(&pw.writer, pixels, glb.width, glb.height);
                 try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = pw.toArrayList().items });
+                return;
+            }
+            frame.draw();
+            dirty = false;
+        }
+
+        try io.sleep(.fromMilliseconds(16), .awake);
+    }
+}
+
+/// GPU-present loop (#101), macOS/Metal: a CAMetalLayer on the window's view.
+/// MetalBackend renders the UI into an offscreen RT (shared device); each
+/// frame the RT is drawn into the layer's next drawable and presented. The
+/// present is display-synced, so live resize (driven through the same
+/// windowDidResize: callback as GL, #100) is lag-free. Errors on setup so the
+/// caller can fall back to raster. Referenced only behind a macOS guard.
+fn runWindowMetal(
+    comptime Model: type,
+    comptime Msg: type,
+    model: *Model,
+    window: anytype,
+    init: std.process.Init,
+) !void {
+    const platform = WindowPlatform;
+    const gpa = init.arena.allocator();
+    const io = init.io;
+    const capture_path = init.environ_map.get("ZOOEE_CAPTURE");
+
+    var ctx = try metal_backend.MetalContext.create();
+    defer ctx.destroy();
+    const px0 = platform.contentPixelSize(window);
+    var layer = try metal_backend.MetalLayer.createOnView(ctx.device, window.contentView(), @intCast(px0.width), @intCast(px0.height));
+
+    var mb = try metal_backend.MetalBackend.initOn(gpa, ctx.device, ctx.queue);
+    defer mb.deinit();
+    if (system_font.loadBytes(gpa, io)) |data| mb.setFont(data) catch {};
+    const b = mb.interface();
+
+    var frame_arena = std.heap.ArenaAllocator.init(gpa);
+    defer frame_arena.deinit();
+    var placements: []layout_mod.Placement = &.{};
+    var dirty = true;
+
+    // One-frame render+present, callable during the modal resize drag (#100).
+    const Frame = struct {
+        model: *Model,
+        win: @TypeOf(window),
+        backend: @TypeOf(b),
+        mb: *metal_backend.MetalBackend,
+        layer: *metal_backend.MetalLayer,
+        arena: *std.heap.ArenaAllocator,
+        placements: *[]layout_mod.Placement,
+
+        fn draw(self: *@This()) void {
+            _ = self.arena.reset(.retain_capacity);
+            const a = self.arena.allocator();
+            const px = platform.contentPixelSize(self.win);
+            self.layer.resize(@intCast(px.width), @intCast(px.height));
+            const scale: f32 = @floatCast(px.scale);
+            const root = self.model.view(a, scale) catch return;
+            const viewport: geometry.Size = .{ .width = @floatFromInt(px.width), .height = @floatFromInt(px.height) };
+            const result = layout_mod.layout(a, self.backend, root, viewport) catch return;
+            self.placements.* = result.placements;
+            self.backend.beginFrame(viewport) catch return;
+            layout_mod.render(self.backend, result);
+            self.backend.endFrame() catch return;
+            self.mb.presentTo(self.layer);
+        }
+    };
+    var frame: Frame = .{ .model = model, .win = window, .backend = b, .mb = &mb, .layer = &layer, .arena = &frame_arena, .placements = &placements };
+    window.setRedraw(&frame, struct {
+        fn call(p: ?*anyopaque) void {
+            const f: *Frame = @ptrCast(@alignCast(p));
+            f.draw();
+        }
+    }.call);
+
+    loop: while (true) {
+        for (window.pumpEvents()) |ev| {
+            switch (dispatch(Model, Msg, model, ev, placements)) {
+                .none => {},
+                .redraw => dirty = true,
+                .quit => break :loop,
+            }
+        }
+
+        if (dirty) {
+            // Headless capture hook: render one frame to the RT, read it, exit.
+            if (capture_path) |path| {
+                _ = frame_arena.reset(.retain_capacity);
+                const arena = frame_arena.allocator();
+                const px = platform.contentPixelSize(window);
+                const scale: f32 = @floatCast(px.scale);
+                const root = try model.view(arena, scale);
+                const viewport: geometry.Size = .{ .width = @floatFromInt(px.width), .height = @floatFromInt(px.height) };
+                const result = try layout_mod.layout(arena, b, root, viewport);
+                placements = result.placements;
+                try b.beginFrame(viewport);
+                layout_mod.render(b, result);
+                try b.endFrame();
+                const pixels = try mb.readPixels();
+                defer gpa.free(pixels);
+                try writePpm(gpa, io, path, pixels, mb.width, mb.height);
                 return;
             }
             frame.draw();
