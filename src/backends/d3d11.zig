@@ -1157,6 +1157,198 @@ const D3dImageRenderer = struct {
     }
 };
 
+// === Slice 7: exact rect renderer (per-side borders, per-corner radii) ======
+// Ports gl.zig's ExactRectRenderer: a pixel shader that replicates
+// raster.zig's insideRounded() + borderColorAt() per fragment (pixel-center
+// sampling, per-corner radii, per-side border colors, hard edges / no AA),
+// matching the raster reference pixel-exact. SV_Position gives the pixel
+// center; D3D's window origin is top-left like our rects, so — unlike GL —
+// there is NO y-flip.
+
+const exact_hlsl =
+    \\cbuffer CB : register(b0) {
+    \\  float2 viewport; float2 pad0;
+    \\  float4 rect; float4 rad; float4 inner; float4 irad; float4 bw;
+    \\  float4 bg; float4 ct; float4 cr; float4 cb; float4 cl; float4 flags;
+    \\};
+    \\struct VSIn  { float2 pos : POSITION; };
+    \\struct VSOut { float4 pos : SV_POSITION; };
+    \\VSOut VSMain(VSIn i) {
+    \\  VSOut o;
+    \\  o.pos = float4(i.pos.x / viewport.x * 2.0 - 1.0, 1.0 - i.pos.y / viewport.y * 2.0, 0, 1);
+    \\  return o;
+    \\}
+    \\bool cornerOut(float2 p, float trad, float cx, float cy, float2 r0, float2 rsz) {
+    \\  if (trad <= 0.0) return false;
+    \\  bool in_x = (cx <= r0.x + rsz.x*0.5) ? (p.x < cx) : (p.x > cx);
+    \\  bool in_y = (cy <= r0.y + rsz.y*0.5) ? (p.y < cy) : (p.y > cy);
+    \\  if (in_x && in_y) { float dx = p.x-cx; float dy = p.y-cy; return dx*dx+dy*dy > trad*trad; }
+    \\  return false;
+    \\}
+    \\bool insideRounded(float4 r, float4 rd, float2 p) {
+    \\  if (p.x < r.x || p.x >= r.x + r.z || p.y < r.y || p.y >= r.y + r.w) return false;
+    \\  float mx = min(r.z, r.w) * 0.5;
+    \\  float2 r0 = r.xy; float2 rsz = r.zw;
+    \\  if (cornerOut(p, min(rd.x, mx), r.x + rd.x,       r.y + rd.x,       r0, rsz)) return false;
+    \\  if (cornerOut(p, min(rd.y, mx), r.x + r.z - rd.y, r.y + rd.y,       r0, rsz)) return false;
+    \\  if (cornerOut(p, min(rd.z, mx), r.x + r.z - rd.z, r.y + r.w - rd.z, r0, rsz)) return false;
+    \\  if (cornerOut(p, min(rd.w, mx), r.x + rd.w,       r.y + r.w - rd.w, r0, rsz)) return false;
+    \\  return true;
+    \\}
+    \\float4 borderColorAt(float2 p) {
+    \\  if (p.x < rect.x + rad.x && p.y < rect.y + rad.x) return (bw.x > 0.0) ? ct : cl;
+    \\  if (p.x >= rect.x + rect.z - rad.y && p.y < rect.y + rad.y) return (bw.x > 0.0) ? ct : cr;
+    \\  if (p.x >= rect.x + rect.z - rad.z && p.y >= rect.y + rect.w - rad.z) return (bw.z > 0.0) ? cb : cr;
+    \\  if (p.x < rect.x + rad.w && p.y >= rect.y + rect.w - rad.w) return (bw.z > 0.0) ? cb : cl;
+    \\  if (p.y < inner.y) return ct;
+    \\  if (p.y >= inner.y + inner.w) return cb;
+    \\  if (p.x < inner.x) return cl;
+    \\  return cr;
+    \\}
+    \\float4 PSMain(VSOut i) : SV_TARGET {
+    \\  float2 p = i.pos.xy; // pixel center, top-left origin — no flip
+    \\  if (!insideRounded(rect, rad, p)) { discard; }
+    \\  bool has_border = (bw.x + bw.y + bw.z + bw.w) > 0.0;
+    \\  if (has_border && !insideRounded(inner, irad, p)) return borderColorAt(p);
+    \\  if (flags.x > 0.5) return bg;
+    \\  discard;
+    \\  return float4(0,0,0,0);
+    \\}
+;
+
+const ExactCB = extern struct {
+    vw: f32,
+    vh: f32,
+    pad0: f32 = 0,
+    pad1: f32 = 0,
+    rect: [4]f32,
+    rad: [4]f32,
+    inner: [4]f32,
+    irad: [4]f32,
+    bw: [4]f32,
+    bg: [4]f32,
+    ct: [4]f32,
+    cr: [4]f32,
+    cb: [4]f32,
+    cl: [4]f32,
+    flags: [4]f32,
+};
+
+pub const D3dExactRectRenderer = struct {
+    device: *IDevice,
+    context: *IContext,
+    vs: *IVertexShader,
+    ps: *IPixelShader,
+    layout: *IInputLayout,
+    raster: *IRasterizerState,
+    blend: *IBlendState,
+
+    pub fn init(device: *IDevice, context: *IContext, scissor: bool) Error!D3dExactRectRenderer {
+        const d3d_compile = loadD3DCompile() orelse return error.ShaderFailed;
+        const vs_blob = compileSrc(d3d_compile, exact_hlsl, "VSMain", "vs_4_0") orelse return error.ShaderFailed;
+        defer release(vs_blob);
+        const ps_blob = compileSrc(d3d_compile, exact_hlsl, "PSMain", "ps_4_0") orelse return error.ShaderFailed;
+        defer release(ps_blob);
+        const vs_ptr = vs_blob.vtbl.GetBufferPointer(vs_blob).?;
+        const vs_len = vs_blob.vtbl.GetBufferSize(vs_blob);
+        var vs: ?*IVertexShader = null;
+        if (!ok(device.vtbl.CreateVertexShader(device, vs_ptr, vs_len, null, &vs)) or vs == null) return error.ShaderFailed;
+        var ps: ?*IPixelShader = null;
+        if (!ok(device.vtbl.CreatePixelShader(device, ps_blob.vtbl.GetBufferPointer(ps_blob).?, ps_blob.vtbl.GetBufferSize(ps_blob), null, &ps)) or ps == null) return error.ShaderFailed;
+        var elems = [_]D3D11_INPUT_ELEMENT_DESC{
+            .{ .semantic_name = "POSITION", .format = DXGI_FORMAT_R32G32_FLOAT, .aligned_byte_offset = 0 },
+        };
+        var layout: ?*IInputLayout = null;
+        if (!ok(device.vtbl.CreateInputLayout(device, &elems, 1, vs_ptr, vs_len, &layout)) or layout == null) return error.ShaderFailed;
+        var rdesc: D3D11_RASTERIZER_DESC = .{ .scissor_enable = @intFromBool(scissor) };
+        var raster: ?*IRasterizerState = null;
+        if (!ok(device.vtbl.CreateRasterizerState(device, &rdesc, &raster)) or raster == null) return error.ShaderFailed;
+        var bdesc: D3D11_BLEND_DESC = .{ .render_target = [_]D3D11_RENDER_TARGET_BLEND_DESC{.{}} ** 8 };
+        bdesc.render_target[0] = .{ .blend_enable = 1, .src_blend = D3D11_BLEND_SRC_ALPHA, .dest_blend = D3D11_BLEND_INV_SRC_ALPHA, .blend_op = D3D11_BLEND_OP_ADD, .src_blend_alpha = D3D11_BLEND_ONE, .dest_blend_alpha = D3D11_BLEND_INV_SRC_ALPHA, .blend_op_alpha = D3D11_BLEND_OP_ADD };
+        var blend: ?*IBlendState = null;
+        if (!ok(device.vtbl.CreateBlendState(device, &bdesc, &blend)) or blend == null) return error.ShaderFailed;
+        return .{ .device = device, .context = context, .vs = vs.?, .ps = ps.?, .layout = layout.?, .raster = raster.?, .blend = blend.? };
+    }
+
+    pub fn deinit(self: *D3dExactRectRenderer) void {
+        release(self.blend);
+        release(self.raster);
+        release(self.layout);
+        release(self.ps);
+        release(self.vs);
+    }
+
+    /// Draw one styled rect, replicating raster pixel-exact.
+    pub fn draw(self: *D3dExactRectRenderer, rtv: *IRtv, vw: f32, vh: f32, rect: geometry.Rect, rs: style.RectStyle) Error!void {
+        const dev = self.device;
+        const ctx = self.context;
+        const b = rs.border;
+        const inner = [4]f32{
+            rect.x + b.left.width,
+            rect.y + b.top.width,
+            @max(0, rect.width - b.left.width - b.right.width),
+            @max(0, rect.height - b.top.width - b.bottom.width),
+        };
+        const crn = rs.corner_radius;
+        const irad = [4]f32{
+            @max(0, crn.top_left - @max(b.top.width, b.left.width)),
+            @max(0, crn.top_right - @max(b.top.width, b.right.width)),
+            @max(0, crn.bottom_right - @max(b.bottom.width, b.right.width)),
+            @max(0, crn.bottom_left - @max(b.bottom.width, b.left.width)),
+        };
+        var cbv: ExactCB = .{
+            .vw = vw,
+            .vh = vh,
+            .rect = .{ rect.x, rect.y, rect.width, rect.height },
+            .rad = .{ crn.top_left, crn.top_right, crn.bottom_right, crn.bottom_left },
+            .inner = inner,
+            .irad = irad,
+            .bw = .{ b.top.width, b.right.width, b.bottom.width, b.left.width },
+            .bg = if (rs.background) |bgc| col(bgc) else .{ 0, 0, 0, 0 },
+            .ct = col(b.top.color),
+            .cr = col(b.right.color),
+            .cb = col(b.bottom.color),
+            .cl = col(b.left.color),
+            .flags = .{ if (rs.background != null) 1 else 0, 0, 0, 0 },
+        };
+        var cb_data: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = &cbv };
+        var cb_desc: D3D11_BUFFER_DESC = .{ .byte_width = @sizeOf(ExactCB), .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_CONSTANT_BUFFER };
+        var cb: ?*IBuffer = null;
+        if (!ok(dev.vtbl.CreateBuffer(dev, &cb_desc, &cb_data, &cb)) or cb == null) return error.ShaderFailed;
+        defer release(cb.?);
+
+        const x0 = rect.x;
+        const y0 = rect.y;
+        const x1 = rect.x + rect.width;
+        const y1 = rect.y + rect.height;
+        const verts = [_]f32{ x0, y0, x1, y0, x0, y1, x1, y1 };
+        var vb_data: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = &verts };
+        var vb_desc: D3D11_BUFFER_DESC = .{ .byte_width = @sizeOf(@TypeOf(verts)), .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_VERTEX_BUFFER };
+        var vb: ?*IBuffer = null;
+        if (!ok(dev.vtbl.CreateBuffer(dev, &vb_desc, &vb_data, &vb)) or vb == null) return error.ShaderFailed;
+        defer release(vb.?);
+
+        var vp: D3D11_VIEWPORT = .{ .width = vw, .height = vh };
+        ctx.vtbl.RSSetViewports(ctx, 1, &vp);
+        ctx.vtbl.RSSetState(ctx, self.raster);
+        ctx.vtbl.OMSetBlendState(ctx, self.blend, null, 0xffffffff);
+        var rtv_slot: ?*IRtv = rtv;
+        ctx.vtbl.OMSetRenderTargets(ctx, 1, &rtv_slot, null);
+        ctx.vtbl.IASetInputLayout(ctx, self.layout);
+        var vb_slot: ?*IBuffer = vb.?;
+        const stride: UINT = 8;
+        const offset: UINT = 0;
+        ctx.vtbl.IASetVertexBuffers(ctx, 0, 1, &vb_slot, &stride, &offset);
+        ctx.vtbl.IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        ctx.vtbl.VSSetShader(ctx, self.vs, null, 0);
+        var cb_slot: ?*IBuffer = cb.?;
+        ctx.vtbl.VSSetConstantBuffers(ctx, 0, 1, &cb_slot);
+        ctx.vtbl.PSSetConstantBuffers(ctx, 0, 1, &cb_slot);
+        ctx.vtbl.PSSetShader(ctx, self.ps, null, 0);
+        ctx.vtbl.Draw(ctx, 4, 0);
+    }
+};
+
 // === Slice 6: the D3D11 Backend vtable =======================================
 // Implements backend.zig's draw-primitive interface on the D3D11 renderers,
 // so layout.render() drives D3D11 directly — matching GlBackend in gl.zig.
@@ -1182,7 +1374,7 @@ pub const D3dBackend = struct {
     gpa: std.mem.Allocator,
     off: D3dOffscreen,
     rect: D3dRectRenderer,
-    rounded: D3dRoundedRectRenderer,
+    exact: D3dExactRectRenderer,
     image: D3dImageRenderer,
     font: ?ttf.Font = null,
     glyphs: std.AutoHashMapUnmanaged(u32, D3dGlyphRenderer) = .empty,
@@ -1196,7 +1388,7 @@ pub const D3dBackend = struct {
             .gpa = gpa,
             .off = off,
             .rect = try D3dRectRenderer.init(off.device, off.context, true),
-            .rounded = try D3dRoundedRectRenderer.init(off.device, off.context, true),
+            .exact = try D3dExactRectRenderer.init(off.device, off.context, true),
             .image = try D3dImageRenderer.init(off.device, off.context),
         };
     }
@@ -1207,7 +1399,7 @@ pub const D3dBackend = struct {
         self.glyphs.deinit(self.gpa);
         self.clips.deinit(self.gpa);
         self.image.deinit();
-        self.rounded.deinit();
+        self.exact.deinit();
         self.rect.deinit();
         self.off.destroy();
     }
@@ -1272,10 +1464,9 @@ pub const D3dBackend = struct {
             }
             return;
         }
-        // bg + border + radius. Uniform approximation (top side / top-left
-        // radius) — exact per-side is a later slice.
-        const bg = if (rs.background) |b| col(b) else [4]f32{ 0, 0, 0, 0 };
-        self.rounded.draw(self.off.rtv, w, h, rect.x, rect.y, rect.width, rect.height, rs.corner_radius.top_left, rs.border.top.width, bg, col(rs.border.top.color)) catch {};
+        // bg + border + radius via the exact renderer: per-side borders +
+        // per-corner radii, pixel-exact vs raster (hard-edged).
+        self.exact.draw(self.off.rtv, w, h, rect, rs) catch {};
     }
 
     fn glyphFor(self: *D3dBackend, size_px: u16) ?*D3dGlyphRenderer {
