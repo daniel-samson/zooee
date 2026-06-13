@@ -24,6 +24,8 @@ pub fn build(b: *std.Build) void {
         .macos => {
             mod.linkFramework("AppKit", .{});
             mod.linkFramework("OpenGL", .{}); // CGL/NSOpenGL (#11)
+            mod.linkFramework("Metal", .{}); // (#101)
+            mod.linkFramework("QuartzCore", .{}); // CAMetalLayer (#101)
             mod.link_libc = true; // dlsym for GL proc resolution
         },
         .linux => {
@@ -69,6 +71,9 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&b.addInstallArtifact(addExe(b, target, optimize, null, "visual-diff", "tools/visual_diff.zig"), .{}).step);
     if (os == .linux or os == .macos) {
         check_step.dependOn(&b.addInstallArtifact(addExe(b, target, optimize, mod, "zooee-gl-check", "examples/gl_demo.zig"), .{}).step);
+    }
+    if (os == .macos) {
+        check_step.dependOn(&b.addInstallArtifact(addExe(b, target, optimize, mod, "zooee-metal-check", "examples/metal_demo.zig"), .{}).step);
     }
     if (os == .windows) {
         check_step.dependOn(&b.addInstallArtifact(addExe(b, target, optimize, mod, "zooee-d3d11-check", "examples/d3d11_demo.zig"), .{}).step);
