@@ -254,6 +254,7 @@ const Gl = struct {
     uniform1i: *const fn (GLint, GLint) callconv(.c) void,
     drawArrays: *const fn (GLenum, GLint, GLsizei) callconv(.c) void,
     genFramebuffers: *const fn (GLsizei, [*]GLuint) callconv(.c) void,
+    deleteFramebuffers: *const fn (GLsizei, [*]const GLuint) callconv(.c) void,
     bindFramebuffer: *const fn (GLenum, GLuint) callconv(.c) void,
     framebufferTexture2D: *const fn (GLenum, GLenum, GLenum, GLuint, GLint) callconv(.c) void,
     checkFramebufferStatus: *const fn (GLenum) callconv(.c) GLenum,
@@ -589,6 +590,88 @@ pub const GradientRenderer = struct {
         gl.bufferData(GL_ARRAY_BUFFER, @sizeOf(@TypeOf(verts)), &verts, GL_STATIC_DRAW);
         gl.vertexAttribPointer(self.pos_loc, 2, GL_FLOAT, GL_FALSE, 0, @ptrFromInt(0));
         gl.enableVertexAttribArray(self.pos_loc);
+        gl.drawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
+};
+
+const comp_vert: [*:0]const u8 =
+    \\#version 120
+    \\attribute vec2 pos;
+    \\attribute vec2 uv;
+    \\varying vec2 v_uv;
+    \\void main() { v_uv = uv; gl_Position = vec4(pos, 0.0, 1.0); }
+;
+const comp_frag: [*:0]const u8 =
+    \\#version 120
+    \\varying vec2 v_uv;
+    \\uniform sampler2D tex;
+    \\uniform float opacity;
+    \\void main() { vec4 c = texture2D(tex, v_uv); gl_FragColor = vec4(c.rgb, c.a * opacity); }
+;
+
+/// Composites an offscreen layer texture over the bound framebuffer at a
+/// uniform opacity (#121). Fragment emits straight-alpha (rgb, a*opacity);
+/// under enableBlend()'s source-over this matches raster's popLayer. The
+/// layer texture and the target FBO share GL's bottom-up orientation, so the
+/// quad maps uv 1:1 to pos (no v-flip).
+pub const LayerCompositor = struct {
+    gl: Gl,
+    program: GLuint,
+    vao: GLuint,
+    vbo: GLuint,
+    pos_loc: GLuint,
+    uv_loc: GLuint,
+    u_tex: GLint,
+    u_opacity: GLint,
+
+    pub fn init() Error!LayerCompositor {
+        const gl = try Gl.load();
+        const vs = QuadRenderer.compile(gl, GL_VERTEX_SHADER, comp_vert) orelse return error.NoContext;
+        const fs = QuadRenderer.compile(gl, GL_FRAGMENT_SHADER, comp_frag) orelse return error.NoContext;
+        const prog = gl.createProgram();
+        gl.attachShader(prog, vs);
+        gl.attachShader(prog, fs);
+        gl.linkProgram(prog);
+        var ok: GLint = 0;
+        gl.getProgramiv(prog, GL_LINK_STATUS, &ok);
+        if (ok == 0) return error.NoContext;
+        var vao: GLuint = 0;
+        gl.genVertexArrays(1, @ptrCast(&vao));
+        var vbo: GLuint = 0;
+        gl.genBuffers(1, @ptrCast(&vbo));
+        return .{
+            .gl = gl,
+            .program = prog,
+            .vao = vao,
+            .vbo = vbo,
+            .pos_loc = @intCast(gl.getAttribLocation(prog, "pos")),
+            .uv_loc = @intCast(gl.getAttribLocation(prog, "uv")),
+            .u_tex = gl.getUniformLocation(prog, "tex"),
+            .u_opacity = gl.getUniformLocation(prog, "opacity"),
+        };
+    }
+
+    pub fn composite(self: *LayerCompositor, tex: GLuint, opacity: f32) void {
+        const gl = self.gl;
+        gl.useProgram(self.program);
+        gl.uniform1f(self.u_opacity, opacity);
+        gl.activeTexture(GL_TEXTURE0);
+        gl.bindTexture(GL_TEXTURE_2D, tex);
+        gl.uniform1i(self.u_tex, 0);
+        // pos.xy NDC, uv.xy (no flip): both FBOs are bottom-up.
+        const verts = [_]f32{
+            -1, -1, 0, 0,
+            1,  -1, 1, 0,
+            -1, 1,  0, 1,
+            1,  1,  1, 1,
+        };
+        gl.bindVertexArray(self.vao);
+        gl.bindBuffer(GL_ARRAY_BUFFER, self.vbo);
+        gl.bufferData(GL_ARRAY_BUFFER, @sizeOf(@TypeOf(verts)), &verts, GL_STATIC_DRAW);
+        gl.vertexAttribPointer(self.pos_loc, 2, GL_FLOAT, GL_FALSE, 16, @ptrFromInt(0));
+        gl.enableVertexAttribArray(self.pos_loc);
+        gl.vertexAttribPointer(self.uv_loc, 2, GL_FLOAT, GL_FALSE, 16, @ptrFromInt(8));
+        gl.enableVertexAttribArray(self.uv_loc);
         gl.drawArrays(GL_TRIANGLE_STRIP, 0, 4);
     }
 };
@@ -1313,6 +1396,10 @@ const Backend = backend_mod.Backend;
 
 const ScissorRect = struct { x0: i32, y0: i32, x1: i32, y1: i32 };
 
+/// A pushed group-opacity layer (#121): its offscreen FBO + color texture and
+/// the framebuffer it redirected from (composited back into on popLayer).
+const LayerState = struct { fbo: GLuint, tex: GLuint, parent_fbo: GLuint, opacity: f32 };
+
 pub const GlBackend = struct {
     gpa: std.mem.Allocator,
     /// Owned hidden window for the offscreen/golden path; null when the
@@ -1322,6 +1409,12 @@ pub const GlBackend = struct {
     exact: ExactRectRenderer,
     image: ImageRenderer,
     grad: GradientRenderer,
+    comp: LayerCompositor,
+    /// Active group-opacity layers (#121): each holds its offscreen FBO +
+    /// texture and the framebuffer to composite back into on popLayer.
+    layers: std.ArrayList(LayerState) = .empty,
+    /// The framebuffer currently bound for draws (frame FBO, 0, or a layer).
+    bound_fbo: GLuint = 0,
     /// When true, render straight to the window's default framebuffer
     /// (fbo 0) instead of an offscreen FBO — the GPU-present path. The
     /// pixel→NDC mapping is identical, so output is upright on screen.
@@ -1344,6 +1437,7 @@ pub const GlBackend = struct {
             .exact = try ExactRectRenderer.init(),
             .image = try ImageRenderer.init(),
             .grad = try GradientRenderer.init(),
+            .comp = try LayerCompositor.init(),
         };
     }
 
@@ -1358,11 +1452,17 @@ pub const GlBackend = struct {
             .exact = try ExactRectRenderer.init(),
             .image = try ImageRenderer.init(),
             .grad = try GradientRenderer.init(),
+            .comp = try LayerCompositor.init(),
             .default_fb = true,
         };
     }
 
     pub fn deinit(self: *GlBackend) void {
+        for (self.layers.items) |l| {
+            self.comp.gl.deleteFramebuffers(1, @ptrCast(&l.fbo));
+            self.comp.gl.deleteTextures(1, @ptrCast(&l.tex));
+        }
+        self.layers.deinit(self.gpa);
         self.clips.deinit(self.gpa);
         var it = self.glyphs.valueIterator();
         while (it.next()) |g| g.deinit();
@@ -1394,6 +1494,8 @@ pub const GlBackend = struct {
         .draw_image = drawImage,
         .push_clip = pushClip,
         .pop_clip = popClip,
+        .push_layer = pushLayer,
+        .pop_layer = popLayer,
         .create_texture = createTexture,
         .destroy_texture = destroyTexture,
         .measure_text = measureText,
@@ -1414,6 +1516,7 @@ pub const GlBackend = struct {
             self.width = w;
             self.height = h;
             gl.bindFramebuffer(GL_FRAMEBUFFER, 0);
+            self.bound_fbo = 0;
             glViewport(0, 0, w, h);
             glDisable(GL_SCISSOR_TEST);
             glClearColor(1, 1, 1, 1); // match raster's white clear
@@ -1435,6 +1538,7 @@ pub const GlBackend = struct {
             self.height = h;
         }
         gl.bindFramebuffer(GL_FRAMEBUFFER, self.fbo);
+        self.bound_fbo = self.fbo;
         glViewport(0, 0, w, h);
         glDisable(GL_SCISSOR_TEST);
         glClearColor(1, 1, 1, 1); // match raster's white clear
@@ -1444,7 +1548,8 @@ pub const GlBackend = struct {
     }
 
     fn endFrame(ptr: *anyopaque) Backend.Error!void {
-        _ = self_(ptr);
+        const self = self_(ptr);
+        std.debug.assert(self.layers.items.len == 0); // balanced push/popLayer
         glFinish();
     }
 
@@ -1548,6 +1653,51 @@ pub const GlBackend = struct {
         const self = self_(ptr);
         if (self.clips.items.len > 0) _ = self.clips.pop();
         self.applyScissor();
+    }
+
+    /// Redirect draws into a fresh transparent offscreen FBO (#121). The clip
+    /// stack and viewport carry over; on popLayer the layer texture is
+    /// composited back over the parent framebuffer at the layer opacity.
+    fn pushLayer(ptr: *anyopaque, opacity: f32) Backend.Error!void {
+        const self = self_(ptr);
+        const gl = self.comp.gl;
+        var fbo: GLuint = 0;
+        var tex: GLuint = 0;
+        gl.genFramebuffers(1, @ptrCast(&fbo));
+        gl.genTextures(1, @ptrCast(&tex));
+        gl.bindTexture(GL_TEXTURE_2D, tex);
+        gl.texImage2D(GL_TEXTURE_2D, 0, GL_RGBA, @intCast(self.width), @intCast(self.height), 0, GL_RGBA, GL_UNSIGNED_BYTE, null);
+        gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        gl.bindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl.framebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+        self.layers.append(self.gpa, .{ .fbo = fbo, .tex = tex, .parent_fbo = self.bound_fbo, .opacity = opacity }) catch {
+            gl.deleteFramebuffers(1, @ptrCast(&fbo));
+            gl.deleteTextures(1, @ptrCast(&tex));
+            return error.OutOfMemory;
+        };
+        self.bound_fbo = fbo;
+        glViewport(0, 0, self.width, self.height);
+        glClearColor(0, 0, 0, 0); // transparent layer
+        glClear(GL_COLOR_BUFFER_BIT);
+        enableBlend();
+        self.applyScissor();
+    }
+
+    fn popLayer(ptr: *anyopaque) void {
+        const self = self_(ptr);
+        const gl = self.comp.gl;
+        const l = self.layers.pop() orelse return;
+        gl.bindFramebuffer(GL_FRAMEBUFFER, l.parent_fbo);
+        self.bound_fbo = l.parent_fbo;
+        glViewport(0, 0, self.width, self.height);
+        self.applyScissor();
+        enableBlend();
+        self.comp.composite(l.tex, l.opacity);
+        // The composite draw is issued; GL completes it before honoring the
+        // deletes, so freeing now is safe.
+        gl.deleteFramebuffers(1, @ptrCast(&l.fbo));
+        gl.deleteTextures(1, @ptrCast(&l.tex));
     }
 
     fn createTexture(ptr: *anyopaque, width: u32, height: u32, rgba: []const u8) Backend.Error!*Backend.Texture {
