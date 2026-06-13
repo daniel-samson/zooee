@@ -515,6 +515,43 @@ fn runWindowD3d(
     var placements: []layout_mod.Placement = &.{};
     var dirty = true;
 
+    // One-frame resize+render+present, callable from win32 WM_SIZE during the
+    // modal WM_ENTERSIZEMOVE loop (which parks our pump loop) so the content
+    // redraws live instead of freezing until the drag ends. Resizing the
+    // swapchain each step also keeps CopyResource from no-op'ing (no stretch).
+    const Frame = struct {
+        model: *Model,
+        win: @TypeOf(window),
+        backend: @TypeOf(b),
+        db: *d3d_backend.D3dBackend,
+        swapchain: @TypeOf(swapchain),
+        arena: *std.heap.ArenaAllocator,
+        placements: *[]layout_mod.Placement,
+
+        fn draw(self: *@This()) void {
+            _ = self.arena.reset(.retain_capacity);
+            const a = self.arena.allocator();
+            const px = platform.contentPixelSize(self.win);
+            self.swapchain.resize(@intCast(px.width), @intCast(px.height)) catch {};
+            const scale: f32 = @floatCast(px.scale);
+            const root = self.model.view(a, scale) catch return;
+            const viewport: geometry.Size = .{ .width = @floatFromInt(px.width), .height = @floatFromInt(px.height) };
+            const result = layout_mod.layout(a, self.backend, root, viewport) catch return;
+            self.placements.* = result.placements;
+            self.backend.beginFrame(viewport) catch return;
+            layout_mod.render(self.backend, result);
+            self.backend.endFrame() catch return;
+            self.db.presentTo(self.swapchain);
+        }
+    };
+    var frame: Frame = .{ .model = model, .win = window, .backend = b, .db = &db, .swapchain = swapchain, .arena = &frame_arena, .placements = &placements };
+    window.setRedraw(&frame, struct {
+        fn call(p: ?*anyopaque) void {
+            const f: *Frame = @ptrCast(@alignCast(p));
+            f.draw();
+        }
+    }.call);
+
     loop: while (true) {
         for (window.pumpEvents()) |ev| {
             switch (dispatch(Model, Msg, model, ev, placements)) {
@@ -525,30 +562,26 @@ fn runWindowD3d(
         }
 
         if (dirty) {
-            _ = frame_arena.reset(.retain_capacity);
-            const arena = frame_arena.allocator();
-            const px = platform.contentPixelSize(window);
-            // Keep the swapchain back buffer matched to the window, else the
-            // size-mismatched CopyResource no-ops and Present stretches the
-            // stale frame (and clicks miss the now-misplaced controls).
-            swapchain.resize(@intCast(px.width), @intCast(px.height)) catch {};
-            const scale: f32 = @floatCast(px.scale);
-            const root = try model.view(arena, scale);
-            const viewport: geometry.Size = .{ .width = @floatFromInt(px.width), .height = @floatFromInt(px.height) };
-            const result = try layout_mod.layout(arena, b, root, viewport);
-            placements = result.placements;
-            try b.beginFrame(viewport);
-            layout_mod.render(b, result);
-            try b.endFrame();
-
+            // Headless capture hook: render one frame to the offscreen RT,
+            // read it back, write a PPM, and exit.
             if (capture_path) |path| {
+                _ = frame_arena.reset(.retain_capacity);
+                const arena = frame_arena.allocator();
+                const px = platform.contentPixelSize(window);
+                const scale: f32 = @floatCast(px.scale);
+                const root = try model.view(arena, scale);
+                const viewport: geometry.Size = .{ .width = @floatFromInt(px.width), .height = @floatFromInt(px.height) };
+                const result = try layout_mod.layout(arena, b, root, viewport);
+                placements = result.placements;
+                try b.beginFrame(viewport);
+                layout_mod.render(b, result);
+                try b.endFrame();
                 const pixels = try db.readPixels();
                 defer gpa.free(pixels);
                 try writePpm(gpa, io, path, pixels, db.off.width, db.off.height);
                 return;
             }
-
-            db.presentTo(swapchain);
+            frame.draw();
             dirty = false;
         }
 
