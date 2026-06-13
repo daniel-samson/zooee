@@ -66,6 +66,7 @@ const D3D11_USAGE_IMMUTABLE: UINT = 1;
 const D3D11_USAGE_STAGING: UINT = 3;
 const D3D11_BIND_RENDER_TARGET: UINT = 0x20;
 const D3D11_BIND_VERTEX_BUFFER: UINT = 0x1;
+const D3D11_BIND_CONSTANT_BUFFER: UINT = 0x4;
 const D3D11_BIND_SHADER_RESOURCE: UINT = 0x8;
 const D3D11_CPU_ACCESS_READ: UINT = 0x20000;
 const D3D11_MAP_READ: UINT = 1;
@@ -106,7 +107,8 @@ const IDevice = extern struct {
 const IContext = extern struct {
     vtbl: *const Vtbl,
     const Vtbl = extern struct {
-        _pad0: [8]*const anyopaque, // IUnknown(3)+DeviceChild(4)+VSSetConstantBuffers(7)
+        _pad0: [7]*const anyopaque, // IUnknown(3)+DeviceChild(4)
+        VSSetConstantBuffers: *const fn (*IContext, UINT, UINT, *const ?*IBuffer) callconv(WINAPI) void, // 7
         PSSetShaderResources: *const fn (*IContext, UINT, UINT, *const ?*ISrv) callconv(WINAPI) void, // 8
         PSSetShader: *const fn (*IContext, ?*IPixelShader, ?*const anyopaque, UINT) callconv(WINAPI) void, // 9
         PSSetSamplers: *const fn (*IContext, UINT, UINT, *const ?*ISampler) callconv(WINAPI) void, // 10
@@ -115,7 +117,7 @@ const IContext = extern struct {
         Draw: *const fn (*IContext, UINT, UINT) callconv(WINAPI) void, // 13
         Map: *const fn (*IContext, *ITexture2D, UINT, UINT, UINT, *D3D11_MAPPED_SUBRESOURCE) callconv(WINAPI) HRESULT, // 14
         Unmap: *const fn (*IContext, *ITexture2D, UINT) callconv(WINAPI) void, // 15
-        _pad2: [1]*const anyopaque, // PSSetConstantBuffers(16)
+        PSSetConstantBuffers: *const fn (*IContext, UINT, UINT, *const ?*IBuffer) callconv(WINAPI) void, // 16
         IASetInputLayout: *const fn (*IContext, ?*IInputLayout) callconv(WINAPI) void, // 17
         IASetVertexBuffers: *const fn (*IContext, UINT, UINT, *const ?*IBuffer, *const UINT, *const UINT) callconv(WINAPI) void, // 18
         _pad3: [5]*const anyopaque, // 19..23
@@ -237,6 +239,16 @@ fn loadD3DCompile() ?D3DCompileFn {
     const dll = LoadLibraryA("d3dcompiler_47.dll") orelse return null;
     const p = GetProcAddress(dll, "D3DCompile") orelse return null;
     return @ptrCast(@alignCast(p));
+}
+
+/// Compile one HLSL entry point to a bytecode blob (caller releases it).
+fn compileSrc(d3d_compile: D3DCompileFn, src: []const u8, entry: [*:0]const u8, target: [*:0]const u8) ?*IBlob {
+    var code: ?*IBlob = null;
+    var errs: ?*IBlob = null;
+    const hr = d3d_compile(src.ptr, src.len, "zooee.hlsl", null, null, entry, target, 0, 0, &code, &errs);
+    if (errs) |e| release(e);
+    if (!ok(hr)) return null;
+    return code;
 }
 
 /// Release any COM object — Release is IUnknown slot 2, present on every
@@ -366,15 +378,6 @@ pub const D3dOffscreen = struct {
         \\float4 PSMain(VSOut i) : SV_TARGET { return tex.Sample(smp, i.uv); }
     ;
 
-    fn compile(d3d_compile: D3DCompileFn, entry: [*:0]const u8, target: [*:0]const u8) ?*IBlob {
-        var code: ?*IBlob = null;
-        var errs: ?*IBlob = null;
-        const hr = d3d_compile(hlsl.ptr, hlsl.len, "zooee.hlsl", null, null, entry, target, 0, 0, &code, &errs);
-        if (errs) |e| release(e);
-        if (!ok(hr)) return null;
-        return code;
-    }
-
     /// Draw `rgba` (w×h, top-down) as a fullscreen textured quad into the
     /// render target. Point sampling, clamp — matches raster's nearest.
     pub fn drawTexture(self: *D3dOffscreen, rgba: []const u8, w: u32, h: u32) Error!void {
@@ -382,9 +385,9 @@ pub const D3dOffscreen = struct {
         const ctx = self.context;
 
         const d3d_compile = loadD3DCompile() orelse return error.ShaderFailed;
-        const vs_blob = compile(d3d_compile, "VSMain", "vs_4_0") orelse return error.ShaderFailed;
+        const vs_blob = compileSrc(d3d_compile, hlsl, "VSMain", "vs_4_0") orelse return error.ShaderFailed;
         defer release(vs_blob);
-        const ps_blob = compile(d3d_compile, "PSMain", "ps_4_0") orelse return error.ShaderFailed;
+        const ps_blob = compileSrc(d3d_compile, hlsl, "PSMain", "ps_4_0") orelse return error.ShaderFailed;
         defer release(ps_blob);
         const vs_ptr = vs_blob.vtbl.GetBufferPointer(vs_blob).?;
         const vs_len = vs_blob.vtbl.GetBufferSize(vs_blob);
@@ -471,6 +474,107 @@ pub const D3dOffscreen = struct {
         ctx.vtbl.PSSetShaderResources(ctx, 0, 1, &srv_slot);
         var samp_slot: ?*ISampler = sampler.?;
         ctx.vtbl.PSSetSamplers(ctx, 0, 1, &samp_slot);
+        ctx.vtbl.Draw(ctx, 4, 0);
+    }
+};
+
+// === Slice 3: native rect geometry ==========================================
+// Draws solid-color rects as GPU triangle-strip quads — the first true GPU
+// *drawing* (vs texturing a CPU image). Mirrors gl.zig's RectRenderer: the VS
+// maps pixel coords → NDC via a viewport constant buffer, the PS outputs the
+// uniform color. Shaders/layout/rasterizer are compiled once; each fillRect
+// uploads a 4-vertex quad + a {viewport,color} constant buffer.
+
+const rect_hlsl =
+    \\cbuffer CB : register(b0) { float2 viewport; float2 pad; float4 color; };
+    \\struct VSIn  { float2 pos : POSITION; };
+    \\struct VSOut { float4 pos : SV_POSITION; };
+    \\VSOut VSMain(VSIn i) {
+    \\  VSOut o;
+    \\  float2 ndc = float2(i.pos.x / viewport.x * 2.0 - 1.0, 1.0 - i.pos.y / viewport.y * 2.0);
+    \\  o.pos = float4(ndc, 0, 1);
+    \\  return o;
+    \\}
+    \\float4 PSMain(VSOut i) : SV_TARGET { return color; }
+;
+
+const RectCB = extern struct { vw: f32, vh: f32, pad0: f32 = 0, pad1: f32 = 0, color: [4]f32 };
+
+pub const D3dRectRenderer = struct {
+    device: *IDevice,
+    context: *IContext,
+    vs: *IVertexShader,
+    ps: *IPixelShader,
+    layout: *IInputLayout,
+    raster: *IRasterizerState,
+
+    pub fn init(device: *IDevice, context: *IContext) Error!D3dRectRenderer {
+        const d3d_compile = loadD3DCompile() orelse return error.ShaderFailed;
+        const vs_blob = compileSrc(d3d_compile, rect_hlsl, "VSMain", "vs_4_0") orelse return error.ShaderFailed;
+        defer release(vs_blob);
+        const ps_blob = compileSrc(d3d_compile, rect_hlsl, "PSMain", "ps_4_0") orelse return error.ShaderFailed;
+        defer release(ps_blob);
+        const vs_ptr = vs_blob.vtbl.GetBufferPointer(vs_blob).?;
+        const vs_len = vs_blob.vtbl.GetBufferSize(vs_blob);
+
+        var vs: ?*IVertexShader = null;
+        if (!ok(device.vtbl.CreateVertexShader(device, vs_ptr, vs_len, null, &vs)) or vs == null) return error.ShaderFailed;
+        var ps: ?*IPixelShader = null;
+        if (!ok(device.vtbl.CreatePixelShader(device, ps_blob.vtbl.GetBufferPointer(ps_blob).?, ps_blob.vtbl.GetBufferSize(ps_blob), null, &ps)) or ps == null) return error.ShaderFailed;
+        var elems = [_]D3D11_INPUT_ELEMENT_DESC{
+            .{ .semantic_name = "POSITION", .format = DXGI_FORMAT_R32G32_FLOAT, .aligned_byte_offset = 0 },
+        };
+        var layout: ?*IInputLayout = null;
+        if (!ok(device.vtbl.CreateInputLayout(device, &elems, 1, vs_ptr, vs_len, &layout)) or layout == null) return error.ShaderFailed;
+        var rdesc: D3D11_RASTERIZER_DESC = .{};
+        var raster: ?*IRasterizerState = null;
+        if (!ok(device.vtbl.CreateRasterizerState(device, &rdesc, &raster)) or raster == null) return error.ShaderFailed;
+
+        return .{ .device = device, .context = context, .vs = vs.?, .ps = ps.?, .layout = layout.?, .raster = raster.? };
+    }
+
+    pub fn deinit(self: *D3dRectRenderer) void {
+        release(self.raster);
+        release(self.layout);
+        release(self.ps);
+        release(self.vs);
+    }
+
+    /// Fill a rect (pixel coords, y-down) into the render target. `vw`/`vh`
+    /// are the framebuffer size; color is RGBA 0..1.
+    pub fn fillRect(self: *D3dRectRenderer, rtv: *IRtv, vw: f32, vh: f32, x: f32, y: f32, w: f32, h: f32, color: [4]f32) Error!void {
+        const dev = self.device;
+        const ctx = self.context;
+        const verts = [_]f32{ x, y, x + w, y, x, y + h, x + w, y + h };
+        var vb_data: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = &verts };
+        var vb_desc: D3D11_BUFFER_DESC = .{ .byte_width = @sizeOf(@TypeOf(verts)), .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_VERTEX_BUFFER };
+        var vb: ?*IBuffer = null;
+        if (!ok(dev.vtbl.CreateBuffer(dev, &vb_desc, &vb_data, &vb)) or vb == null) return error.ShaderFailed;
+        defer release(vb.?);
+
+        var cbv: RectCB = .{ .vw = vw, .vh = vh, .color = color };
+        var cb_data: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = &cbv };
+        var cb_desc: D3D11_BUFFER_DESC = .{ .byte_width = @sizeOf(RectCB), .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_CONSTANT_BUFFER };
+        var cb: ?*IBuffer = null;
+        if (!ok(dev.vtbl.CreateBuffer(dev, &cb_desc, &cb_data, &cb)) or cb == null) return error.ShaderFailed;
+        defer release(cb.?);
+
+        var vp: D3D11_VIEWPORT = .{ .width = vw, .height = vh };
+        ctx.vtbl.RSSetViewports(ctx, 1, &vp);
+        ctx.vtbl.RSSetState(ctx, self.raster);
+        var rtv_slot: ?*IRtv = rtv;
+        ctx.vtbl.OMSetRenderTargets(ctx, 1, &rtv_slot, null);
+        ctx.vtbl.IASetInputLayout(ctx, self.layout);
+        var vb_slot: ?*IBuffer = vb.?;
+        const stride: UINT = 8;
+        const offset: UINT = 0;
+        ctx.vtbl.IASetVertexBuffers(ctx, 0, 1, &vb_slot, &stride, &offset);
+        ctx.vtbl.IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        ctx.vtbl.VSSetShader(ctx, self.vs, null, 0);
+        var cb_slot: ?*IBuffer = cb.?;
+        ctx.vtbl.VSSetConstantBuffers(ctx, 0, 1, &cb_slot); // viewport (VS)
+        ctx.vtbl.PSSetConstantBuffers(ctx, 0, 1, &cb_slot); // color (PS)
+        ctx.vtbl.PSSetShader(ctx, self.ps, null, 0);
         ctx.vtbl.Draw(ctx, 4, 0);
     }
 };
