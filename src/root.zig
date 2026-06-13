@@ -24,6 +24,7 @@ pub const fixtures = @import("testing/scenes.zig");
 
 /// OFL test font (tests/goldens only — runtime apps use OS fonts, #10).
 pub const test_font_ttf = @embedFile("poppins");
+pub const app_fixtures = @import("testing/app_fixture.zig");
 
 pub const event = @import("event.zig");
 pub const font = struct {
