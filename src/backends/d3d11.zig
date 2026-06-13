@@ -24,6 +24,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const ttf = @import("../font/ttf.zig");
 const grast = @import("../font/raster.zig");
+const gatlas = @import("../font/atlas.zig");
 const geometry = @import("../geometry.zig");
 const style = @import("../style.zig");
 const backend_mod = @import("../backend.zig");
@@ -930,22 +931,7 @@ pub const D3dRoundedRectRenderer = struct {
 // by the text color. Same approach as gl.zig's GlyphRenderer (non-ASCII /
 // dynamic glyphs are a follow-up, tracked separately).
 
-const atlas_w: u32 = 256;
-const first_cp: u21 = 32;
-const last_cp: u21 = 126;
-const glyph_count = last_cp - first_cp + 1;
-
-const GlyphEntry = struct {
-    u0: f32 = 0,
-    v0: f32 = 0,
-    u1: f32 = 0,
-    v1: f32 = 0,
-    w: f32 = 0,
-    h: f32 = 0,
-    x_off: f32 = 0,
-    y_off: f32 = 0,
-    advance: f32 = 0,
-};
+const atlas_dim: u32 = 512;
 
 const glyph_hlsl =
     \\cbuffer CB : register(b0) { float2 viewport; float2 pad; float4 color; };
@@ -978,73 +964,11 @@ pub const D3dGlyphRenderer = struct {
     sampler: *ISampler,
     atlas_tex: *ITexture2D,
     atlas_srv: *ISrv,
-    entries: [glyph_count]GlyphEntry,
-    ascent: f32,
+    atlas: gatlas.Atlas,
 
     pub fn init(gpa: std.mem.Allocator, device: *IDevice, context: *IContext, font: *const ttf.Font, size_px: f32, scissor: bool) !D3dGlyphRenderer {
-        // Rasterize ASCII glyphs, shelf-pack, build the atlas RGBA (identical
-        // packing to gl.zig's GlyphRenderer).
-        var entries: [glyph_count]GlyphEntry = undefined;
-        var bmps: [glyph_count]?grast.Bitmap = @splat(null);
-        defer for (&bmps) |*b| if (b.*) |*bb| bb.deinit(gpa);
-
-        const fscale = size_px / @as(f32, @floatFromInt(font.units_per_em));
-        var cx: u32 = 1;
-        var cy: u32 = 1;
-        var row_h: u32 = 0;
-        var atlas_h: u32 = 1;
-        for (0..glyph_count) |i| {
-            const cp: u21 = first_cp + @as(u21, @intCast(i));
-            const gi = font.glyphIndex(cp);
-            const adv = @as(f32, @floatFromInt(font.hMetrics(gi).advance)) * fscale;
-            entries[i] = .{ .advance = adv };
-            const outline = (font.outline(gpa, gi) catch null) orelse continue;
-            var o = outline;
-            defer o.deinit(gpa);
-            const bmp = grast.rasterize(gpa, font, o, size_px) catch continue;
-            bmps[i] = bmp;
-            if (cx + bmp.width + 1 > atlas_w) {
-                cx = 1;
-                cy += row_h + 1;
-                row_h = 0;
-            }
-            entries[i].u0 = @floatFromInt(cx);
-            entries[i].v0 = @floatFromInt(cy);
-            entries[i].w = @floatFromInt(bmp.width);
-            entries[i].h = @floatFromInt(bmp.height);
-            entries[i].x_off = @floatFromInt(bmp.x_off);
-            entries[i].y_off = @floatFromInt(bmp.y_off);
-            cx += @as(u32, @intCast(bmp.width)) + 1;
-            row_h = @max(row_h, @as(u32, @intCast(bmp.height)));
-            atlas_h = @max(atlas_h, cy + row_h + 1);
-        }
-
-        const atlas = try gpa.alloc(u8, atlas_w * atlas_h * 4);
-        defer gpa.free(atlas);
-        @memset(atlas, 0);
-        for (0..glyph_count) |i| {
-            const bmp = bmps[i] orelse continue;
-            const ax: usize = @intFromFloat(entries[i].u0);
-            const ay: usize = @intFromFloat(entries[i].v0);
-            var yy: usize = 0;
-            while (yy < bmp.height) : (yy += 1) {
-                var xx: usize = 0;
-                while (xx < bmp.width) : (xx += 1) {
-                    const a = bmp.alpha[yy * bmp.width + xx];
-                    const k = ((ay + yy) * atlas_w + (ax + xx)) * 4;
-                    atlas[k + 0] = 255;
-                    atlas[k + 1] = 255;
-                    atlas[k + 2] = 255;
-                    atlas[k + 3] = a;
-                }
-            }
-            const fw: f32 = @floatFromInt(atlas_w);
-            const fh: f32 = @floatFromInt(atlas_h);
-            entries[i].u1 = (entries[i].u0 + entries[i].w) / fw;
-            entries[i].v1 = (entries[i].v0 + entries[i].h) / fh;
-            entries[i].u0 /= fw;
-            entries[i].v0 /= fh;
-        }
+        var atlas = try gatlas.Atlas.init(gpa, font, size_px, atlas_dim, atlas_dim);
+        errdefer atlas.deinit();
 
         // GPU resources.
         const d3d_compile = loadD3DCompile() orelse return error.ShaderFailed;
@@ -1073,8 +997,8 @@ pub const D3dGlyphRenderer = struct {
         var blend: ?*IBlendState = null;
         if (!ok(device.vtbl.CreateBlendState(device, &bdesc, &blend)) or blend == null) return error.ShaderFailed;
 
-        var tdesc: D3D11_TEXTURE2D_DESC = .{ .width = atlas_w, .height = atlas_h, .format = DXGI_FORMAT_R8G8B8A8_UNORM, .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_SHADER_RESOURCE };
-        var tdata: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = atlas.ptr, .sys_mem_pitch = atlas_w * 4 };
+        var tdesc: D3D11_TEXTURE2D_DESC = .{ .width = atlas_dim, .height = atlas_dim, .format = DXGI_FORMAT_R8G8B8A8_UNORM, .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_SHADER_RESOURCE };
+        var tdata: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = atlas.pixels.ptr, .sys_mem_pitch = atlas_dim * 4 };
         var tex: ?*ITexture2D = null;
         if (!ok(device.vtbl.CreateTexture2D(device, &tdesc, &tdata, &tex)) or tex == null) return error.ShaderFailed;
         var srv: ?*ISrv = null;
@@ -1082,6 +1006,7 @@ pub const D3dGlyphRenderer = struct {
         var sdesc: D3D11_SAMPLER_DESC = .{ .filter = D3D11_FILTER_MIN_MAG_MIP_POINT, .address_u = D3D11_TEXTURE_ADDRESS_CLAMP, .address_v = D3D11_TEXTURE_ADDRESS_CLAMP, .address_w = D3D11_TEXTURE_ADDRESS_CLAMP };
         var sampler: ?*ISampler = null;
         if (!ok(device.vtbl.CreateSamplerState(device, &sdesc, &sampler)) or sampler == null) return error.ShaderFailed;
+        atlas.dirty = false; // initial (empty) atlas just uploaded
 
         return .{
             .device = device,
@@ -1094,8 +1019,7 @@ pub const D3dGlyphRenderer = struct {
             .sampler = sampler.?,
             .atlas_tex = tex.?,
             .atlas_srv = srv.?,
-            .entries = entries,
-            .ascent = @as(f32, @floatFromInt(font.ascent)) * fscale,
+            .atlas = atlas,
         };
     }
 
@@ -1108,20 +1032,45 @@ pub const D3dGlyphRenderer = struct {
         release(self.layout);
         release(self.ps);
         release(self.vs);
+        self.atlas.deinit();
     }
 
-    /// Draw `text` at pixel (x,y) (top-left) tinted `color` into the render
-    /// target. ASCII-only (32..126); other codepoints advance but don't draw.
+    /// Recreate the atlas texture + SRV from the CPU pixels if new glyphs were
+    /// packed (D3D11 IMMUTABLE textures can't be updated; recreating avoids the
+    /// UpdateSubresource/Map vtable plumbing and only happens when glyphs are
+    /// first seen). The atlas only appends, so this is rare after warm-up.
+    fn uploadAtlas(self: *D3dGlyphRenderer) Error!void {
+        if (!self.atlas.dirty) return;
+        var tdesc: D3D11_TEXTURE2D_DESC = .{ .width = self.atlas.width, .height = self.atlas.height, .format = DXGI_FORMAT_R8G8B8A8_UNORM, .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_SHADER_RESOURCE };
+        var tdata: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = self.atlas.pixels.ptr, .sys_mem_pitch = self.atlas.width * 4 };
+        var tex: ?*ITexture2D = null;
+        if (!ok(self.device.vtbl.CreateTexture2D(self.device, &tdesc, &tdata, &tex)) or tex == null) return error.ShaderFailed;
+        var srv: ?*ISrv = null;
+        if (!ok(self.device.vtbl.CreateShaderResourceView(self.device, tex.?, null, &srv)) or srv == null) {
+            release(tex.?);
+            return error.ShaderFailed;
+        }
+        release(self.atlas_srv);
+        release(self.atlas_tex);
+        self.atlas_tex = tex.?;
+        self.atlas_srv = srv.?;
+        self.atlas.dirty = false;
+    }
+
+    /// Draw `text` (UTF-8, any codepoint) at pixel (x,y) (top-left) tinted
+    /// `color` into the render target. Glyphs rasterized + packed on demand
+    /// into the dynamic atlas (#114); the texture is recreated before the draw
+    /// when new glyphs appear (the atlas appends, so existing UVs stay valid).
     pub fn drawText(self: *D3dGlyphRenderer, gpa: std.mem.Allocator, rtv: *IRtv, vw: f32, vh: f32, x: f32, y: f32, text: []const u8, color: [4]f32) !void {
         const dev = self.device;
         const ctx = self.context;
         var verts: std.ArrayList(f32) = .empty;
         defer verts.deinit(gpa);
         var pen = x;
-        const baseline = y + self.ascent;
-        for (text) |c| {
-            if (c < first_cp or c > last_cp) continue;
-            const e = self.entries[c - first_cp];
+        const baseline = y + self.atlas.ascent;
+        var it = std.unicode.Utf8View.initUnchecked(text).iterator();
+        while (it.nextCodepoint()) |cp| {
+            const e = self.atlas.glyph(self.atlas.font.glyphIndex(cp));
             if (e.w > 0) {
                 const gx = @round(pen) + e.x_off;
                 const gy = @round(baseline) + e.y_off;
@@ -1140,6 +1089,7 @@ pub const D3dGlyphRenderer = struct {
             pen += e.advance;
         }
         if (verts.items.len == 0) return;
+        try self.uploadAtlas();
 
         var vb_data: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = verts.items.ptr };
         var vb_desc: D3D11_BUFFER_DESC = .{ .byte_width = @intCast(verts.items.len * 4), .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_VERTEX_BUFFER };
