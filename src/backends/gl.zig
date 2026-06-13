@@ -261,6 +261,7 @@ const Gl = struct {
     uniform1f: *const fn (GLint, f32) callconv(.c) void,
     uniform2f: *const fn (GLint, f32, f32) callconv(.c) void,
     uniform4f: *const fn (GLint, f32, f32, f32, f32) callconv(.c) void,
+    uniform2fv: *const fn (GLint, GLsizei, [*]const f32) callconv(.c) void,
     getAttribLocation: *const fn (GLuint, [*:0]const u8) callconv(.c) GLint,
 
     fn load() Error!Gl {
@@ -680,6 +681,118 @@ pub const ShadowRenderer = struct {
         const w = quad[2];
         const h = quad[3];
         const verts = [_]f32{ x, y, x + w, y, x, y + h, x + w, y + h };
+        gl.bindVertexArray(self.vao);
+        gl.bindBuffer(GL_ARRAY_BUFFER, self.vbo);
+        gl.bufferData(GL_ARRAY_BUFFER, @sizeOf(@TypeOf(verts)), &verts, GL_STATIC_DRAW);
+        gl.vertexAttribPointer(self.pos_loc, 2, GL_FLOAT, GL_FALSE, 0, @ptrFromInt(0));
+        gl.enableVertexAttribArray(self.pos_loc);
+        gl.drawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
+};
+
+// Filled path (#120). v_px carries the top-down pixel pos; the PS runs the
+// same division-free even-odd test as geometry.pointInPolygon.
+const path_vert: [*:0]const u8 =
+    \\#version 120
+    \\attribute vec2 pos;
+    \\uniform vec2 viewport;
+    \\varying vec2 v_px;
+    \\void main() {
+    \\  v_px = pos;
+    \\  gl_Position = vec4(pos.x / viewport.x * 2.0 - 1.0, 1.0 - pos.y / viewport.y * 2.0, 0.0, 1.0);
+    \\}
+;
+const path_frag: [*:0]const u8 =
+    \\#version 120
+    \\uniform vec2 pts[64];
+    \\uniform int count;
+    \\uniform vec4 color;
+    \\varying vec2 v_px;
+    \\void main(){
+    \\  float px = v_px.x, py = v_px.y;
+    \\  bool inside = false;
+    \\  int j = count - 1;
+    \\  for (int i = 0; i < 64; i++) {
+    \\    if (i >= count) break;
+    \\    vec2 b = pts[i]; vec2 a = pts[j];
+    \\    if ((b.y > py) != (a.y > py)) {
+    \\      float lhs = (a.x - b.x) * (py - b.y);
+    \\      float rhs = (px - b.x) * (a.y - b.y);
+    \\      bool left = (a.y > b.y) ? (rhs < lhs) : (rhs > lhs);
+    \\      if (left) inside = !inside;
+    \\    }
+    \\    j = i;
+    \\  }
+    \\  if (!inside) discard;
+    \\  gl_FragColor = color;
+    \\}
+;
+
+/// Fills a closed polygon (#120) — the GL port of geometry.pointInPolygon.
+pub const PathRenderer = struct {
+    gl: Gl,
+    program: GLuint,
+    vao: GLuint,
+    vbo: GLuint,
+    pos_loc: GLuint,
+    u_viewport: GLint,
+    u_pts: GLint,
+    u_count: GLint,
+    u_color: GLint,
+    vw: f32 = 0,
+    vh: f32 = 0,
+
+    pub fn init() Error!PathRenderer {
+        const gl = try Gl.load();
+        const vs = QuadRenderer.compile(gl, GL_VERTEX_SHADER, path_vert) orelse return error.NoContext;
+        const fs = QuadRenderer.compile(gl, GL_FRAGMENT_SHADER, path_frag) orelse return error.NoContext;
+        const prog = gl.createProgram();
+        gl.attachShader(prog, vs);
+        gl.attachShader(prog, fs);
+        gl.linkProgram(prog);
+        var ok: GLint = 0;
+        gl.getProgramiv(prog, GL_LINK_STATUS, &ok);
+        if (ok == 0) return error.NoContext;
+        var vao: GLuint = 0;
+        gl.genVertexArrays(1, @ptrCast(&vao));
+        var vbo: GLuint = 0;
+        gl.genBuffers(1, @ptrCast(&vbo));
+        return .{
+            .gl = gl,
+            .program = prog,
+            .vao = vao,
+            .vbo = vbo,
+            .pos_loc = @intCast(gl.getAttribLocation(prog, "pos")),
+            .u_viewport = gl.getUniformLocation(prog, "viewport"),
+            .u_pts = gl.getUniformLocation(prog, "pts"),
+            .u_count = gl.getUniformLocation(prog, "count"),
+            .u_color = gl.getUniformLocation(prog, "color"),
+        };
+    }
+
+    pub fn fill(self: *PathRenderer, points: []const geometry.Point, color: [4]f32) void {
+        if (points.len < 3) return;
+        const gl = self.gl;
+        const n = @min(points.len, 64);
+        var flat: [128]f32 = undefined;
+        var minx = points[0].x;
+        var miny = points[0].y;
+        var maxx = points[0].x;
+        var maxy = points[0].y;
+        for (0..n) |i| {
+            flat[i * 2] = points[i].x;
+            flat[i * 2 + 1] = points[i].y;
+            minx = @min(minx, points[i].x);
+            miny = @min(miny, points[i].y);
+            maxx = @max(maxx, points[i].x);
+            maxy = @max(maxy, points[i].y);
+        }
+        gl.useProgram(self.program);
+        gl.uniform2f(self.u_viewport, self.vw, self.vh);
+        gl.uniform2fv(self.u_pts, @intCast(n), &flat);
+        gl.uniform1i(self.u_count, @intCast(n));
+        gl.uniform4f(self.u_color, color[0], color[1], color[2], color[3]);
+        const verts = [_]f32{ minx, miny, maxx, miny, minx, maxy, maxx, maxy };
         gl.bindVertexArray(self.vao);
         gl.bindBuffer(GL_ARRAY_BUFFER, self.vbo);
         gl.bufferData(GL_ARRAY_BUFFER, @sizeOf(@TypeOf(verts)), &verts, GL_STATIC_DRAW);
@@ -1611,6 +1724,7 @@ pub const GlBackend = struct {
     image: ImageRenderer,
     grad: GradientRenderer,
     shadow: ShadowRenderer,
+    path: PathRenderer,
     comp: LayerCompositor,
     rclip: RoundClipCompositor,
     /// Active group-opacity layers (#121): each holds its offscreen FBO +
@@ -1645,6 +1759,7 @@ pub const GlBackend = struct {
             .image = try ImageRenderer.init(),
             .grad = try GradientRenderer.init(),
             .shadow = try ShadowRenderer.init(),
+            .path = try PathRenderer.init(),
             .comp = try LayerCompositor.init(),
             .rclip = try RoundClipCompositor.init(),
         };
@@ -1662,6 +1777,7 @@ pub const GlBackend = struct {
             .image = try ImageRenderer.init(),
             .grad = try GradientRenderer.init(),
             .shadow = try ShadowRenderer.init(),
+            .path = try PathRenderer.init(),
             .comp = try LayerCompositor.init(),
             .rclip = try RoundClipCompositor.init(),
             .default_fb = true,
@@ -1709,6 +1825,7 @@ pub const GlBackend = struct {
         .draw_rect = drawRect,
         .draw_text = drawText,
         .draw_image = drawImage,
+        .fill_path = fillPath,
         .push_clip = pushClip,
         .pop_clip = popClip,
         .push_clip_rounded = pushClipRounded,
@@ -1850,6 +1967,14 @@ pub const GlBackend = struct {
         const self = self_(ptr);
         enableBlend();
         self.image.draw(@floatFromInt(self.width), @floatFromInt(self.height), rect, @intCast(@intFromPtr(texture)));
+    }
+
+    fn fillPath(ptr: *anyopaque, points: []const geometry.Point, color: style.Color) void {
+        const self = self_(ptr);
+        enableBlend();
+        self.path.vw = @floatFromInt(self.width);
+        self.path.vh = @floatFromInt(self.height);
+        self.path.fill(points, col(color));
     }
 
     fn applyScissor(self: *GlBackend) void {
