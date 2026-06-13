@@ -78,6 +78,7 @@ fn nsString(text: [*:0]const u8) id {
 // BGRA8Unorm=80 (required by CAMetalLayer for the window).
 const MTLPixelFormatRGBA8Unorm: u64 = 70;
 const MTLPixelFormatBGRA8Unorm: u64 = 80;
+const MTLLoadActionLoad: u64 = 1;
 const MTLLoadActionClear: u64 = 2;
 const MTLStoreActionStore: u64 = 1;
 const MTLPrimitiveTypeTriangleStrip: u64 = 4;
@@ -916,7 +917,65 @@ pub const MetalGradientRenderer = struct {
     }
 };
 
+// Compositor uniform. vp_op = {vw, vh, opacity, 0}.
+const CompUniform = extern struct { rect: [4]f32, vp_op: [4]f32 };
+
+/// Composites an offscreen layer texture over the current target at a uniform
+/// opacity (#121). The fragment outputs straight-alpha `(rgb, a*opacity)` and
+/// the pipeline's standard source-over blend matches raster's popLayer.
+pub const MetalLayerCompositor = struct {
+    device: id,
+    queue: id,
+    pipeline: id,
+    sampler: id,
+    enc: id = null,
+    vw: f32 = 0,
+    vh: f32 = 0,
+
+    const shader =
+        \\#include <metal_stdlib>
+        \\using namespace metal;
+        \\struct CompU { float4 rect; float4 vp_op; };
+        \\struct VOut { float4 pos [[position]]; float2 uv; };
+        \\vertex VOut v_main(uint vid [[vertex_id]], constant CompU& u [[buffer(0)]]) {
+        \\    float2 corner[4] = { float2(0,0), float2(1,0), float2(0,1), float2(1,1) };
+        \\    float2 c = corner[vid];
+        \\    float2 px = u.rect.xy + c * u.rect.zw;
+        \\    VOut o; o.pos = float4(px.x / u.vp_op.x * 2.0 - 1.0, 1.0 - px.y / u.vp_op.y * 2.0, 0, 1); o.uv = c; return o;
+        \\}
+        \\fragment float4 f_main(VOut in [[stage_in]], constant CompU& u [[buffer(0)]], texture2d<float> tex [[texture(0)]], sampler s [[sampler(0)]]) {
+        \\    float4 c = tex.sample(s, in.uv);
+        \\    return float4(c.rgb, c.a * u.vp_op.z);
+        \\}
+    ;
+
+    pub fn init(device: id, queue: id) Error!MetalLayerCompositor {
+        const pipeline = try compilePipeline(device, shader, MTLPixelFormatRGBA8Unorm, true);
+        const sampler = makeSampler(device);
+        return .{ .device = device, .queue = queue, .pipeline = pipeline, .sampler = sampler };
+    }
+
+    pub fn deinit(self: *MetalLayerCompositor) void {
+        release(self.sampler);
+        release(self.pipeline);
+    }
+
+    /// Draw `tex` over the whole viewport at `opacity`.
+    pub fn composite(self: *MetalLayerCompositor, tex: id, opacity: f32) void {
+        var u: CompUniform = .{ .rect = .{ 0, 0, self.vw, self.vh }, .vp_op = .{ self.vw, self.vh, opacity, 0 } };
+        _ = msg(void, struct { *const CompUniform, u64, u64 }, self.enc, sel("setVertexBytes:length:atIndex:"), .{ &u, @as(u64, @sizeOf(CompUniform)), 0 });
+        _ = msg(void, struct { *const CompUniform, u64, u64 }, self.enc, sel("setFragmentBytes:length:atIndex:"), .{ &u, @as(u64, @sizeOf(CompUniform)), 0 });
+        _ = msg(void, struct { id, u64 }, self.enc, sel("setFragmentTexture:atIndex:"), .{ tex, 0 });
+        _ = msg(void, struct { id, u64 }, self.enc, sel("setFragmentSamplerState:atIndex:"), .{ self.sampler, 0 });
+        _ = msg(void, struct { u64, u64, u64 }, self.enc, sel("drawPrimitives:vertexStart:vertexCount:"), .{ MTLPrimitiveTypeTriangleStrip, 0, 4 });
+    }
+};
+
 const ScissorRect = struct { x0: i32, y0: i32, x1: i32, y1: i32 };
+
+/// A pushed group-opacity layer (#121): the target it redirected from, the
+/// offscreen texture draws accumulate into, and the composite opacity.
+const LayerState = struct { parent: id, layer: id, opacity: f32 };
 const MTLScissorRect = extern struct { x: u64, y: u64, width: u64, height: u64 };
 
 /// The D3D11/GL-equivalent Metal Backend: implements the draw-primitive
@@ -933,8 +992,13 @@ pub const MetalBackend = struct {
     exact: MetalExactRectRenderer,
     image: MetalImageRenderer,
     grad: MetalGradientRenderer,
+    comp: MetalLayerCompositor,
     glyphs: std.AutoHashMapUnmanaged(u16, MetalGlyphRenderer) = .empty,
     clips: std.ArrayList(ScissorRect) = .empty,
+    /// Active group-opacity layers (#121) and the offscreen textures awaiting
+    /// release once the frame's command buffer completes.
+    layers: std.ArrayList(LayerState) = .empty,
+    pending_tex: std.ArrayList(id) = .empty,
     font: ?ttf.Font = null,
     enc: id = null,
     cmdbuf: id = null,
@@ -980,6 +1044,7 @@ pub const MetalBackend = struct {
             .exact = try MetalExactRectRenderer.init(ctx.device, ctx.queue),
             .image = try MetalImageRenderer.init(ctx.device, ctx.queue),
             .grad = try MetalGradientRenderer.init(ctx.device, ctx.queue),
+            .comp = try MetalLayerCompositor.init(ctx.device, ctx.queue),
         };
     }
 
@@ -988,10 +1053,15 @@ pub const MetalBackend = struct {
         while (it.next()) |g| g.deinit();
         self.glyphs.deinit(self.gpa);
         self.clips.deinit(self.gpa);
+        for (self.layers.items) |l| release(l.layer);
+        self.layers.deinit(self.gpa);
+        for (self.pending_tex.items) |t| release(t);
+        self.pending_tex.deinit(self.gpa);
         self.image.deinit();
         self.exact.deinit();
         self.rect.deinit();
         self.grad.deinit();
+        self.comp.deinit();
         if (self.present_sampler != null) release(self.present_sampler);
         if (self.present_pipeline != null) release(self.present_pipeline);
         if (self.target != null) release(self.target);
@@ -1053,6 +1123,8 @@ pub const MetalBackend = struct {
         .draw_image = drawImage,
         .push_clip = pushClip,
         .pop_clip = popClip,
+        .push_layer = pushLayer,
+        .pop_layer = popLayer,
         .create_texture = createTexture,
         .destroy_texture = destroyTexture,
         .measure_text = measureText,
@@ -1076,6 +1148,25 @@ pub const MetalBackend = struct {
         self.grad.enc = enc;
         self.grad.vw = w;
         self.grad.vh = h;
+        self.comp.enc = enc;
+        self.comp.vw = w;
+        self.comp.vh = h;
+    }
+
+    /// Start a fresh render pass targeting `tex` on the frame's command buffer,
+    /// install it as the current encoder, and restore viewport + scissor.
+    /// `clear` clears to transparent; otherwise the target's contents load.
+    fn beginPass(self: *MetalBackend, tex: id, clear: bool) void {
+        const rpd = msg(id, struct {}, cls("MTLRenderPassDescriptor"), sel("renderPassDescriptor"), .{});
+        const a0 = msg(id, struct { u64 }, msg(id, struct {}, rpd, sel("colorAttachments"), .{}), sel("objectAtIndexedSubscript:"), .{0});
+        _ = msg(void, struct { id }, a0, sel("setTexture:"), .{tex});
+        _ = msg(void, struct { u64 }, a0, sel("setLoadAction:"), .{if (clear) MTLLoadActionClear else MTLLoadActionLoad});
+        _ = msg(void, struct { u64 }, a0, sel("setStoreAction:"), .{MTLStoreActionStore});
+        if (clear) _ = msg(void, struct { MTLClearColor }, a0, sel("setClearColor:"), .{.{ .red = 0, .green = 0, .blue = 0, .alpha = 0 }});
+        const enc = msg(id, struct { id }, self.cmdbuf, sel("renderCommandEncoderWithDescriptor:"), .{rpd});
+        self.enc = enc;
+        self.setViewportOnRenderers(enc, @floatFromInt(self.width), @floatFromInt(self.height));
+        self.applyScissor();
     }
 
     fn beginFrame(ptr: *anyopaque, viewport: geometry.Size) Backend.Error!void {
@@ -1105,6 +1196,7 @@ pub const MetalBackend = struct {
 
     fn endFrame(ptr: *anyopaque) Backend.Error!void {
         const self = self_(ptr);
+        std.debug.assert(self.layers.items.len == 0); // balanced push/popLayer
         _ = msg(void, struct {}, self.enc, sel("endEncoding"), .{});
         // Upload any glyphs packed this frame — after endEncoding, before
         // commit (the atlas only appends, so the encoded quads read the final
@@ -1113,6 +1205,8 @@ pub const MetalBackend = struct {
         while (it.next()) |g| g.uploadIfDirty();
         _ = msg(void, struct {}, self.cmdbuf, sel("commit"), .{});
         _ = msg(void, struct {}, self.cmdbuf, sel("waitUntilCompleted"), .{});
+        for (self.pending_tex.items) |t| release(t);
+        self.pending_tex.clearRetainingCapacity();
         self.enc = null;
     }
 
@@ -1191,6 +1285,35 @@ pub const MetalBackend = struct {
         const self = self_(ptr);
         if (self.clips.items.len > 0) _ = self.clips.pop();
         self.applyScissor();
+    }
+
+    /// Redirect draws into a fresh transparent offscreen texture (#121). Ends
+    /// the current pass (storing the backdrop) and opens a clear pass on the
+    /// new layer texture; the clip stack and viewport carry over.
+    fn pushLayer(ptr: *anyopaque, opacity: f32) Backend.Error!void {
+        const self = self_(ptr);
+        const layer_tex = makeTexture(self.ctx.device, self.width, self.height, MTLPixelFormatRGBA8Unorm) catch return error.OutOfMemory;
+        self.layers.append(self.gpa, .{ .parent = self.target, .layer = layer_tex, .opacity = opacity }) catch {
+            release(layer_tex);
+            return error.OutOfMemory;
+        };
+        _ = msg(void, struct {}, self.enc, sel("endEncoding"), .{});
+        self.target = layer_tex;
+        self.beginPass(layer_tex, true);
+    }
+
+    /// Composite the top layer over its parent at the layer opacity, then
+    /// resume drawing into the parent. The layer texture is released after the
+    /// command buffer completes (endFrame).
+    fn popLayer(ptr: *anyopaque) void {
+        const self = self_(ptr);
+        const l = self.layers.pop() orelse return;
+        _ = msg(void, struct {}, self.enc, sel("endEncoding"), .{});
+        self.target = l.parent;
+        self.beginPass(l.parent, false); // load the backdrop
+        _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{self.comp.pipeline});
+        self.comp.composite(l.layer, l.opacity);
+        self.pending_tex.append(self.gpa, l.layer) catch release(l.layer);
     }
 
     fn createTexture(ptr: *anyopaque, width: u32, height: u32, rgba: []const u8) Backend.Error!*Backend.Texture {
