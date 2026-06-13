@@ -78,7 +78,7 @@ pub fn main(init: std.process.Init) !void {
     const rh: u32 = 24;
     var d3d3 = try d3d11.D3dOffscreen.create(rw, rh);
     defer d3d3.destroy();
-    var rects = try d3d11.D3dRectRenderer.init(d3d3.device, d3d3.context);
+    var rects = try d3d11.D3dRectRenderer.init(d3d3.device, d3d3.context, false);
     defer rects.deinit();
     const vw: f32 = @floatFromInt(rw);
     const vh: f32 = @floatFromInt(rh);
@@ -99,7 +99,7 @@ pub fn main(init: std.process.Init) !void {
     var d3d4 = try d3d11.D3dOffscreen.create(sw, sh);
     defer d3d4.destroy();
     d3d4.clear(0, 0, 0, 1); // black background
-    var rounded = try d3d11.D3dRoundedRectRenderer.init(d3d4.device, d3d4.context);
+    var rounded = try d3d11.D3dRoundedRectRenderer.init(d3d4.device, d3d4.context, false);
     defer rounded.deinit();
     try rounded.draw(d3d4.rtv, @floatFromInt(sw), @floatFromInt(sh), 4, 4, 32, 24, 6, 3, .{ 1, 1, 1, 1 }, .{ 0, 0.47, 1, 1 });
     const spx = try d3d4.readPixels(gpa);
@@ -120,7 +120,7 @@ pub fn main(init: std.process.Init) !void {
     defer d3d5.destroy();
     d3d5.clear(0, 0, 0, 1);
     const font = try zooee.font.ttf.Font.parse(zooee.test_font_ttf);
-    var glyphs = try d3d11.D3dGlyphRenderer.init(gpa, d3d5.device, d3d5.context, &font, 48);
+    var glyphs = try d3d11.D3dGlyphRenderer.init(gpa, d3d5.device, d3d5.context, &font, 48, false);
     defer glyphs.deinit();
     try glyphs.drawText(gpa, d3d5.rtv, @floatFromInt(gw), @floatFromInt(gh), 6, 6, "Hi zooee", .{ 1, 1, 1, 1 });
     const gpx = try d3d5.readPixels(gpa);
@@ -136,6 +136,56 @@ pub fn main(init: std.process.Init) !void {
     const glyph_ok = ink > 60 and right_ink == 0;
     try out.print("D3D11 glyph text: ink_px={d} right_margin_ink={d} {s}\n", .{ ink, right_ink, if (glyph_ok) "PASS" else "FAIL" });
 
+    // Slice 6: D3dBackend vtable. Render the shared fixtures through the
+    // D3D11 Backend AND the raster backend; compare with tolerance, proving
+    // D3dBackend matches the raster reference via the real interface. Like
+    // gl_demo, but only the fixtures the current renderers reproduce exactly
+    // (hard rects + scissor + textured image + text). Per-side borders /
+    // per-corner radii (sides/card/layout_card) need an exact renderer — a
+    // later slice, mirroring GL slice 7.
+    var backend_ok = true;
+    {
+        var db = d3d11.D3dBackend.initOffscreen(gpa) catch |err| {
+            try out.print("D3D-BACKEND-INIT-FAILED: {t}\n", .{err});
+            try out.flush();
+            std.process.exit(1);
+        };
+        defer db.deinit();
+        try db.setFont(zooee.test_font_ttf);
+        for ([_][]const u8{ "overlap", "nested_clip", "image", "hello_text" }) |name| {
+            const scene = findScene(name) orelse continue;
+            try zooee.fixtures.run(scene, db.interface(), 8);
+            const dpx = try db.readPixels();
+            var ras = zooee.backends.raster.RasterBackend.init(gpa);
+            defer ras.deinit();
+            try ras.setFont(zooee.test_font_ttf);
+            try zooee.fixtures.run(scene, ras.interface(), 8);
+            var bad: usize = 0;
+            const n = @min(dpx.len, ras.pixels.len) / 4;
+            for (0..n) |p| {
+                var md: u8 = 0;
+                for (0..3) |ch| {
+                    const a = dpx[p * 4 + ch];
+                    const bch = ras.pixels[p * 4 + ch];
+                    const d = if (a > bch) a - bch else bch - a;
+                    if (d > md) md = d;
+                }
+                if (md > 32) bad += 1;
+            }
+            const frac = @as(f32, @floatFromInt(bad)) / @as(f32, @floatFromInt(n));
+            const scene_ok = frac < if (std.mem.eql(u8, name, "hello_text")) @as(f32, 0.05) else 0.03;
+            if (!scene_ok) backend_ok = false;
+            try out.print("D3D11 Backend vs raster [{s}]: bad_frac={d:.4} {s}\n", .{ name, frac, if (scene_ok) "PASS" else "FAIL" });
+        }
+    }
+
     try out.flush();
-    if (!okc or !quad_ok or !rect_ok or !round_ok or !glyph_ok) std.process.exit(1);
+    if (!okc or !quad_ok or !rect_ok or !round_ok or !glyph_ok or !backend_ok) std.process.exit(1);
+}
+
+fn findScene(name: []const u8) ?@import("zooee").fixtures.Scene {
+    for (@import("zooee").fixtures.all) |s| {
+        if (std.mem.eql(u8, s.name, name)) return s;
+    }
+    return null;
 }
