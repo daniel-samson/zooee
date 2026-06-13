@@ -71,6 +71,26 @@ pub fn main(init: std.process.Init) !void {
     const quad_ok = max_diff <= 4;
     try out.print("D3D11 quad round-trip: max channel diff {d} {s}\n", .{ max_diff, if (quad_ok) "PASS" else "FAIL" });
 
+    // Slice 3: native rect geometry. Render left-half red / right-half blue
+    // via the rect shader into a fresh target; check the halves, like
+    // gl_demo's slice 3.
+    const rw: u32 = 40;
+    const rh: u32 = 24;
+    var d3d3 = try d3d11.D3dOffscreen.create(rw, rh);
+    defer d3d3.destroy();
+    var rects = try d3d11.D3dRectRenderer.init(d3d3.device, d3d3.context);
+    defer rects.deinit();
+    const vw: f32 = @floatFromInt(rw);
+    const vh: f32 = @floatFromInt(rh);
+    try rects.fillRect(d3d3.rtv, vw, vh, 0, 0, vw / 2, vh, .{ 1, 0, 0, 1 }); // left red
+    try rects.fillRect(d3d3.rtv, vw, vh, vw / 2, 0, vw / 2, vh, .{ 0, 0, 1, 1 }); // right blue
+    const rpx = try d3d3.readPixels(gpa);
+    const li = ((rh / 2) * rw + rw / 4) * 4; // left quarter
+    const ri = ((rh / 2) * rw + (rw * 3) / 4) * 4; // right quarter
+    const rect_ok = approx(rpx[li], 255) and approx(rpx[li + 1], 0) and approx(rpx[li + 2], 0) and
+        approx(rpx[ri], 0) and approx(rpx[ri + 1], 0) and approx(rpx[ri + 2], 255);
+    try out.print("D3D11 native rects: left=({d},{d},{d}) right=({d},{d},{d}) {s}\n", .{ rpx[li], rpx[li + 1], rpx[li + 2], rpx[ri], rpx[ri + 1], rpx[ri + 2], if (rect_ok) "PASS" else "FAIL" });
+
     try out.flush();
-    if (!okc or !quad_ok) std.process.exit(1);
+    if (!okc or !quad_ok or !rect_ok) std.process.exit(1);
 }
