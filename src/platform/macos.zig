@@ -123,13 +123,17 @@ pub const Window = struct {
     /// Close = "was visible, now isn't" — visibility lags app launch, so
     /// a not-yet-visible window must not read as closed.
     was_visible: bool = false,
+    /// NSOpenGLContext when the window is GPU-backed (#11 present path);
+    /// null = CPU raster + CoreGraphics blit. Named gl_ctx to match the
+    /// x11 window so runWindow's GL branch is platform-agnostic.
+    gl_ctx: id = null,
 
     pub const CreateOptions = struct {
         title: [:0]const u8 = "zooee",
         width: u32 = 800,
         height: u32 = 600,
-        /// Accepted for cross-platform parity. macOS GL (CGL) is a #11
-        /// follow-up; ignored for now (renders via raster + CoreGraphics).
+        /// Try to create an NSOpenGLContext on the window (GPU-present).
+        /// Falls back to raster + CoreGraphics if context creation fails.
         gl: bool = false,
     };
 
@@ -155,15 +159,28 @@ pub const Window = struct {
         _ = msg(void, struct { id }, window, sel("makeKeyAndOrderFront:"), .{null});
         _ = msg(void, struct { bool }, app, sel("activateIgnoringOtherApps:"), .{true});
 
+        // Optional GPU context on the contentView (#11). Legacy 2.1 profile
+        // (no NSOpenGLPFAOpenGLProfile attr) → GLSL 120, matching the shaders.
+        var gl_ctx: id = null;
+        if (opts.gl) gl_ctx = createGlContext(window);
+
         const self = try gpa.create(Window);
-        self.* = .{ .ns_window = window, .gpa = gpa, .last_size = frame };
+        self.* = .{ .ns_window = window, .gpa = gpa, .last_size = frame, .gl_ctx = gl_ctx };
         return self;
     }
 
     pub fn destroy(self: *Window) void {
+        if (self.gl_ctx != null) {
+            _ = msg(void, struct {}, self.gl_ctx, sel("clearDrawable"), .{});
+        }
         _ = msg(void, struct {}, self.ns_window, sel("close"), .{});
         self.queue.deinit(self.gpa);
         self.gpa.destroy(self);
+    }
+
+    /// Present the GL back buffer (GPU-present path). No-op for raster windows.
+    pub fn glSwap(self: *Window) void {
+        if (self.gl_ctx != null) _ = msg(void, struct {}, self.gl_ctx, sel("flushBuffer"), .{});
     }
 
     /// Drain pending AppKit events; non-blocking (#5 drivable loop).
@@ -245,6 +262,34 @@ pub const Window = struct {
         return self.queue.items;
     }
 };
+
+// --- GL context (NSOpenGL, #11 GPU-present) ---------------------------------
+// NSOpenGLPixelFormatAttribute tokens. No NSOpenGLPFAOpenGLProfile (=99) is
+// requested, so the context is legacy 2.1 → GLSL 120 + APPLE VAOs + EXT FBOs,
+// matching backends/gl.zig's macOS path. The attr list is u32, 0-terminated.
+const NSOpenGLPFADoubleBuffer: u32 = 5;
+const NSOpenGLPFAColorSize: u32 = 8;
+const NSOpenGLPFAAlphaSize: u32 = 11;
+const NSOpenGLPFAAccelerated: u32 = 73;
+
+/// Create an NSOpenGLContext bound to the window's contentView and make it
+/// current. Returns null on any failure (caller falls back to raster).
+fn createGlContext(window: id) id {
+    const attrs = [_]u32{ NSOpenGLPFADoubleBuffer, NSOpenGLPFAAccelerated, NSOpenGLPFAColorSize, 24, NSOpenGLPFAAlphaSize, 8, 0 };
+    const pf_alloc = msg(id, struct {}, cls("NSOpenGLPixelFormat"), sel("alloc"), .{});
+    const pf = msg(id, struct { [*]const u32 }, pf_alloc, sel("initWithAttributes:"), .{&attrs});
+    if (pf == null) return null;
+    const ctx_alloc = msg(id, struct {}, cls("NSOpenGLContext"), sel("alloc"), .{});
+    const ctx = msg(id, struct { id, id }, ctx_alloc, sel("initWithFormat:shareContext:"), .{ pf, null });
+    if (ctx == null) return null;
+    const view = msg(id, struct {}, window, sel("contentView"), .{});
+    // Full-resolution backing so the GL surface matches contentPixelSize on
+    // Retina (otherwise the drawable is point-sized and the viewport is off).
+    _ = msg(void, struct { bool }, view, sel("setWantsBestResolutionOpenGLSurface:"), .{true});
+    _ = msg(void, struct { id }, ctx, sel("setView:"), .{view});
+    _ = msg(void, struct {}, ctx, sel("makeCurrentContext"), .{});
+    return ctx;
+}
 
 // --- raster blit (CoreGraphics) ---------------------------------------------
 // Presents a CPU-rendered RGBA framebuffer in the window: the GUI path
