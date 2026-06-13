@@ -29,6 +29,7 @@ pub const event = @import("event.zig");
 pub const font = struct {
     pub const ttf = @import("font/ttf.zig");
     pub const raster = @import("font/raster.zig");
+    pub const system = @import("font/system.zig");
 };
 
 pub const platform = struct {

@@ -68,10 +68,43 @@ fn nsString(text: [:0]const u8) id {
 
 // --- events ----------------------------------------------------------------
 
-pub const Event = union(enum) {
-    close_requested,
-    resized: struct { width: u32, height: u32 },
+const core_event = @import("../event.zig");
+/// Native windows emit the same core events as the terminal session, so
+/// one app loop drives every surface (#5).
+pub const Event = core_event.Event;
+
+const NSPoint = extern struct { x: f64, y: f64 };
+
+const NSEventType = struct {
+    const left_down: u64 = 1;
+    const left_up: u64 = 2;
+    const right_down: u64 = 3;
+    const right_up: u64 = 4;
+    const mouse_moved: u64 = 5;
+    const left_dragged: u64 = 6;
+    const right_dragged: u64 = 7;
+    const key_down: u64 = 10;
+    const key_up: u64 = 11;
 };
+
+fn keyCodeToKey(kc: u16) ?core_event.Key {
+    return switch (kc) {
+        126 => .up,
+        125 => .down,
+        123 => .left,
+        124 => .right,
+        115 => .home,
+        119 => .end,
+        116 => .page_up,
+        121 => .page_down,
+        36 => .enter,
+        53 => .escape,
+        48 => .tab,
+        51 => .backspace,
+        117 => .delete,
+        else => null,
+    };
+}
 
 // --- window ----------------------------------------------------------------
 
@@ -93,8 +126,8 @@ pub const Window = struct {
 
     pub const CreateOptions = struct {
         title: [:0]const u8 = "zooee",
-        width: f64 = 800,
-        height: f64 = 600,
+        width: u32 = 800,
+        height: u32 = 600,
     };
 
     pub fn create(gpa: std.mem.Allocator, opts: CreateOptions) !*Window {
@@ -109,12 +142,13 @@ pub const Window = struct {
         const window_alloc = msg(id, struct {}, cls("NSWindow"), sel("alloc"), .{});
         const style = NSWindowStyleMask.titled | NSWindowStyleMask.closable |
             NSWindowStyleMask.miniaturizable | NSWindowStyleMask.resizable;
-        const frame: NSRect = .{ .x = 200, .y = 200, .w = opts.width, .h = opts.height };
+        const frame: NSRect = .{ .x = 200, .y = 200, .w = @floatFromInt(opts.width), .h = @floatFromInt(opts.height) };
         const window = msg(id, struct { NSRect, u64, u64, bool }, window_alloc, sel("initWithContentRect:styleMask:backing:defer:"), .{ frame, style, 2, false });
         if (window == null) return error.BackendFailure;
 
         _ = msg(void, struct { id }, window, sel("setTitle:"), .{nsString(opts.title)});
         _ = msg(void, struct { bool }, window, sel("setReleasedWhenClosed:"), .{false});
+        _ = msg(void, struct { bool }, window, sel("setAcceptsMouseMovedEvents:"), .{true});
         _ = msg(void, struct { id }, window, sel("makeKeyAndOrderFront:"), .{null});
         _ = msg(void, struct { bool }, app, sel("activateIgnoringOtherApps:"), .{true});
 
@@ -136,9 +170,56 @@ pub const Window = struct {
         const distant_past = msg(id, struct {}, cls("NSDate"), sel("distantPast"), .{});
         const mode = nsString("kCFRunLoopDefaultMode");
 
+        const view = msg(id, struct {}, self.ns_window, sel("contentView"), .{});
+        const bounds = msg(NSRect, struct {}, view, sel("bounds"), .{});
+        const scale = msg(f64, struct {}, self.ns_window, sel("backingScaleFactor"), .{});
+
         while (true) {
             const ev = msg(id, struct { u64, id, id, bool }, app, sel("nextEventMatchingMask:untilDate:inMode:dequeue:"), .{ std.math.maxInt(u64), distant_past, mode, true });
             if (ev == null) break;
+            const et = msg(u64, struct {}, ev, sel("type"), .{});
+
+            switch (et) {
+                NSEventType.left_down, NSEventType.left_up, NSEventType.right_down, NSEventType.right_up, NSEventType.mouse_moved, NSEventType.left_dragged, NSEventType.right_dragged => {
+                    const loc = msg(NSPoint, struct {}, ev, sel("locationInWindow"), .{});
+                    // Window coords (y-up, bottom-left) → content-view →
+                    // top-left pixels matching the rendered framebuffer.
+                    const cv = msg(NSPoint, struct { NSPoint, id }, view, sel("convertPoint:fromView:"), .{ loc, null });
+                    const pos: core_event.PointerEvent = .{ .position = .{
+                        .x = @floatCast(cv.x * scale),
+                        .y = @floatCast((bounds.h - cv.y) * scale),
+                    }, .buttons = .{
+                        .primary = et == NSEventType.left_down or et == NSEventType.left_dragged,
+                        .secondary = et == NSEventType.right_down or et == NSEventType.right_dragged,
+                    } };
+                    const core_ev: Event = switch (et) {
+                        NSEventType.left_down, NSEventType.right_down => .{ .pointer_down = pos },
+                        NSEventType.left_up, NSEventType.right_up => .{ .pointer_up = pos },
+                        else => .{ .pointer_move = pos },
+                    };
+                    self.queue.append(self.gpa, core_ev) catch {};
+                },
+                NSEventType.key_down => {
+                    const kc = msg(u16, struct {}, ev, sel("keyCode"), .{});
+                    if (keyCodeToKey(kc)) |k| {
+                        self.queue.append(self.gpa, .{ .key_down = .{ .key = k } }) catch {};
+                    } else {
+                        const chars = msg(id, struct {}, ev, sel("characters"), .{});
+                        if (chars != null) {
+                            const utf8 = msg([*:0]const u8, struct {}, chars, sel("UTF8String"), .{});
+                            var it = std.unicode.Utf8View.initUnchecked(std.mem.span(utf8)).iterator();
+                            while (it.nextCodepoint()) |cp| {
+                                if (cp >= 0x20 and cp < 0xF700) {
+                                    self.queue.append(self.gpa, .{ .text = .{ .codepoint = cp } }) catch {};
+                                }
+                            }
+                        }
+                    }
+                    continue; // don't sendEvent keyDown — avoids the no-responder beep
+                },
+                NSEventType.key_up => continue,
+                else => {},
+            }
             _ = msg(void, struct { id }, app, sel("sendEvent:"), .{ev});
         }
 
@@ -147,16 +228,16 @@ pub const Window = struct {
         if (visible) {
             self.was_visible = true;
         } else if (self.was_visible) {
-            self.queue.append(self.gpa, .close_requested) catch {};
+            self.queue.append(self.gpa, .{ .close_requested = core_event.main_window }) catch {};
         }
         // Resize: poll the content frame.
         const content = msg(NSRect, struct {}, self.ns_window, sel("contentLayoutRect"), .{});
         if (content.w != self.last_size.w or content.h != self.last_size.h) {
             self.last_size = content;
-            self.queue.append(self.gpa, .{ .resized = .{
-                .width = @intFromFloat(@max(0, content.w)),
-                .height = @intFromFloat(@max(0, content.h)),
-            } }) catch {};
+            self.queue.append(self.gpa, .{ .resized = .{ .size = .{
+                .width = @floatCast(@max(0, content.w)),
+                .height = @floatCast(@max(0, content.h)),
+            } } }) catch {};
         }
         return self.queue.items;
     }

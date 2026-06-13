@@ -32,7 +32,8 @@ const Demo = struct {
     selected: usize = 0,
     checked: [items.len]bool = .{ true, true, true, true, false },
 
-    pub fn view(self: *Demo, arena: std.mem.Allocator) !*const L.Element {
+    pub fn view(self: *Demo, arena: std.mem.Allocator, scale: f32) !*const L.Element {
+        _ = scale;
         const rows = try arena.alloc(L.Element, items.len);
         const row_ptrs = try arena.alloc(*const L.Element, items.len);
         for (items, 0..) |item, i| {
