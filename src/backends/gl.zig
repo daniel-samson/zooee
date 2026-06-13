@@ -678,3 +678,262 @@ pub fn renderRoundedOffscreen(
     flipY(out, w, h);
     return out;
 }
+
+// === Slice 5: glyph atlas text ==============================================
+// Reuses the raster font rasterizer (font/raster.zig) to produce glyph
+// alpha bitmaps, shelf-packs ASCII 32..126 into one RGBA atlas texture
+// (rgb=255, a=coverage), and draws text as a batch of textured quads
+// tinted by the text color. The same atlas approach serves every GPU
+// backend; non-ASCII/dynamic glyphs are a follow-up.
+
+const ttf = @import("../font/ttf.zig");
+const grast = @import("../font/raster.zig");
+
+const GL_TRIANGLES: GLenum = 0x0004;
+const atlas_w: u32 = 256;
+const first_cp: u21 = 32;
+const last_cp: u21 = 126;
+const glyph_count = last_cp - first_cp + 1;
+
+const GlyphEntry = struct {
+    u0: f32 = 0,
+    v0: f32 = 0,
+    u1: f32 = 0,
+    v1: f32 = 0,
+    w: f32 = 0,
+    h: f32 = 0,
+    x_off: f32 = 0,
+    y_off: f32 = 0,
+    advance: f32 = 0,
+};
+
+pub const GlyphRenderer = struct {
+    gl: Gl,
+    program: GLuint,
+    vao: GLuint,
+    vbo: GLuint,
+    atlas_tex: GLuint,
+    pos_loc: GLuint,
+    uv_loc: GLuint,
+    u_viewport: GLint,
+    u_color: GLint,
+    entries: [glyph_count]GlyphEntry,
+    ascent: f32,
+    vw: f32 = 0,
+    vh: f32 = 0,
+
+    pub fn init(gpa: std.mem.Allocator, font: *const ttf.Font, size_px: f32) !GlyphRenderer {
+        const gl = try Gl.load();
+        const vs = QuadRenderer.compile(gl, GL_VERTEX_SHADER, glyph_vert) orelse return error.NoContext;
+        const fs = QuadRenderer.compile(gl, GL_FRAGMENT_SHADER, glyph_frag) orelse return error.NoContext;
+        const prog = gl.createProgram();
+        gl.attachShader(prog, vs);
+        gl.attachShader(prog, fs);
+        gl.linkProgram(prog);
+        var ok: GLint = 0;
+        gl.getProgramiv(prog, GL_LINK_STATUS, &ok);
+        if (ok == 0) return error.NoContext;
+
+        // Rasterize glyphs, shelf-pack, build the atlas RGBA.
+        var entries: [glyph_count]GlyphEntry = undefined;
+        var bmps: [glyph_count]?grast.Bitmap = @splat(null);
+        defer for (&bmps) |*b| if (b.*) |*bb| bb.deinit(gpa);
+
+        const fscale = size_px / @as(f32, @floatFromInt(font.units_per_em));
+        var cx: u32 = 1;
+        var cy: u32 = 1;
+        var row_h: u32 = 0;
+        var atlas_h: u32 = 1;
+        for (0..glyph_count) |i| {
+            const cp: u21 = first_cp + @as(u21, @intCast(i));
+            const gi = font.glyphIndex(cp);
+            const adv = @as(f32, @floatFromInt(font.hMetrics(gi).advance)) * fscale;
+            entries[i] = .{ .advance = adv };
+            const outline = (font.outline(gpa, gi) catch null) orelse continue;
+            var o = outline;
+            defer o.deinit(gpa);
+            const bmp = grast.rasterize(gpa, font, o, size_px) catch continue;
+            bmps[i] = bmp;
+            if (cx + bmp.width + 1 > atlas_w) {
+                cx = 1;
+                cy += row_h + 1;
+                row_h = 0;
+            }
+            entries[i].u0 = @floatFromInt(cx);
+            entries[i].v0 = @floatFromInt(cy);
+            entries[i].w = @floatFromInt(bmp.width);
+            entries[i].h = @floatFromInt(bmp.height);
+            entries[i].x_off = @floatFromInt(bmp.x_off);
+            entries[i].y_off = @floatFromInt(bmp.y_off);
+            cx += @as(u32, @intCast(bmp.width)) + 1;
+            row_h = @max(row_h, @as(u32, @intCast(bmp.height)));
+            atlas_h = @max(atlas_h, cy + row_h + 1);
+        }
+
+        const atlas = try gpa.alloc(u8, atlas_w * atlas_h * 4);
+        defer gpa.free(atlas);
+        @memset(atlas, 0);
+        for (0..glyph_count) |i| {
+            const bmp = bmps[i] orelse continue;
+            const ax: usize = @intFromFloat(entries[i].u0);
+            const ay: usize = @intFromFloat(entries[i].v0);
+            var yy: usize = 0;
+            while (yy < bmp.height) : (yy += 1) {
+                var xx: usize = 0;
+                while (xx < bmp.width) : (xx += 1) {
+                    const a = bmp.alpha[yy * bmp.width + xx];
+                    const k = ((ay + yy) * atlas_w + (ax + xx)) * 4;
+                    atlas[k + 0] = 255;
+                    atlas[k + 1] = 255;
+                    atlas[k + 2] = 255;
+                    atlas[k + 3] = a;
+                }
+            }
+            // Normalize UVs to [0,1].
+            const fw: f32 = @floatFromInt(atlas_w);
+            const fh: f32 = @floatFromInt(atlas_h);
+            entries[i].u1 = (entries[i].u0 + entries[i].w) / fw;
+            entries[i].v1 = (entries[i].v0 + entries[i].h) / fh;
+            entries[i].u0 /= fw;
+            entries[i].v0 /= fh;
+        }
+
+        var vao: GLuint = 0;
+        gl.genVertexArrays(1, @ptrCast(&vao));
+        var vbo: GLuint = 0;
+        gl.genBuffers(1, @ptrCast(&vbo));
+        var tex: GLuint = 0;
+        gl.genTextures(1, @ptrCast(&tex));
+        gl.bindTexture(GL_TEXTURE_2D, tex);
+        gl.texImage2D(GL_TEXTURE_2D, 0, GL_RGBA, @intCast(atlas_w), @intCast(atlas_h), 0, GL_RGBA, GL_UNSIGNED_BYTE, atlas.ptr);
+        gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        return .{
+            .gl = gl,
+            .program = prog,
+            .vao = vao,
+            .vbo = vbo,
+            .atlas_tex = tex,
+            .pos_loc = @intCast(gl.getAttribLocation(prog, "pos")),
+            .uv_loc = @intCast(gl.getAttribLocation(prog, "uv")),
+            .u_viewport = gl.getUniformLocation(prog, "viewport"),
+            .u_color = gl.getUniformLocation(prog, "color"),
+            .entries = entries,
+            .ascent = @as(f32, @floatFromInt(font.ascent)) * fscale,
+        };
+    }
+
+    pub fn begin(self: *GlyphRenderer, w: u32, h: u32) void {
+        self.vw = @floatFromInt(w);
+        self.vh = @floatFromInt(h);
+        self.gl.useProgram(self.program);
+        self.gl.uniform2f(self.u_viewport, self.vw, self.vh);
+        enableBlend();
+    }
+
+    /// Draw `text` with its top-left at (x,y) in pixels (baseline = y +
+    /// ascent), tinted `color` (RGBA 0..1). ASCII only for now.
+    pub fn drawText(self: *GlyphRenderer, gpa: std.mem.Allocator, x: f32, y: f32, text: []const u8, color: [4]f32) !void {
+        const gl = self.gl;
+        var verts: std.ArrayList(f32) = .empty;
+        defer verts.deinit(gpa);
+        var pen = x;
+        const baseline = y + self.ascent;
+        for (text) |c| {
+            if (c < first_cp or c > last_cp) {
+                continue;
+            }
+            const e = self.entries[c - first_cp];
+            if (e.w > 0) {
+                const gx = @round(pen) + e.x_off;
+                const gy = @round(baseline) + e.y_off;
+                const x1 = gx + e.w;
+                const y1 = gy + e.h;
+                // 2 triangles: pos.xy, uv.xy.
+                const quad = [_]f32{
+                    gx, gy, e.u0, e.v0,
+                    x1, gy, e.u1, e.v0,
+                    gx, y1, e.u0, e.v1,
+                    x1, gy, e.u1, e.v0,
+                    x1, y1, e.u1, e.v1,
+                    gx, y1, e.u0, e.v1,
+                };
+                try verts.appendSlice(gpa, &quad);
+            }
+            pen += e.advance;
+        }
+        if (verts.items.len == 0) return;
+        gl.bindVertexArray(self.vao);
+        gl.bindBuffer(GL_ARRAY_BUFFER, self.vbo);
+        gl.bufferData(GL_ARRAY_BUFFER, @intCast(verts.items.len * 4), verts.items.ptr, GL_STATIC_DRAW);
+        gl.vertexAttribPointer(self.pos_loc, 2, GL_FLOAT, GL_FALSE, 16, @ptrFromInt(0));
+        gl.enableVertexAttribArray(self.pos_loc);
+        gl.vertexAttribPointer(self.uv_loc, 2, GL_FLOAT, GL_FALSE, 16, @ptrFromInt(8));
+        gl.enableVertexAttribArray(self.uv_loc);
+        gl.activeTexture(GL_TEXTURE0);
+        gl.bindTexture(GL_TEXTURE_2D, self.atlas_tex);
+        gl.uniform1i(gl.getUniformLocation(self.program, "atlas"), 0);
+        gl.uniform4f(self.u_color, color[0], color[1], color[2], color[3]);
+        gl.drawArrays(GL_TRIANGLES, 0, @intCast(verts.items.len / 4));
+    }
+};
+
+const glyph_vert: [*:0]const u8 =
+    \\#version 120
+    \\attribute vec2 pos;
+    \\attribute vec2 uv;
+    \\uniform vec2 viewport;
+    \\varying vec2 v_uv;
+    \\void main() {
+    \\  v_uv = uv;
+    \\  vec2 ndc = vec2(pos.x / viewport.x * 2.0 - 1.0, 1.0 - pos.y / viewport.y * 2.0);
+    \\  gl_Position = vec4(ndc, 0.0, 1.0);
+    \\}
+;
+const glyph_frag: [*:0]const u8 =
+    \\#version 120
+    \\varying vec2 v_uv;
+    \\uniform sampler2D atlas;
+    \\uniform vec4 color;
+    \\void main() {
+    \\  float a = texture2D(atlas, v_uv).a;
+    \\  gl_FragColor = vec4(color.rgb, color.a * a);
+    \\}
+;
+
+/// Offscreen FBO render of one text string (glyph atlas) + readback
+/// (top-down). Headless path for golden tests.
+pub fn renderTextOffscreen(gpa: std.mem.Allocator, gr: *GlyphRenderer, w: u32, h: u32, clear: [4]f32, x: f32, y: f32, text: []const u8, color: [4]f32) ![]u8 {
+    const gl = gr.gl;
+    var fbo: GLuint = 0;
+    gl.genFramebuffers(1, @ptrCast(&fbo));
+    gl.bindFramebuffer(GL_FRAMEBUFFER, fbo);
+    var target: GLuint = 0;
+    gl.genTextures(1, @ptrCast(&target));
+    gl.bindTexture(GL_TEXTURE_2D, target);
+    gl.texImage2D(GL_TEXTURE_2D, 0, GL_RGBA, @intCast(w), @intCast(h), 0, GL_RGBA, GL_UNSIGNED_BYTE, null);
+    gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    gl.framebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target, 0);
+    if (gl.checkFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) return error.NoContext;
+    glViewport(0, 0, w, h);
+    glClearColor(clear[0], clear[1], clear[2], clear[3]);
+    glClear(GL_COLOR_BUFFER_BIT);
+    gr.begin(w, h);
+    try gr.drawText(gpa, x, y, text, color);
+    glFinish();
+    const out = try gpa.alloc(u8, @as(usize, w) * h * 4);
+    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, out.ptr);
+    flipY(out, w, h);
+    return out;
+}
+
+/// Write RGBA (top-down) as binary PPM (P6) for visual inspection.
+pub fn writePpmRgba(writer: *std.Io.Writer, rgba: []const u8, w: u32, h: u32) std.Io.Writer.Error!void {
+    try writer.print("P6\n{d} {d}\n255\n", .{ w, h });
+    var i: usize = 0;
+    while (i < rgba.len) : (i += 4) try writer.writeAll(rgba[i .. i + 3]);
+}
