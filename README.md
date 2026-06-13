@@ -71,7 +71,7 @@ cd zooee
 zig build          # build the library (zig-out/lib/libzooee.a)
 zig build test     # run the unit tests
 zig build demos    # build the demo apps (terminal + native GUI;
-                   #   macOS → "Zooee Metal.app" / "Zooee Raster.app")
+                   #   macOS → "Zooee.app"; ZOOEE_SOFTWARE=1 forces raster)
 zig build run      # run the terminal demo
 zig build run-gui  # run the native GUI demo (GPU-rendered)
 zig build clean    # remove zig-out (the build output)
