@@ -19,9 +19,22 @@ const layout_mod = @import("layout.zig");
 const event_mod = @import("event.zig");
 const backend_mod = @import("backend.zig");
 const terminal_mod = @import("backends/terminal.zig");
+const raster_mod = @import("backends/raster.zig");
+const system_font = @import("font/system.zig");
 const geometry = @import("geometry.zig");
 
 pub const Command = enum { none, redraw, quit };
+
+/// Native window platform for the GUI runner. X11 is the #9 follow-up;
+/// unsupported OSes get an empty struct (runWindow @compileErrors before
+/// touching it). Comptime if only analyzes the taken arm.
+const has_window_platform = builtin.os.tag == .windows or builtin.os.tag == .macos;
+const WindowPlatform = if (builtin.os.tag == .windows)
+    @import("platform/win32.zig")
+else if (builtin.os.tag == .macos)
+    @import("platform/macos.zig")
+else
+    struct {};
 
 const Session = if (builtin.os.tag == .windows)
     @import("platform/win32_console.zig").Console
@@ -57,7 +70,7 @@ pub fn run(
         // Not a TTY: render one frame plainly and exit (CI-safe).
         var frame_arena = std.heap.ArenaAllocator.init(gpa);
         defer frame_arena.deinit();
-        const root = try model.view(frame_arena.allocator());
+        const root = try model.view(frame_arena.allocator(), 1);
         var result = try layout_mod.layout(frame_arena.allocator(), b, root, .{ .width = 60, .height = 14 });
         try b.beginFrame(.{ .width = 60, .height = 14 });
         layout_mod.render(b, result);
@@ -83,7 +96,7 @@ pub fn run(
         if (dirty) {
             _ = frame_arena.reset(.retain_capacity);
             const arena = frame_arena.allocator();
-            const root = try model.view(arena);
+            const root = try model.view(arena, 1);
             const viewport = session.size();
             const result = try layout_mod.layout(arena, b, root, viewport);
             placements = result.placements;
@@ -97,26 +110,7 @@ pub fn run(
 
         const events = try session.pumpEvents(frame_arena.allocator());
         for (events) |ev| {
-            const cmd: Command = switch (ev) {
-                .close_requested => .quit,
-                .resized => .redraw,
-                .pointer_down => |p| blk: {
-                    if (p.buttons.primary) {
-                        if (hitMsg(placements, p.position, .click)) |m| {
-                            break :blk model.update(@as(Msg, @enumFromInt(m)));
-                        }
-                    }
-                    break :blk model.onEvent(ev);
-                },
-                .pointer_move => |p| blk: {
-                    if (hitMsg(placements, p.position, .hover)) |m| {
-                        break :blk model.update(@as(Msg, @enumFromInt(m)));
-                    }
-                    break :blk model.onEvent(ev);
-                },
-                else => model.onEvent(ev),
-            };
-            switch (cmd) {
+            switch (dispatch(Model, Msg, model, ev, placements)) {
                 .none => {},
                 .redraw => dirty = true,
                 .quit => break :loop,
@@ -125,6 +119,102 @@ pub fn run(
 
         if (!dirty) try io.sleep(.fromMilliseconds(16), .awake);
     }
+}
+
+/// Run a Model in a native GUI window: layout → raster backend → blit,
+/// with pointer/keyboard events dispatched exactly as the terminal loop
+/// (#4/#9). Loads a system font (#10) so text renders. Coordinates are
+/// content pixels on both axes, matching the rendered framebuffer.
+pub fn runWindow(
+    comptime Model: type,
+    comptime Msg: type,
+    model: *Model,
+    init: std.process.Init,
+    opts: WindowOptions,
+) !void {
+    if (!has_window_platform) @compileError("runWindow: no native window platform for this OS (X11 is #9 follow-up)");
+    const platform = WindowPlatform;
+    const gpa = init.arena.allocator();
+    const io = init.io;
+
+    const window = try platform.Window.create(gpa, .{ .title = opts.title, .width = opts.width, .height = opts.height });
+    defer window.destroy();
+
+    var raster = raster_mod.RasterBackend.init(gpa);
+    defer raster.deinit();
+    _ = system_font.loadInto(gpa, io, &raster); // placeholder blocks if none found
+    const b = raster.interface();
+
+    var frame_arena = std.heap.ArenaAllocator.init(gpa);
+    defer frame_arena.deinit();
+    var placements: []layout_mod.Placement = &.{};
+    var dirty = true;
+
+    loop: while (true) {
+        for (window.pumpEvents()) |ev| {
+            switch (dispatch(Model, Msg, model, ev, placements)) {
+                .none => {},
+                .redraw => dirty = true,
+                .quit => break :loop,
+            }
+        }
+
+        if (dirty) {
+            _ = frame_arena.reset(.retain_capacity);
+            const arena = frame_arena.allocator();
+            const px = platform.contentPixelSize(window);
+            const scale: f32 = @floatCast(px.scale);
+            raster.char_width = 8 * scale;
+            raster.line_height = 16 * scale;
+            const root = try model.view(arena, scale);
+            const viewport: geometry.Size = .{ .width = @floatFromInt(px.width), .height = @floatFromInt(px.height) };
+            const result = try layout_mod.layout(arena, b, root, viewport);
+            placements = result.placements;
+            try b.beginFrame(viewport);
+            layout_mod.render(b, result);
+            try b.endFrame();
+            platform.blit(window, raster.pixels, raster.width, raster.height);
+            dirty = false;
+        }
+
+        try io.sleep(.fromMilliseconds(16), .awake);
+    }
+}
+
+pub const WindowOptions = struct {
+    title: [:0]const u8 = "zooee",
+    width: u32 = 800,
+    height: u32 = 600,
+};
+
+/// Map one event to a Command, dispatching interaction messages through
+/// the model. Shared by the terminal and GUI loops.
+fn dispatch(
+    comptime Model: type,
+    comptime Msg: type,
+    model: *Model,
+    ev: event_mod.Event,
+    placements: []const layout_mod.Placement,
+) Command {
+    return switch (ev) {
+        .close_requested => .quit,
+        .resized => .redraw,
+        .pointer_down => |p| blk: {
+            if (p.buttons.primary) {
+                if (hitMsg(placements, p.position, .click)) |m| {
+                    break :blk model.update(@as(Msg, @enumFromInt(m)));
+                }
+            }
+            break :blk model.onEvent(ev);
+        },
+        .pointer_move => |p| blk: {
+            if (hitMsg(placements, p.position, .hover)) |m| {
+                break :blk model.update(@as(Msg, @enumFromInt(m)));
+            }
+            break :blk model.onEvent(ev);
+        },
+        else => model.onEvent(ev),
+    };
 }
 
 const Interaction = enum { click, hover };
