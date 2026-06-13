@@ -22,6 +22,8 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const ttf = @import("../font/ttf.zig");
+const grast = @import("../font/raster.zig");
 
 comptime {
     if (builtin.os.tag != .windows) @compileError("d3d11.zig is Windows-only; gate imports on builtin.os.tag");
@@ -73,6 +75,7 @@ const D3D11_MAP_READ: UINT = 1;
 const D3D11_SDK_VERSION: UINT = 7;
 const D3D_DRIVER_TYPE_HARDWARE: UINT = 1;
 const D3D_DRIVER_TYPE_WARP: UINT = 5;
+const D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST: UINT = 4;
 const D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP: UINT = 5;
 const D3D11_FILTER_MIN_MAG_MIP_POINT: UINT = 0;
 const D3D11_TEXTURE_ADDRESS_CLAMP: UINT = 3;
@@ -759,5 +762,261 @@ pub const D3dRoundedRectRenderer = struct {
         ctx.vtbl.PSSetConstantBuffers(ctx, 0, 1, &cb_slot); // sdf params + colors (PS)
         ctx.vtbl.PSSetShader(ctx, self.ps, null, 0);
         ctx.vtbl.Draw(ctx, 4, 0);
+    }
+};
+
+// === Slice 5: glyph atlas text ==============================================
+// Reuses the font rasterizer (font/raster.zig) to produce glyph alpha
+// bitmaps, shelf-packs ASCII 32..126 into one RGBA atlas texture (rgb=255,
+// a=coverage), and draws text as a batch of textured-quad triangles tinted
+// by the text color. Same approach as gl.zig's GlyphRenderer (non-ASCII /
+// dynamic glyphs are a follow-up, tracked separately).
+
+const atlas_w: u32 = 256;
+const first_cp: u21 = 32;
+const last_cp: u21 = 126;
+const glyph_count = last_cp - first_cp + 1;
+
+const GlyphEntry = struct {
+    u0: f32 = 0,
+    v0: f32 = 0,
+    u1: f32 = 0,
+    v1: f32 = 0,
+    w: f32 = 0,
+    h: f32 = 0,
+    x_off: f32 = 0,
+    y_off: f32 = 0,
+    advance: f32 = 0,
+};
+
+const glyph_hlsl =
+    \\cbuffer CB : register(b0) { float2 viewport; float2 pad; float4 color; };
+    \\struct VSIn  { float2 pos : POSITION; float2 uv : TEXCOORD; };
+    \\struct VSOut { float4 pos : SV_POSITION; float2 uv : TEXCOORD; };
+    \\VSOut VSMain(VSIn i) {
+    \\  VSOut o;
+    \\  o.pos = float4(i.pos.x / viewport.x * 2.0 - 1.0, 1.0 - i.pos.y / viewport.y * 2.0, 0, 1);
+    \\  o.uv = i.uv;
+    \\  return o;
+    \\}
+    \\Texture2D atlas : register(t0);
+    \\SamplerState smp : register(s0);
+    \\float4 PSMain(VSOut i) : SV_TARGET {
+    \\  float a = atlas.Sample(smp, i.uv).a;
+    \\  return float4(color.rgb, color.a * a);
+    \\}
+;
+
+const GlyphCB = extern struct { vw: f32, vh: f32, pad0: f32 = 0, pad1: f32 = 0, color: [4]f32 };
+
+pub const D3dGlyphRenderer = struct {
+    device: *IDevice,
+    context: *IContext,
+    vs: *IVertexShader,
+    ps: *IPixelShader,
+    layout: *IInputLayout,
+    raster: *IRasterizerState,
+    blend: *IBlendState,
+    sampler: *ISampler,
+    atlas_tex: *ITexture2D,
+    atlas_srv: *ISrv,
+    entries: [glyph_count]GlyphEntry,
+    ascent: f32,
+
+    pub fn init(gpa: std.mem.Allocator, device: *IDevice, context: *IContext, font: *const ttf.Font, size_px: f32) !D3dGlyphRenderer {
+        // Rasterize ASCII glyphs, shelf-pack, build the atlas RGBA (identical
+        // packing to gl.zig's GlyphRenderer).
+        var entries: [glyph_count]GlyphEntry = undefined;
+        var bmps: [glyph_count]?grast.Bitmap = @splat(null);
+        defer for (&bmps) |*b| if (b.*) |*bb| bb.deinit(gpa);
+
+        const fscale = size_px / @as(f32, @floatFromInt(font.units_per_em));
+        var cx: u32 = 1;
+        var cy: u32 = 1;
+        var row_h: u32 = 0;
+        var atlas_h: u32 = 1;
+        for (0..glyph_count) |i| {
+            const cp: u21 = first_cp + @as(u21, @intCast(i));
+            const gi = font.glyphIndex(cp);
+            const adv = @as(f32, @floatFromInt(font.hMetrics(gi).advance)) * fscale;
+            entries[i] = .{ .advance = adv };
+            const outline = (font.outline(gpa, gi) catch null) orelse continue;
+            var o = outline;
+            defer o.deinit(gpa);
+            const bmp = grast.rasterize(gpa, font, o, size_px) catch continue;
+            bmps[i] = bmp;
+            if (cx + bmp.width + 1 > atlas_w) {
+                cx = 1;
+                cy += row_h + 1;
+                row_h = 0;
+            }
+            entries[i].u0 = @floatFromInt(cx);
+            entries[i].v0 = @floatFromInt(cy);
+            entries[i].w = @floatFromInt(bmp.width);
+            entries[i].h = @floatFromInt(bmp.height);
+            entries[i].x_off = @floatFromInt(bmp.x_off);
+            entries[i].y_off = @floatFromInt(bmp.y_off);
+            cx += @as(u32, @intCast(bmp.width)) + 1;
+            row_h = @max(row_h, @as(u32, @intCast(bmp.height)));
+            atlas_h = @max(atlas_h, cy + row_h + 1);
+        }
+
+        const atlas = try gpa.alloc(u8, atlas_w * atlas_h * 4);
+        defer gpa.free(atlas);
+        @memset(atlas, 0);
+        for (0..glyph_count) |i| {
+            const bmp = bmps[i] orelse continue;
+            const ax: usize = @intFromFloat(entries[i].u0);
+            const ay: usize = @intFromFloat(entries[i].v0);
+            var yy: usize = 0;
+            while (yy < bmp.height) : (yy += 1) {
+                var xx: usize = 0;
+                while (xx < bmp.width) : (xx += 1) {
+                    const a = bmp.alpha[yy * bmp.width + xx];
+                    const k = ((ay + yy) * atlas_w + (ax + xx)) * 4;
+                    atlas[k + 0] = 255;
+                    atlas[k + 1] = 255;
+                    atlas[k + 2] = 255;
+                    atlas[k + 3] = a;
+                }
+            }
+            const fw: f32 = @floatFromInt(atlas_w);
+            const fh: f32 = @floatFromInt(atlas_h);
+            entries[i].u1 = (entries[i].u0 + entries[i].w) / fw;
+            entries[i].v1 = (entries[i].v0 + entries[i].h) / fh;
+            entries[i].u0 /= fw;
+            entries[i].v0 /= fh;
+        }
+
+        // GPU resources.
+        const d3d_compile = loadD3DCompile() orelse return error.ShaderFailed;
+        const vs_blob = compileSrc(d3d_compile, glyph_hlsl, "VSMain", "vs_4_0") orelse return error.ShaderFailed;
+        defer release(vs_blob);
+        const ps_blob = compileSrc(d3d_compile, glyph_hlsl, "PSMain", "ps_4_0") orelse return error.ShaderFailed;
+        defer release(ps_blob);
+        const vs_ptr = vs_blob.vtbl.GetBufferPointer(vs_blob).?;
+        const vs_len = vs_blob.vtbl.GetBufferSize(vs_blob);
+
+        var vs: ?*IVertexShader = null;
+        if (!ok(device.vtbl.CreateVertexShader(device, vs_ptr, vs_len, null, &vs)) or vs == null) return error.ShaderFailed;
+        var ps: ?*IPixelShader = null;
+        if (!ok(device.vtbl.CreatePixelShader(device, ps_blob.vtbl.GetBufferPointer(ps_blob).?, ps_blob.vtbl.GetBufferSize(ps_blob), null, &ps)) or ps == null) return error.ShaderFailed;
+        var elems = [_]D3D11_INPUT_ELEMENT_DESC{
+            .{ .semantic_name = "POSITION", .format = DXGI_FORMAT_R32G32_FLOAT, .aligned_byte_offset = 0 },
+            .{ .semantic_name = "TEXCOORD", .format = DXGI_FORMAT_R32G32_FLOAT, .aligned_byte_offset = 8 },
+        };
+        var layout: ?*IInputLayout = null;
+        if (!ok(device.vtbl.CreateInputLayout(device, &elems, 2, vs_ptr, vs_len, &layout)) or layout == null) return error.ShaderFailed;
+        var rdesc: D3D11_RASTERIZER_DESC = .{};
+        var raster: ?*IRasterizerState = null;
+        if (!ok(device.vtbl.CreateRasterizerState(device, &rdesc, &raster)) or raster == null) return error.ShaderFailed;
+        var bdesc: D3D11_BLEND_DESC = .{ .render_target = [_]D3D11_RENDER_TARGET_BLEND_DESC{.{}} ** 8 };
+        bdesc.render_target[0] = .{ .blend_enable = 1, .src_blend = D3D11_BLEND_SRC_ALPHA, .dest_blend = D3D11_BLEND_INV_SRC_ALPHA, .blend_op = D3D11_BLEND_OP_ADD, .src_blend_alpha = D3D11_BLEND_ONE, .dest_blend_alpha = D3D11_BLEND_INV_SRC_ALPHA, .blend_op_alpha = D3D11_BLEND_OP_ADD };
+        var blend: ?*IBlendState = null;
+        if (!ok(device.vtbl.CreateBlendState(device, &bdesc, &blend)) or blend == null) return error.ShaderFailed;
+
+        var tdesc: D3D11_TEXTURE2D_DESC = .{ .width = atlas_w, .height = atlas_h, .format = DXGI_FORMAT_R8G8B8A8_UNORM, .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_SHADER_RESOURCE };
+        var tdata: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = atlas.ptr, .sys_mem_pitch = atlas_w * 4 };
+        var tex: ?*ITexture2D = null;
+        if (!ok(device.vtbl.CreateTexture2D(device, &tdesc, &tdata, &tex)) or tex == null) return error.ShaderFailed;
+        var srv: ?*ISrv = null;
+        if (!ok(device.vtbl.CreateShaderResourceView(device, tex.?, null, &srv)) or srv == null) return error.ShaderFailed;
+        var sdesc: D3D11_SAMPLER_DESC = .{ .filter = D3D11_FILTER_MIN_MAG_MIP_POINT, .address_u = D3D11_TEXTURE_ADDRESS_CLAMP, .address_v = D3D11_TEXTURE_ADDRESS_CLAMP, .address_w = D3D11_TEXTURE_ADDRESS_CLAMP };
+        var sampler: ?*ISampler = null;
+        if (!ok(device.vtbl.CreateSamplerState(device, &sdesc, &sampler)) or sampler == null) return error.ShaderFailed;
+
+        return .{
+            .device = device,
+            .context = context,
+            .vs = vs.?,
+            .ps = ps.?,
+            .layout = layout.?,
+            .raster = raster.?,
+            .blend = blend.?,
+            .sampler = sampler.?,
+            .atlas_tex = tex.?,
+            .atlas_srv = srv.?,
+            .entries = entries,
+            .ascent = @as(f32, @floatFromInt(font.ascent)) * fscale,
+        };
+    }
+
+    pub fn deinit(self: *D3dGlyphRenderer) void {
+        release(self.atlas_srv);
+        release(self.atlas_tex);
+        release(self.sampler);
+        release(self.blend);
+        release(self.raster);
+        release(self.layout);
+        release(self.ps);
+        release(self.vs);
+    }
+
+    /// Draw `text` at pixel (x,y) (top-left) tinted `color` into the render
+    /// target. ASCII-only (32..126); other codepoints advance but don't draw.
+    pub fn drawText(self: *D3dGlyphRenderer, gpa: std.mem.Allocator, rtv: *IRtv, vw: f32, vh: f32, x: f32, y: f32, text: []const u8, color: [4]f32) !void {
+        const dev = self.device;
+        const ctx = self.context;
+        var verts: std.ArrayList(f32) = .empty;
+        defer verts.deinit(gpa);
+        var pen = x;
+        const baseline = y + self.ascent;
+        for (text) |c| {
+            if (c < first_cp or c > last_cp) continue;
+            const e = self.entries[c - first_cp];
+            if (e.w > 0) {
+                const gx = @round(pen) + e.x_off;
+                const gy = @round(baseline) + e.y_off;
+                const x1 = gx + e.w;
+                const y1 = gy + e.h;
+                const quad = [_]f32{
+                    gx, gy, e.u0, e.v0,
+                    x1, gy, e.u1, e.v0,
+                    gx, y1, e.u0, e.v1,
+                    x1, gy, e.u1, e.v0,
+                    x1, y1, e.u1, e.v1,
+                    gx, y1, e.u0, e.v1,
+                };
+                try verts.appendSlice(gpa, &quad);
+            }
+            pen += e.advance;
+        }
+        if (verts.items.len == 0) return;
+
+        var vb_data: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = verts.items.ptr };
+        var vb_desc: D3D11_BUFFER_DESC = .{ .byte_width = @intCast(verts.items.len * 4), .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_VERTEX_BUFFER };
+        var vb: ?*IBuffer = null;
+        if (!ok(dev.vtbl.CreateBuffer(dev, &vb_desc, &vb_data, &vb)) or vb == null) return error.ShaderFailed;
+        defer release(vb.?);
+
+        var cbv: GlyphCB = .{ .vw = vw, .vh = vh, .color = color };
+        var cb_data: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = &cbv };
+        var cb_desc: D3D11_BUFFER_DESC = .{ .byte_width = @sizeOf(GlyphCB), .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_CONSTANT_BUFFER };
+        var cb: ?*IBuffer = null;
+        if (!ok(dev.vtbl.CreateBuffer(dev, &cb_desc, &cb_data, &cb)) or cb == null) return error.ShaderFailed;
+        defer release(cb.?);
+
+        var vp: D3D11_VIEWPORT = .{ .width = vw, .height = vh };
+        ctx.vtbl.RSSetViewports(ctx, 1, &vp);
+        ctx.vtbl.RSSetState(ctx, self.raster);
+        ctx.vtbl.OMSetBlendState(ctx, self.blend, null, 0xffffffff);
+        var rtv_slot: ?*IRtv = rtv;
+        ctx.vtbl.OMSetRenderTargets(ctx, 1, &rtv_slot, null);
+        ctx.vtbl.IASetInputLayout(ctx, self.layout);
+        var vb_slot: ?*IBuffer = vb.?;
+        const stride: UINT = 16;
+        const offset: UINT = 0;
+        ctx.vtbl.IASetVertexBuffers(ctx, 0, 1, &vb_slot, &stride, &offset);
+        ctx.vtbl.IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx.vtbl.VSSetShader(ctx, self.vs, null, 0);
+        var cb_slot: ?*IBuffer = cb.?;
+        ctx.vtbl.VSSetConstantBuffers(ctx, 0, 1, &cb_slot); // viewport (VS)
+        ctx.vtbl.PSSetConstantBuffers(ctx, 0, 1, &cb_slot); // color (PS)
+        ctx.vtbl.PSSetShader(ctx, self.ps, null, 0);
+        var srv_slot: ?*ISrv = self.atlas_srv;
+        ctx.vtbl.PSSetShaderResources(ctx, 0, 1, &srv_slot);
+        var samp_slot: ?*ISampler = self.sampler;
+        ctx.vtbl.PSSetSamplers(ctx, 0, 1, &samp_slot);
+        ctx.vtbl.Draw(ctx, @intCast(verts.items.len / 4), 0);
     }
 };

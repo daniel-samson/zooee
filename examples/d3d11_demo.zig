@@ -111,6 +111,31 @@ pub fn main(init: std.process.Init) !void {
         spx[corner] < 40 and spx[corner + 2] < 70;
     try out.print("D3D11 rounded+border: center=({d},{d},{d}) edge=({d},{d},{d}) corner=({d},{d},{d}) {s}\n", .{ spx[ci], spx[ci + 1], spx[ci + 2], spx[ei], spx[ei + 1], spx[ei + 2], spx[corner], spx[corner + 1], spx[corner + 2], if (round_ok) "PASS" else "FAIL" });
 
+    // Slice 5: glyph atlas text. Render white "Hi zooee" on black via the
+    // atlas; assert ink exists in the text band and the far-right margin is
+    // empty, like gl_demo slice 5.
+    const gw: u32 = 300;
+    const gh: u32 = 64;
+    var d3d5 = try d3d11.D3dOffscreen.create(gw, gh);
+    defer d3d5.destroy();
+    d3d5.clear(0, 0, 0, 1);
+    const font = try zooee.font.ttf.Font.parse(zooee.test_font_ttf);
+    var glyphs = try d3d11.D3dGlyphRenderer.init(gpa, d3d5.device, d3d5.context, &font, 48);
+    defer glyphs.deinit();
+    try glyphs.drawText(gpa, d3d5.rtv, @floatFromInt(gw), @floatFromInt(gh), 6, 6, "Hi zooee", .{ 1, 1, 1, 1 });
+    const gpx = try d3d5.readPixels(gpa);
+    var ink: usize = 0;
+    var right_ink: usize = 0;
+    for (0..gh) |yy| for (0..gw) |xx| {
+        const lum = gpx[(yy * gw + xx) * 4];
+        if (lum > 128) {
+            ink += 1;
+            if (xx > gw - 20) right_ink += 1; // far-right margin should be empty
+        }
+    };
+    const glyph_ok = ink > 60 and right_ink == 0;
+    try out.print("D3D11 glyph text: ink_px={d} right_margin_ink={d} {s}\n", .{ ink, right_ink, if (glyph_ok) "PASS" else "FAIL" });
+
     try out.flush();
-    if (!okc or !quad_ok or !rect_ok or !round_ok) std.process.exit(1);
+    if (!okc or !quad_ok or !rect_ok or !round_ok or !glyph_ok) std.process.exit(1);
 }
