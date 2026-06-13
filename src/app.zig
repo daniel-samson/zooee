@@ -73,8 +73,10 @@ else
 /// OSes whose native window carries a GL context (Linux/GLX only; macOS=Metal,
 /// Windows=D3D11).
 const has_gl_window = builtin.os.tag == .linux;
-/// OSes with a native GPU window backend (GL or D3D11).
-const has_gpu_window = has_gl_window or builtin.os.tag == .windows;
+/// OSes with a native GPU window backend: GL (Linux), Metal (macOS, #101),
+/// D3D11 (Windows). Note this is NOT derived from has_gl_window — macOS has a
+/// GPU window via Metal but no GL window.
+const has_gpu_window = builtin.os.tag == .linux or builtin.os.tag == .macos or builtin.os.tag == .windows;
 
 /// Run a Model as a terminal app. Msg is the app's message type
 /// (any integer-backed enum or integer type).

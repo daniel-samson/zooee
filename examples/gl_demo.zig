@@ -5,7 +5,6 @@
 //! CI without needing a screenshot.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const gl = @import("zooee").backends.gl;
 
 pub fn main(init: std.process.Init) !void {
@@ -16,56 +15,34 @@ pub fn main(init: std.process.Init) !void {
     var fw: std.Io.File.Writer = .init(.stdout(), io, &stdout_buf);
     const out = &fw.interface;
 
-    // Establish a current GL context: a hidden GLX window on Linux, a CGL
-    // offscreen context on macOS. The renderer self-checks and the GlBackend
-    // golden comparison run on either; only slice-1's on-window present
-    // (clearAndPresent/readPixels) is GLX-window-specific.
-    var lin_win: ?gl.GlWindow = null;
-    var mac_ctx: ?gl.MacGlContext = null;
-    if (builtin.os.tag == .macos) {
-        mac_ctx = gl.MacGlContext.create() catch |err| {
-            try out.print("GL-CONTEXT-FAILED: {t}\n", .{err});
-            try out.flush();
-            std.process.exit(1);
-        };
-    } else {
-        lin_win = gl.GlWindow.create("zooee gl", 200, 150) catch |err| {
-            try out.print("GL-CREATE-FAILED: {t}\n", .{err});
-            try out.flush();
-            std.process.exit(1);
-        };
-    }
-    defer {
-        if (builtin.os.tag == .macos) {
-            if (mac_ctx) |*c| c.destroy();
-        } else {
-            if (lin_win) |*w| w.destroy();
-        }
-    }
+    // Establish a current GL context: a hidden GLX window (Linux-only — macOS
+    // uses Metal #101, Windows D3D11 #12).
+    var win = gl.GlWindow.create("zooee gl", 200, 150) catch |err| {
+        try out.print("GL-CREATE-FAILED: {t}\n", .{err});
+        try out.flush();
+        std.process.exit(1);
+    };
+    defer win.destroy();
 
     var ok = true;
-    // comptime-guarded: GlWindow present (glXSwapBuffers) is GLX-only and
-    // must not be analyzed on macOS, where those symbols don't exist.
-    if (comptime builtin.os.tag != .macos) {
-        if (lin_win) |*win| {
-            // Distinctive teal so a stray clear can't accidentally pass.
-            const r: f32 = 0.10;
-            const g: f32 = 0.60;
-            const b: f32 = 0.70;
-            win.clearAndPresent(r, g, b, 1.0);
+    {
+        // Distinctive teal so a stray clear can't accidentally pass.
+        const r: f32 = 0.10;
+        const g: f32 = 0.60;
+        const b: f32 = 0.70;
+        win.clearAndPresent(r, g, b, 1.0);
 
-            const px = try win.readPixels(gpa);
-            const i = ((win.height / 2) * win.width + win.width / 2) * 4;
-            const got = .{ px[i], px[i + 1], px[i + 2] };
-            const want = .{
-                @as(u8, @intFromFloat(r * 255 + 0.5)),
-                @as(u8, @intFromFloat(g * 255 + 0.5)),
-                @as(u8, @intFromFloat(b * 255 + 0.5)),
-            };
-            // Allow ±2 for any colorspace/rounding wobble across GL implementations.
-            ok = approx(got[0], want[0]) and approx(got[1], want[1]) and approx(got[2], want[2]);
-            try out.print("GL clear: center=({d},{d},{d}) want=({d},{d},{d}) {s}\n", .{ got[0], got[1], got[2], want[0], want[1], want[2], if (ok) "PASS" else "FAIL" });
-        }
+        const px = try win.readPixels(gpa);
+        const i = ((win.height / 2) * win.width + win.width / 2) * 4;
+        const got = .{ px[i], px[i + 1], px[i + 2] };
+        const want = .{
+            @as(u8, @intFromFloat(r * 255 + 0.5)),
+            @as(u8, @intFromFloat(g * 255 + 0.5)),
+            @as(u8, @intFromFloat(b * 255 + 0.5)),
+        };
+        // Allow ±2 for any colorspace/rounding wobble across GL implementations.
+        ok = approx(got[0], want[0]) and approx(got[1], want[1]) and approx(got[2], want[2]);
+        try out.print("GL clear: center=({d},{d},{d}) want=({d},{d},{d}) {s}\n", .{ got[0], got[1], got[2], want[0], want[1], want[2], if (ok) "PASS" else "FAIL" });
     }
 
     // Slice 2: textured-quad → FBO → readback round-trip. Upload a known

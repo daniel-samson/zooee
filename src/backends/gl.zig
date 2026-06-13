@@ -9,8 +9,8 @@
 //! presenter; later slices add native primitives.
 //!
 //! GPU-primary per #11; the raster + OS-blit path remains the fallback
-//! when context creation fails. macOS (CGL) and the Window-backed
-//! `Backend` integration are follow-ups.
+//! when context creation fails. Linux-only: macOS uses Metal (#101) and
+//! Windows uses D3D11 (#12), so this file is never compiled there.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -19,13 +19,10 @@ const style = @import("../style.zig");
 const backend_mod = @import("../backend.zig");
 
 comptime {
-    // GLX windowing is Linux-only; macOS uses CGL/NSOpenGL. The renderers
-    // and the offscreen Backend path are shared. Other OSes have no GL here.
-    if (builtin.os.tag != .linux and builtin.os.tag != .macos)
-        @compileError("gl.zig: no GL backend for this OS (Linux/GLX or macOS/CGL only)");
+    // GLX windowing is Linux-only (macOS=Metal #101, Windows=D3D11 #12).
+    if (builtin.os.tag != .linux)
+        @compileError("gl.zig: GL backend is Linux-only (macOS uses Metal, Windows D3D11)");
 }
-
-const is_macos = builtin.os.tag == .macos;
 
 // --- minimal X11 + GLX surface ----------------------------------------------
 
@@ -189,47 +186,6 @@ pub const GlWindow = struct {
     }
 };
 
-// === macOS CGL offscreen context ============================================
-// CGL is the C-level OpenGL context API (no Cocoa/ObjC needed). A pixel
-// format with no kCGLPFAOpenGLProfile attribute yields a legacy 2.1 context
-// — GLSL 120 + EXT FBOs + APPLE VAOs — so the shaders run unchanged. Used by
-// GlBackend.initOffscreen on macOS; rendering targets our own FBO. The
-// windowed/NSOpenGL present path is the 10b follow-up.
-const CGLContextObj = ?*opaque {};
-const CGLPixelFormatObj = ?*opaque {};
-extern "c" fn CGLChoosePixelFormat([*]const c_int, *CGLPixelFormatObj, *c_int) c_int;
-extern "c" fn CGLCreateContext(CGLPixelFormatObj, CGLContextObj, *CGLContextObj) c_int;
-extern "c" fn CGLSetCurrentContext(CGLContextObj) c_int;
-extern "c" fn CGLDestroyContext(CGLContextObj) c_int;
-extern "c" fn CGLDestroyPixelFormat(CGLPixelFormatObj) c_int;
-
-const kCGLPFAColorSize: c_int = 8;
-const kCGLPFAAlphaSize: c_int = 11;
-
-pub const MacGlContext = struct {
-    ctx: CGLContextObj,
-
-    pub fn create() Error!MacGlContext {
-        var attrs = [_]c_int{ kCGLPFAColorSize, 24, kCGLPFAAlphaSize, 8, 0 };
-        var pf: CGLPixelFormatObj = null;
-        var n: c_int = 0;
-        if (CGLChoosePixelFormat(&attrs, &pf, &n) != 0 or pf == null) return error.NoVisual;
-        defer _ = CGLDestroyPixelFormat(pf);
-        var ctx: CGLContextObj = null;
-        if (CGLCreateContext(pf, null, &ctx) != 0 or ctx == null) return error.NoContext;
-        if (CGLSetCurrentContext(ctx) != 0) {
-            _ = CGLDestroyContext(ctx);
-            return error.NoContext;
-        }
-        return .{ .ctx = ctx };
-    }
-
-    pub fn destroy(self: *MacGlContext) void {
-        _ = CGLSetCurrentContext(null);
-        _ = CGLDestroyContext(self.ctx);
-    }
-};
-
 // === Slice 2: proc loader + shader pipeline + textured-quad ================
 // Loads modern GL via glXGetProcAddressARB, compiles a textured-quad
 // program, and renders an uploaded RGBA image — to the window (present)
@@ -264,16 +220,9 @@ const GL_FRAMEBUFFER_COMPLETE: GLenum = 0x8CD5;
 
 extern "GL" fn glXGetProcAddressARB([*:0]const u8) ?*const anyopaque;
 
-// macOS GL proc resolution: the OpenGL.framework symbols are already linked,
-// so dlsym(RTLD_DEFAULT, …) returns their addresses. The legacy (2.1)
-// context exposes VAOs as …APPLE and FBOs as …EXT (same token values), so
-// load() rewrites those names on macOS.
-extern "c" fn dlsym(?*anyopaque, [*:0]const u8) ?*anyopaque;
-const RTLD_DEFAULT: ?*anyopaque = if (is_macos) @ptrFromInt(@as(usize, @bitCast(@as(isize, -2)))) else null;
-
-/// Resolve a GL entry point by name on the current platform.
+/// Resolve a GL entry point by name (GLX; works for core-1.1 and 2.0+ in Mesa).
 fn glProc(name: [*:0]const u8) ?*const anyopaque {
-    return if (is_macos) @ptrCast(dlsym(RTLD_DEFAULT, name)) else glXGetProcAddressARB(name);
+    return glXGetProcAddressARB(name);
 }
 
 /// Loaded modern-GL entry points (glXGetProcAddressARB works for both
@@ -316,29 +265,14 @@ const Gl = struct {
     fn load() Error!Gl {
         var g: Gl = undefined;
         inline for (@typeInfo(Gl).@"struct".fields) |f| {
-            // GL symbol = "gl" + CamelCase field name, plus a per-OS suffix
-            // for the functions that are extension entry points on the macOS
-            // legacy (2.1) context: VAOs are …APPLE, FBOs are …EXT.
+            // GL symbol = "gl" + CamelCase field name (Mesa exposes VAO/FBO
+            // entry points unsuffixed via glXGetProcAddressARB).
             const base = "gl" ++ [1]u8{std.ascii.toUpper(f.name[0])} ++ f.name[1..];
-            const suffix = comptime if (is_macos) macSuffix(f.name) else "";
-            const sym = base ++ suffix ++ "\x00";
+            const sym = base ++ "\x00";
             const p = glProc(sym[0 .. sym.len - 1 :0]) orelse return error.NoContext;
             @field(g, f.name) = @ptrCast(@alignCast(p));
         }
         return g;
-    }
-
-    /// macOS legacy-context suffix for VAO/FBO entry points (comptime).
-    fn macSuffix(comptime name: []const u8) []const u8 {
-        const apple = [_][]const u8{ "genVertexArrays", "bindVertexArray" };
-        const ext = [_][]const u8{ "genFramebuffers", "bindFramebuffer", "framebufferTexture2D", "checkFramebufferStatus" };
-        inline for (apple) |n| {
-            if (std.mem.eql(u8, name, n)) return "APPLE";
-        }
-        inline for (ext) |n| {
-            if (std.mem.eql(u8, name, n)) return "EXT";
-        }
-        return "";
     }
 };
 
@@ -1359,9 +1293,6 @@ pub const GlBackend = struct {
     /// Owned hidden window for the offscreen/golden path; null when the
     /// platform owns the window + context (the runWindow GPU-present path).
     win: ?GlWindow = null,
-    /// macOS owns its hidden context here instead of a GlWindow (CGL,
-    /// offscreen). Always null/unused on Linux.
-    mac_ctx: ?MacGlContext = null,
     rect: RectRenderer,
     exact: ExactRectRenderer,
     image: ImageRenderer,
@@ -1377,21 +1308,12 @@ pub const GlBackend = struct {
     font: ?ttf.Font = null,
     glyphs: std.AutoHashMapUnmanaged(u32, GlyphRenderer) = .empty,
 
-    /// Headless GL backend over an offscreen FBO (for golden tests). The
-    /// hidden GL context comes from CGL on macOS and a hidden GLX window on
-    /// Linux; both make a context current before the renderers load.
+    /// Headless GL backend over an offscreen FBO (for golden tests). A hidden
+    /// GLX window makes a context current before the renderers load.
     pub fn initOffscreen(gpa: std.mem.Allocator) !GlBackend {
-        var win: ?GlWindow = null;
-        var mac_ctx: ?MacGlContext = null;
-        if (is_macos) {
-            mac_ctx = try MacGlContext.create();
-        } else {
-            win = try GlWindow.create("zooee-gl-backend", 16, 16);
-        }
         return .{
             .gpa = gpa,
-            .win = win,
-            .mac_ctx = mac_ctx,
+            .win = try GlWindow.create("zooee-gl-backend", 16, 16),
             .rect = try RectRenderer.init(),
             .exact = try ExactRectRenderer.init(),
             .image = try ImageRenderer.init(),
@@ -1415,11 +1337,7 @@ pub const GlBackend = struct {
     pub fn deinit(self: *GlBackend) void {
         self.clips.deinit(self.gpa);
         self.glyphs.deinit(self.gpa);
-        if (is_macos) {
-            if (self.mac_ctx) |*c| c.destroy();
-        } else {
-            if (self.win) |*w| w.destroy();
-        }
+        if (self.win) |*w| w.destroy();
     }
 
     pub fn setFont(self: *GlBackend, data: []const u8) !void {
