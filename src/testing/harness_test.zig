@@ -107,6 +107,15 @@ const terminal_goldens = [_]TerminalGolden{
     \\
     \\
     },
+    .{ .name = "image", .text =
+    \\
+    \\ ▒▒▒▒▒▒▒▒
+    \\ ▒▒▒▒▒▒▒▒
+    \\ ▒▒▒▒▒▒▒▒
+    \\ ▒▒▒▒▒▒▒▒
+    \\
+    \\
+    },
 };
 
 fn findScene(name: []const u8) scenes.Scene {
@@ -145,6 +154,7 @@ const raster_goldens = [_]RasterGolden{
     .{ .name = "sides", .hash = 0xcc939316ad5d00b9 },
     .{ .name = "layout_card", .hash = 0xb69813e5bdc834c },
     .{ .name = "hello_text", .hash = 0xc72d0c60fbbb6bbb },
+    .{ .name = "image", .hash = 0x8b0e08f61841725 },
 };
 
 test "raster renders all scenes to golden hashes" {
