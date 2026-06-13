@@ -69,7 +69,9 @@ pub fn build(b: *std.Build) void {
     const check_step = b.step("check", "Build the automated GPU backend self-checks");
     // visual-diff: image comparison helper used by the e2e capture check.
     check_step.dependOn(&b.addInstallArtifact(addExe(b, target, optimize, null, "visual-diff", "tools/visual_diff.zig"), .{}).step);
-    if (os == .linux or os == .macos) {
+    // GPU self-checks are platform-exclusive: GL on Linux, Metal on macOS,
+    // D3D11 on Windows.
+    if (os == .linux) {
         check_step.dependOn(&b.addInstallArtifact(addExe(b, target, optimize, mod, "zooee-gl-check", "examples/gl_demo.zig"), .{}).step);
     }
     if (os == .macos) {
@@ -94,8 +96,8 @@ pub fn build(b: *std.Build) void {
     switch (os) {
         .macos => {
             // Two .apps so each renderer can be launched and compared: the
-            // GL one GPU-presents (#11), the raster one forces software.
-            installMacApp(b, demos_step, guiDemo(b, mod, target, optimize, "zooee-gui-gl", false), "Zooee GL", "zooee-gui-gl");
+            // Metal one GPU-presents (#101), the raster one forces software.
+            installMacApp(b, demos_step, guiDemo(b, mod, target, optimize, "zooee-gui-metal", false), "Zooee Metal", "zooee-gui-metal");
             installMacApp(b, demos_step, guiDemo(b, mod, target, optimize, "zooee-gui-raster", true), "Zooee Raster", "zooee-gui-raster");
         },
         .windows => {

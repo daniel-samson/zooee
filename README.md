@@ -11,15 +11,14 @@ A cross-platform UI framework written in [Zig](https://ziglang.org/), with plugg
 Most UI frameworks lock you into one rendering target. Zooee separates *what* your UI is from *how* it gets drawn:
 
 - **Terminal backend** — render your app as a TUI over ANSI escape sequences. Great for CLIs, servers, and SSH sessions.
-- **DirectX backend** — GPU-accelerated rendering on Windows.
-- **OpenGL backend** — GPU-accelerated rendering on Linux and macOS.
+- **GPU backends, native to each OS** — Metal on macOS, Direct3D 11 on Windows, OpenGL on Linux. One renderer per platform, using the system's own modern graphics API.
 - **Web backend** — compile to WebAssembly and render as real DOM elements + CSS in the browser (targeting Baseline 2025), for native text, accessibility, and selection for free.
 
 The same widget tree, layout, and event handling drive all of them. Build a dashboard once; ship it as a terminal tool, a native desktop app, and a web app — from one codebase.
 
 ### Tiny binaries
 
-No bundled runtime. A zooee app is native code that dynamically links the OS's *own* UI libraries (AppKit / X11 / Direct3D) — so the whole thing ships in **kilobytes, not the hundreds of megabytes** a bundled-browser app drags around. Measured `ReleaseSmall` builds:
+No bundled runtime. A zooee app is native code that dynamically links the OS's *own* UI + graphics libraries (AppKit + Metal / X11 + OpenGL / Direct3D 11) — so the whole thing ships in **kilobytes, not the hundreds of megabytes** a bundled-browser app drags around. Measured `ReleaseSmall` builds:
 
 | Binary | Size |
 |---|---:|
@@ -30,7 +29,7 @@ That's the entire framework + app. CI gates the shipping size at a 2 MB tripwire
 
 ### Rendering: GPU-accelerated, with a software fallback
 
-Native windows render on the GPU by default (DirectX on Windows, OpenGL on Linux/macOS). When a usable GPU isn't available — missing or old drivers, remote-desktop sessions, virtual machines without 3D acceleration, or GPU device loss — zooee automatically falls back to a built-in CPU software renderer that draws into a framebuffer and blits it to the window. **It always renders something.** The software renderer is also the reference used to verify GPU output in tests, so both paths produce the same result. Today the framework ships the software path while the GPU backends are under construction.
+Native windows render on the GPU by default — **Metal** on macOS, **Direct3D 11** on Windows, **OpenGL** on Linux. When a usable GPU isn't available — missing or old drivers, remote-desktop sessions, virtual machines without 3D acceleration, or GPU device loss — zooee automatically falls back to a built-in CPU software renderer that draws into a framebuffer and blits it to the window. **It always renders something.** The software renderer is also the reference used to verify GPU output in tests: each GPU backend is checked pixel-exact against it, so all paths produce the same result.
 
 ## Goals
 
@@ -72,7 +71,7 @@ cd zooee
 zig build          # build the library (zig-out/lib/libzooee.a)
 zig build test     # run the unit tests
 zig build demos    # build the demo apps (terminal + native GUI;
-                   #   macOS → "Zooee GL.app" / "Zooee Raster.app")
+                   #   macOS → "Zooee Metal.app" / "Zooee Raster.app")
 zig build run      # run the terminal demo
 zig build run-gui  # run the native GUI demo (GPU-rendered)
 zig build clean    # remove zig-out (the build output)
@@ -85,8 +84,9 @@ shipping binaries (~180–240 KB), build in release:
 zig build demos -Doptimize=ReleaseSmall   # smallest; or ReleaseFast for speed
 ```
 
-Other steps: `check` (headless GPU backend self-checks — `zooee-gl-check` /
-`zooee-d3d11-check`, not demos), `visual-test` (raster golden comparison).
+Other steps: `check` (headless GPU backend self-checks, one per platform —
+`zooee-metal-check` on macOS, `zooee-gl-check` on Linux, `zooee-d3d11-check`
+on Windows; not demos), `visual-test` (raster golden comparison).
 
 ## Project layout
 
@@ -94,7 +94,7 @@ Other steps: `check` (headless GPU backend self-checks — `zooee-gl-check` /
 src/
   root.zig    # library entry point (the `zooee` module)
   main.zig    # terminal demo
-  backends/   # terminal, raster, GL (#11), D3D11 (#12)
+  backends/   # terminal, raster, Metal (#101, macOS), GL (#11, Linux), D3D11 (#12, Windows)
   platform/   # x11, win32, macos windowing
 examples/     # native GUI demo (examples/gui_demo.zig) + GPU self-checks
 build.zig     # build graph (see `zig build --help`)
@@ -104,7 +104,7 @@ build.zig     # build graph (see `zig build --help`)
 
 Tracked as [milestones](https://github.com/daniel-samson/zooee/milestones), built backends-first and test-driven:
 
-1. **Test harness & backends** — e2e test infrastructure (terminal output snapshots, offscreen golden-image rendering for GPU), then the terminal, OpenGL (Linux/macOS), DirectX (Windows), and web (wasm + canvas) backends, native windowing with integrated/headless title bars, in-house text rendering, and a CI gate keeping release binaries under 2MB
+1. **Test harness & backends** — e2e test infrastructure (terminal output snapshots, offscreen golden-image rendering for GPU), then the terminal, Metal (macOS), OpenGL (Linux), DirectX (Windows), and web (wasm + DOM/CSS) backends, native windowing with integrated/headless title bars, in-house text rendering, and a CI gate keeping release binaries under 2MB
 2. **Core framework** — layout engine, declarative widget API, event loop
 3. **Component library** — high-level widgets (buttons, inputs, tables, tab bars) built on the backend primitives
 
