@@ -66,8 +66,12 @@ jobs:
           # Launch the real GUI demo, screenshot its on-screen window, and
           # assert it actually painted content — a blank/solid window means
           # the GPU present loop regressed (the "opens blank then closes" bug).
+          # ZOOEE_WINLOG records which present path the (console-less) GUI app
+          # took (d3d swapchain vs raster+GDI fallback) for diagnosis.
+          $env:ZOOEE_WINLOG = "winpath.log"
           $demo = Start-Process -FilePath "zig-out\bin\zooee-gui-demo.exe" -PassThru
           Start-Sleep -Seconds 2  # let the window open and render its first frame
+          if (Test-Path winpath.log) { Write-Host "window path: $(Get-Content winpath.log -Raw)" }
           try {
             powershell -NoProfile -ExecutionPolicy Bypass -File ci\capture-window.ps1 -TitlePattern "*zooee*" -OutFile window.bmp
             & "zig-out\bin\visual-diff.exe" --reject-solid 255,255,255 window.bmp
@@ -81,7 +85,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: window-capture
-          path: window.bmp
+          path: |
+            window.bmp
+            winpath.log
           if-no-files-found: ignore
 
       # D3D11 GPU window (#12): the interactive session has a desktop, so the
