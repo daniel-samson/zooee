@@ -17,7 +17,7 @@ comptime {
     if (builtin.os.tag != .macos) @compileError("metal.zig is macOS-only; gate imports on builtin.os.tag");
 }
 
-pub const Error = error{ NoDevice, NoQueue, NoTexture, NoDrawable, ReadbackFailed };
+pub const Error = error{ NoDevice, NoQueue, NoTexture, NoDrawable, ReadbackFailed, ShaderFailed };
 
 // --- objc runtime (mirrors macos.zig) ---------------------------------------
 
@@ -61,6 +61,10 @@ fn cls(comptime name: [:0]const u8) Class {
     return objc_getClass(name.ptr);
 }
 
+fn nsString(text: [*:0]const u8) id {
+    return msg(id, struct { [*:0]const u8 }, cls("NSString"), sel("stringWithUTF8String:"), .{text});
+}
+
 // --- Metal enums / structs --------------------------------------------------
 
 // MTLPixelFormat: RGBA8Unorm=70 (offscreen, matches raster RGBA byte order),
@@ -69,6 +73,8 @@ const MTLPixelFormatRGBA8Unorm: u64 = 70;
 const MTLPixelFormatBGRA8Unorm: u64 = 80;
 const MTLLoadActionClear: u64 = 2;
 const MTLStoreActionStore: u64 = 1;
+const MTLPrimitiveTypeTriangleStrip: u64 = 4;
+const MTLSamplerMinMagFilterNearest: u64 = 0;
 const MTLTextureUsageShaderRead: u64 = 1;
 const MTLTextureUsageRenderTarget: u64 = 4;
 const MTLStorageModeShared: u64 = 0; // CPU+GPU shared (Apple Silicon) → getBytes w/o sync
@@ -225,5 +231,126 @@ pub const MetalLayer = struct {
         if (drawable == null) return error.NoDrawable;
         const texture = msg(id, struct {}, drawable, sel("texture"), .{});
         clearPass(self.ctx.queue, texture, .{ .red = r, .green = g, .blue = b, .alpha = a }, drawable, false);
+    }
+};
+
+// --- pipeline / resource helpers --------------------------------------------
+
+/// Compile an MSL source string and build a render pipeline state from its
+/// `v_main`/`f_main` functions, targeting `pixel_format`.
+fn compilePipeline(device: id, source: [*:0]const u8, pixel_format: u64) Error!id {
+    var err: id = null;
+    const library = msg(id, struct { id, id, *id }, device, sel("newLibraryWithSource:options:error:"), .{ nsString(source), null, &err });
+    if (library == null) return error.ShaderFailed;
+    const vfn = msg(id, struct { id }, library, sel("newFunctionWithName:"), .{nsString("v_main")});
+    const ffn = msg(id, struct { id }, library, sel("newFunctionWithName:"), .{nsString("f_main")});
+    if (vfn == null or ffn == null) return error.ShaderFailed;
+
+    const desc = msg(id, struct {}, msg(id, struct {}, cls("MTLRenderPipelineDescriptor"), sel("alloc"), .{}), sel("init"), .{});
+    _ = msg(void, struct { id }, desc, sel("setVertexFunction:"), .{vfn});
+    _ = msg(void, struct { id }, desc, sel("setFragmentFunction:"), .{ffn});
+    const attachments = msg(id, struct {}, desc, sel("colorAttachments"), .{});
+    const a0 = msg(id, struct { u64 }, attachments, sel("objectAtIndexedSubscript:"), .{0});
+    _ = msg(void, struct { u64 }, a0, sel("setPixelFormat:"), .{pixel_format});
+
+    const pipeline = msg(id, struct { id, *id }, device, sel("newRenderPipelineStateWithDescriptor:error:"), .{ desc, &err });
+    if (pipeline == null) return error.ShaderFailed;
+    return pipeline;
+}
+
+/// Upload RGBA8 (top-down) into a sampled texture.
+fn uploadTexture(device: id, rgba: []const u8, w: u32, h: u32) Error!id {
+    const tex = try makeTexture(device, w, h, MTLPixelFormatRGBA8Unorm);
+    const region: MTLRegion = .{ .origin = .{ .x = 0, .y = 0, .z = 0 }, .size = .{ .width = w, .height = h, .depth = 1 } };
+    _ = msg(void, struct { MTLRegion, u64, [*]const u8, u64 }, tex, sel("replaceRegion:mipmapLevel:withBytes:bytesPerRow:"), .{ region, 0, rgba.ptr, @as(u64, w) * 4 });
+    return tex;
+}
+
+fn makeSampler(device: id) id {
+    const desc = msg(id, struct {}, msg(id, struct {}, cls("MTLSamplerDescriptor"), sel("alloc"), .{}), sel("init"), .{});
+    _ = msg(void, struct { u64 }, desc, sel("setMinFilter:"), .{MTLSamplerMinMagFilterNearest});
+    _ = msg(void, struct { u64 }, desc, sel("setMagFilter:"), .{MTLSamplerMinMagFilterNearest});
+    return msg(id, struct { id }, device, sel("newSamplerStateWithDescriptor:"), .{desc});
+}
+
+// --- slice 2: textured quad -------------------------------------------------
+
+/// Sample a CPU image through the shader/texture pipeline into a render
+/// target — proves the MSL/pipeline/vertex-buffer machinery (slice 2). The
+/// later rect/glyph/image renderers reuse the same scaffolding.
+pub const MetalQuadRenderer = struct {
+    ctx: MetalContext,
+    pipeline: id,
+    sampler: id,
+    verts: id, // vertex buffer: 4 × float4 (xy = clip pos, zw = uv)
+
+    // NEAREST, full-RT triangle strip. uv.y is set so the readback (top-down)
+    // matches the source's top-down byte order: clip-top (+y) → uv.y 0.
+    const quad = [_]f32{
+        -1, -1, 0, 1, // bottom-left
+        1, -1, 1, 1, // bottom-right
+        -1, 1, 0, 0, // top-left
+        1, 1, 1, 0, // top-right
+    };
+
+    const shader =
+        \\#include <metal_stdlib>
+        \\using namespace metal;
+        \\struct VOut { float4 pos [[position]]; float2 uv; };
+        \\vertex VOut v_main(uint vid [[vertex_id]], const device float4* v [[buffer(0)]]) {
+        \\    VOut o; o.pos = float4(v[vid].xy, 0, 1); o.uv = v[vid].zw; return o;
+        \\}
+        \\fragment float4 f_main(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]], sampler s [[sampler(0)]]) {
+        \\    return tex.sample(s, in.uv);
+        \\}
+    ;
+
+    pub fn init() Error!MetalQuadRenderer {
+        var ctx = try MetalContext.create();
+        errdefer ctx.destroy();
+        const pipeline = try compilePipeline(ctx.device, shader, MTLPixelFormatRGBA8Unorm);
+        const sampler = makeSampler(ctx.device);
+        const verts = msg(id, struct { [*]const f32, u64, u64 }, ctx.device, sel("newBufferWithBytes:length:options:"), .{ &quad, @as(u64, @sizeOf(@TypeOf(quad))), 0 });
+        return .{ .ctx = ctx, .pipeline = pipeline, .sampler = sampler, .verts = verts };
+    }
+
+    pub fn deinit(self: *MetalQuadRenderer) void {
+        release(self.verts);
+        release(self.sampler);
+        release(self.pipeline);
+        self.ctx.destroy();
+    }
+
+    /// Upload `rgba` (top-down), draw it 1:1 into a w×h target, read it back.
+    pub fn renderOffscreen(self: *MetalQuadRenderer, gpa: std.mem.Allocator, rgba: []const u8, w: u32, h: u32) ![]u8 {
+        const target = try makeTexture(self.ctx.device, w, h, MTLPixelFormatRGBA8Unorm);
+        defer release(target);
+        const src_tex = try uploadTexture(self.ctx.device, rgba, w, h);
+        defer release(src_tex);
+
+        const rpd = msg(id, struct {}, cls("MTLRenderPassDescriptor"), sel("renderPassDescriptor"), .{});
+        const a0 = msg(id, struct { u64 }, msg(id, struct {}, rpd, sel("colorAttachments"), .{}), sel("objectAtIndexedSubscript:"), .{0});
+        _ = msg(void, struct { id }, a0, sel("setTexture:"), .{target});
+        _ = msg(void, struct { u64 }, a0, sel("setLoadAction:"), .{MTLLoadActionClear});
+        _ = msg(void, struct { u64 }, a0, sel("setStoreAction:"), .{MTLStoreActionStore});
+        _ = msg(void, struct { MTLClearColor }, a0, sel("setClearColor:"), .{.{ .red = 0, .green = 0, .blue = 0, .alpha = 1 }});
+
+        const cmdbuf = msg(id, struct {}, self.ctx.queue, sel("commandBuffer"), .{});
+        const enc = msg(id, struct { id }, cmdbuf, sel("renderCommandEncoderWithDescriptor:"), .{rpd});
+        _ = msg(void, struct { id }, enc, sel("setRenderPipelineState:"), .{self.pipeline});
+        _ = msg(void, struct { id, u64, u64 }, enc, sel("setVertexBuffer:offset:atIndex:"), .{ self.verts, 0, 0 });
+        _ = msg(void, struct { id, u64 }, enc, sel("setFragmentTexture:atIndex:"), .{ src_tex, 0 });
+        _ = msg(void, struct { id, u64 }, enc, sel("setFragmentSamplerState:atIndex:"), .{ self.sampler, 0 });
+        _ = msg(void, struct { u64, u64, u64 }, enc, sel("drawPrimitives:vertexStart:vertexCount:"), .{ MTLPrimitiveTypeTriangleStrip, 0, 4 });
+        _ = msg(void, struct {}, enc, sel("endEncoding"), .{});
+        _ = msg(void, struct {}, cmdbuf, sel("commit"), .{});
+        _ = msg(void, struct {}, cmdbuf, sel("waitUntilCompleted"), .{});
+
+        const bpr: u64 = @as(u64, w) * 4;
+        const buf = try gpa.alloc(u8, @as(usize, w) * h * 4);
+        errdefer gpa.free(buf);
+        const region: MTLRegion = .{ .origin = .{ .x = 0, .y = 0, .z = 0 }, .size = .{ .width = w, .height = h, .depth = 1 } };
+        _ = msg(void, struct { [*]u8, u64, MTLRegion, u64 }, target, sel("getBytes:bytesPerRow:fromRegion:mipmapLevel:"), .{ buf.ptr, bpr, region, 0 });
+        return buf;
     }
 };

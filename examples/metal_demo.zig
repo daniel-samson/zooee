@@ -41,8 +41,37 @@ pub fn main(init: std.process.Init) !void {
     const ok = approx(got[0], want[0]) and approx(got[1], want[1]) and approx(got[2], want[2]);
     try out.print("Metal clear: center=({d},{d},{d}) want=({d},{d},{d}) {s}\n", .{ got[0], got[1], got[2], want[0], want[1], want[2], if (ok) "PASS" else "FAIL" });
 
+    // Slice 2: textured-quad round-trip. Upload a known image, render it 1:1
+    // through the shader/texture pipeline, and check it comes back (NEAREST,
+    // same size → near-exact), incl. correct top-down orientation.
+    var qr = metal.MetalQuadRenderer.init() catch |err| {
+        try out.print("METAL-QUAD-INIT-FAILED: {t}\n", .{err});
+        try out.flush();
+        std.process.exit(1);
+    };
+    defer qr.deinit();
+    const tw: u32 = 16;
+    const th: u32 = 16;
+    const src = try gpa.alloc(u8, tw * th * 4);
+    for (0..th) |yy| for (0..tw) |xx| {
+        const k = (yy * tw + xx) * 4;
+        src[k + 0] = if (xx < tw / 2) 200 else 40; // left red-ish / right dark
+        src[k + 1] = if (yy < th / 2) 180 else 30; // top green-ish
+        src[k + 2] = 90;
+        src[k + 3] = 255;
+    };
+    const back = try qr.renderOffscreen(gpa, src, tw, th);
+    defer gpa.free(back);
+    var max_diff: u8 = 0;
+    for (src, back) |sv, bv| {
+        const d = if (sv > bv) sv - bv else bv - sv;
+        if (d > max_diff) max_diff = d;
+    }
+    const quad_ok = max_diff <= 4;
+    try out.print("Metal quad round-trip: max channel diff {d} {s}\n", .{ max_diff, if (quad_ok) "PASS" else "FAIL" });
+
     try out.flush();
-    if (!ok) std.process.exit(1);
+    if (!ok or !quad_ok) std.process.exit(1);
 }
 
 fn approx(a: u8, b: u8) bool {
