@@ -70,14 +70,85 @@ const Demo = struct {
             },
             .children = row_ptrs,
         };
+
+        const showcase = try self.buildShowcase(arena, scale);
+
+        const columns = try arena.create(L.Element);
+        columns.* = .{
+            .direction = .row,
+            .gap = 16 * scale,
+            .children = try arena.dupe(*const L.Element, &.{ list, showcase }),
+        };
+
         const root = try arena.create(L.Element);
         root.* = .{
             .direction = .column,
             .padding = .all(16 * scale),
             .rect_style = .{ .background = Color.rgb(238, 240, 245) },
-            .children = try arena.dupe(*const L.Element, &.{ title, list }),
+            .children = try arena.dupe(*const L.Element, &.{ title, columns }),
         };
         return root;
+    }
+
+    /// A panel showcasing the paint primitives so they can be eyeballed on the
+    /// live GPU window: a linear gradient (#118), a square fill rounded-clipped
+    /// (#117), a half-opacity group (#121), and a Unicode string (#114).
+    fn buildShowcase(self: *Demo, arena: std.mem.Allocator, scale: f32) !*const L.Element {
+        _ = self;
+        // Gradient bar (#118): red → blue, no plain background.
+        const grad_bar = try arena.create(L.Element);
+        grad_bar.* = .{
+            .width = 200 * scale,
+            .height = 28 * scale,
+            .rect_style = .{ .gradient = .{ .axis = .horizontal, .from = Color.rgb(220, 40, 40), .to = Color.rgb(40, 60, 220) } },
+        };
+        // Rounded clip (#117): a SQUARE green fill clipped to round corners —
+        // the corners are cut by the clip, not by a rounded-rect draw.
+        const clip_fill = try arena.create(L.Element);
+        clip_fill.* = .{ .grow = 1, .rect_style = .{ .background = Color.rgb(40, 180, 90) } };
+        const clip_box = try arena.create(L.Element);
+        clip_box.* = .{
+            .width = 92 * scale,
+            .height = 56 * scale,
+            .clip_radius = .all(18 * scale),
+            .children = try arena.dupe(*const L.Element, &.{clip_fill}),
+        };
+        // Group opacity (#121): a purple fill composited at 40%.
+        const op_fill = try arena.create(L.Element);
+        op_fill.* = .{ .grow = 1, .rect_style = .{ .background = Color.rgb(150, 40, 200) } };
+        const op_group = try arena.create(L.Element);
+        op_group.* = .{
+            .width = 92 * scale,
+            .height = 56 * scale,
+            .opacity = 0.4,
+            .children = try arena.dupe(*const L.Element, &.{op_fill}),
+        };
+        const swatches = try arena.create(L.Element);
+        swatches.* = .{
+            .direction = .row,
+            .gap = 16 * scale,
+            .margin = .{ .top = 12 * scale, .bottom = 12 * scale },
+            .children = try arena.dupe(*const L.Element, &.{ clip_box, op_group }),
+        };
+        // Unicode (#114): accents + em-dash exercise the dynamic glyph atlas.
+        const uni = try arena.create(L.Element);
+        uni.* = .{
+            .text = "café — déjà vu",
+            .text_style = .{ .color = Color.rgb(40, 40, 40), .size = 16 * scale },
+        };
+
+        const panel = try arena.create(L.Element);
+        panel.* = .{
+            .direction = .column,
+            .padding = .all(12 * scale),
+            .rect_style = .{
+                .background = Color.white,
+                .border = .all(2 * scale, Color.rgb(120, 120, 130)),
+                .corner_radius = .all(10 * scale),
+            },
+            .children = try arena.dupe(*const L.Element, &.{ grad_bar, swatches, uni }),
+        };
+        return panel;
     }
 
     pub fn update(self: *Demo, msg: Msg) zooee.app.Command {
@@ -122,5 +193,5 @@ const Demo = struct {
 pub fn main(init: std.process.Init) !void {
     var demo: Demo = .{};
     const title: [:0]const u8 = if (force_software) "zooee - raster" else "zooee - GPU";
-    try zooee.app.runWindow(Demo, Msg, &demo, init, .{ .title = title, .width = 520, .height = 320, .force_software = force_software });
+    try zooee.app.runWindow(Demo, Msg, &demo, init, .{ .title = title, .width = 760, .height = 400, .force_software = force_software });
 }

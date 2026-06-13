@@ -150,6 +150,41 @@ pub fn drawRoundedClip(b: Backend, s: f32) !void {
     b.popClip();
 }
 
+/// Layout-integrated effects (#117/#121/#118): a column of three leaves built
+/// through the layout engine — a gradient header, a rounded-clipped fill, and
+/// a half-opacity group — exercising Element.gradient/clip_radius/opacity and
+/// their balanced push/pop in render(). Verifies the layout path matches
+/// raster pixel-exact, not just the imperative primitive checks. Not in `all`.
+pub fn drawLayoutEffects(b: Backend, s: f32) !void {
+    const header: layout.Element = .{
+        .width = 12 * s,
+        .height = 3 * s,
+        .rect_style = .{ .gradient = .{ .axis = .horizontal, .from = Color.rgb(220, 40, 40), .to = Color.rgb(40, 60, 220) } },
+    };
+    const clipbox: layout.Element = .{
+        .width = 8 * s,
+        .height = 5 * s,
+        .clip_radius = .all(2 * s),
+        .rect_style = .{ .background = Color.rgb(40, 180, 90) },
+    };
+    const opacity_group: layout.Element = .{
+        .width = 12 * s,
+        .height = 3 * s,
+        .opacity = 0.5,
+        .rect_style = .{ .background = Color.rgb(40, 60, 220) },
+    };
+    const root: layout.Element = .{
+        .direction = .column,
+        .padding = .all(1 * s),
+        .gap = 1 * s,
+        .children = &.{ &header, &clipbox, &opacity_group },
+    };
+    const gpa = std.heap.page_allocator;
+    var result = try layout.layout(gpa, b, &root, .{ .width = 14 * s, .height = 15 * s });
+    defer result.deinit(gpa);
+    layout.render(b, result);
+}
+
 /// Built via the layout engine (#3) rather than hand-placed draws: a
 /// padded column holding a bordered text card and a row of two flex-grow
 /// fills. Exercises box model, gap, text measurement, and remainder

@@ -178,6 +178,10 @@ pub fn main(init: std.process.Init) !void {
         // raster's hard-edged per-pixel clip (corners cut, 0.03).
         const rounded_clip_scene: zooee.fixtures.Scene = .{ .name = "rounded_clip", .width = 10, .height = 10, .draw = zooee.fixtures.drawRoundedClip };
         if (!(try compareScene(gpa, out, &mb, rounded_clip_scene, false))) backend_ok = false;
+        // Layout-integrated effects (#117/#121/#118 via Element): gradient +
+        // rounded clip + opacity through the layout engine must match raster.
+        const layout_effects_scene: zooee.fixtures.Scene = .{ .name = "layout_effects", .width = 14, .height = 15, .draw = zooee.fixtures.drawLayoutEffects };
+        if (!(try compareScene(gpa, out, &mb, layout_effects_scene, false))) backend_ok = false;
     }
 
     try out.flush();
