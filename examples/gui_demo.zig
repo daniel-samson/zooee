@@ -130,6 +130,19 @@ const Demo = struct {
             .margin = .{ .top = 12 * scale, .bottom = 12 * scale },
             .children = try arena.dupe(*const L.Element, &.{ clip_box, op_group }),
         };
+        // Box shadow (#119): an elevated card floating on a soft blurred shadow.
+        const card = try arena.create(L.Element);
+        card.* = .{
+            .width = 200 * scale,
+            .height = 36 * scale,
+            .rect_style = .{
+                .background = Color.white,
+                .corner_radius = .all(8 * scale),
+                .shadow = .{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 90 }, .dy = 3 * scale, .blur = 8 * scale },
+            },
+        };
+        const card_wrap = try arena.create(L.Element);
+        card_wrap.* = .{ .margin = .{ .bottom = 12 * scale }, .children = try arena.dupe(*const L.Element, &.{card}) };
         // Unicode (#114): accents + em-dash exercise the dynamic glyph atlas.
         const uni = try arena.create(L.Element);
         uni.* = .{
@@ -146,7 +159,7 @@ const Demo = struct {
                 .border = .all(2 * scale, Color.rgb(120, 120, 130)),
                 .corner_radius = .all(10 * scale),
             },
-            .children = try arena.dupe(*const L.Element, &.{ grad_bar, swatches, uni }),
+            .children = try arena.dupe(*const L.Element, &.{ grad_bar, swatches, card_wrap, uni }),
         };
         return panel;
     }

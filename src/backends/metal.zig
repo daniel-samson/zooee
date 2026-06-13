@@ -917,6 +917,60 @@ pub const MetalGradientRenderer = struct {
     }
 };
 
+// Box-shadow uniform (#119). quad = expanded bounds to rasterize; rect = the
+// element rect; sh = {dx,dy,blur,spread}; vp = {vw,vh,0,0}.
+const ShadowUniform = extern struct { quad: [4]f32, rect: [4]f32, sh: [4]f32, color: [4]f32, vp: [4]f32 };
+
+/// Paints a Gaussian box shadow (#119) using the SAME analytic erf coverage as
+/// style.BoxShadow.coverage, so it matches the raster reference within float
+/// tolerance.
+pub const MetalShadowRenderer = struct {
+    device: id,
+    queue: id,
+    pipeline: id,
+    enc: id = null,
+    vw: f32 = 0,
+    vh: f32 = 0,
+
+    const shader =
+        \\#include <metal_stdlib>
+        \\using namespace metal;
+        \\struct ShU { float4 quad; float4 rect; float4 sh; float4 color; float4 vp; };
+        \\vertex float4 v_main(uint vid [[vertex_id]], constant ShU& u [[buffer(0)]]) {
+        \\    float2 corner[4] = { float2(0,0), float2(1,0), float2(0,1), float2(1,1) };
+        \\    float2 px = u.quad.xy + corner[vid] * u.quad.zw;
+        \\    return float4(px.x / u.vp.x * 2.0 - 1.0, 1.0 - px.y / u.vp.y * 2.0, 0, 1);
+        \\}
+        \\static float erf_(float x) { float t = 1.0/(1.0+0.3275911*fabs(x)); float y = 1.0-(((((1.061405429*t-1.453152027)*t)+1.421413741)*t-0.284496736)*t+0.254829592)*t*exp(-x*x); return x<0.0?-y:y; }
+        \\static float band_(float p, float lo, float hi, float s) { float inv = 1.0/(s*1.4142135623730951); return 0.5*(erf_((hi-p)*inv)-erf_((lo-p)*inv)); }
+        \\fragment float4 f_main(float4 fp [[position]], constant ShU& u [[buffer(0)]]) {
+        \\    float dx=u.sh.x, dy=u.sh.y, blur=u.sh.z, spread=u.sh.w;
+        \\    float x0=u.rect.x+dx-spread, y0=u.rect.y+dy-spread;
+        \\    float x1=u.rect.x+u.rect.z+dx+spread, y1=u.rect.y+u.rect.w+dy+spread;
+        \\    float cov;
+        \\    if (blur<=0.0) cov = (fp.x>=x0 && fp.x<x1 && fp.y>=y0 && fp.y<y1) ? 1.0 : 0.0;
+        \\    else { float s=blur*0.5; cov = clamp(band_(fp.x,x0,x1,s)*band_(fp.y,y0,y1,s), 0.0, 1.0); }
+        \\    return float4(u.color.rgb, cov*u.color.a);
+        \\}
+    ;
+
+    pub fn init(device: id, queue: id) Error!MetalShadowRenderer {
+        const pipeline = try compilePipeline(device, shader, MTLPixelFormatRGBA8Unorm, true);
+        return .{ .device = device, .queue = queue, .pipeline = pipeline };
+    }
+
+    pub fn deinit(self: *MetalShadowRenderer) void {
+        release(self.pipeline);
+    }
+
+    pub fn draw(self: *MetalShadowRenderer, quad: [4]f32, rect: [4]f32, sh: [4]f32, color: [4]f32) void {
+        var u: ShadowUniform = .{ .quad = quad, .rect = rect, .sh = sh, .color = color, .vp = .{ self.vw, self.vh, 0, 0 } };
+        _ = msg(void, struct { *const ShadowUniform, u64, u64 }, self.enc, sel("setVertexBytes:length:atIndex:"), .{ &u, @as(u64, @sizeOf(ShadowUniform)), 0 });
+        _ = msg(void, struct { *const ShadowUniform, u64, u64 }, self.enc, sel("setFragmentBytes:length:atIndex:"), .{ &u, @as(u64, @sizeOf(ShadowUniform)), 0 });
+        _ = msg(void, struct { u64, u64, u64 }, self.enc, sel("drawPrimitives:vertexStart:vertexCount:"), .{ MTLPrimitiveTypeTriangleStrip, 0, 4 });
+    }
+};
+
 // Compositor uniform. vp_op = {vw, vh, opacity, 0}.
 const CompUniform = extern struct { rect: [4]f32, vp_op: [4]f32 };
 
@@ -1066,6 +1120,7 @@ pub const MetalBackend = struct {
     exact: MetalExactRectRenderer,
     image: MetalImageRenderer,
     grad: MetalGradientRenderer,
+    shadow: MetalShadowRenderer,
     comp: MetalLayerCompositor,
     rclip: MetalRoundClipCompositor,
     glyphs: std.AutoHashMapUnmanaged(u16, MetalGlyphRenderer) = .empty,
@@ -1123,6 +1178,7 @@ pub const MetalBackend = struct {
             .exact = try MetalExactRectRenderer.init(ctx.device, ctx.queue),
             .image = try MetalImageRenderer.init(ctx.device, ctx.queue),
             .grad = try MetalGradientRenderer.init(ctx.device, ctx.queue),
+            .shadow = try MetalShadowRenderer.init(ctx.device, ctx.queue),
             .comp = try MetalLayerCompositor.init(ctx.device, ctx.queue),
             .rclip = try MetalRoundClipCompositor.init(ctx.device, ctx.queue),
         };
@@ -1144,6 +1200,7 @@ pub const MetalBackend = struct {
         self.exact.deinit();
         self.rect.deinit();
         self.grad.deinit();
+        self.shadow.deinit();
         self.comp.deinit();
         self.rclip.deinit();
         if (self.present_sampler != null) release(self.present_sampler);
@@ -1233,6 +1290,9 @@ pub const MetalBackend = struct {
         self.grad.enc = enc;
         self.grad.vw = w;
         self.grad.vh = h;
+        self.shadow.enc = enc;
+        self.shadow.vw = w;
+        self.shadow.vh = h;
         self.comp.enc = enc;
         self.comp.vw = w;
         self.comp.vh = h;
@@ -1302,6 +1362,17 @@ pub const MetalBackend = struct {
 
     fn drawRect(ptr: *anyopaque, rect: geometry.Rect, rs: style.RectStyle) void {
         const self = self_(ptr);
+        if (rs.shadow) |sh| {
+            const margin = sh.blur * 2 + @abs(sh.spread) + 2;
+            const quad: [4]f32 = .{
+                rect.x + sh.dx - sh.spread - margin,
+                rect.y + sh.dy - sh.spread - margin,
+                rect.width + 2 * (sh.spread + margin),
+                rect.height + 2 * (sh.spread + margin),
+            };
+            _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{self.shadow.pipeline});
+            self.shadow.draw(quad, .{ rect.x, rect.y, rect.width, rect.height }, .{ sh.dx, sh.dy, sh.blur, sh.spread }, col4(sh.color));
+        }
         if (rs.gradient) |g| {
             _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{self.grad.pipeline});
             self.grad.fill(rect.x, rect.y, rect.width, rect.height, if (g.axis == .vertical) 1 else 0, col4(g.from), col4(g.to));

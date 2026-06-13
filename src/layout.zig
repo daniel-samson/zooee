@@ -139,7 +139,7 @@ fn renderNode(b: Backend, placements: []const Placement, i: *usize) void {
     if (clipped) b.pushClipRounded(p.rect, el.clip_radius.?);
 
     const rs = el.rect_style;
-    if (rs.background != null or rs.gradient != null or !rs.border.isNone()) {
+    if (rs.background != null or rs.gradient != null or rs.shadow != null or !rs.border.isNone()) {
         b.drawRect(p.rect, rs);
     }
     if (el.text) |t| {
