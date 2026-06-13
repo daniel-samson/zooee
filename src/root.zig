@@ -49,6 +49,10 @@ pub const platform = struct {
         @import("platform/posix_tty.zig")
     else
         struct {};
+    pub const x11 = if (@import("builtin").os.tag == .linux)
+        @import("platform/x11.zig")
+    else
+        struct {};
 };
 
 test {
@@ -61,6 +65,9 @@ test {
         std.testing.refAllDecls(platform.win32_console);
     } else {
         std.testing.refAllDecls(platform.posix_tty);
+        if (@import("builtin").os.tag == .linux) {
+            std.testing.refAllDecls(platform.x11);
+        }
         if (@import("builtin").os.tag == .macos) {
             std.testing.refAllDecls(platform.macos);
         }
