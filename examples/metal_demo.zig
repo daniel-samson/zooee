@@ -41,10 +41,14 @@ pub fn main(init: std.process.Init) !void {
     const ok = approx(got[0], want[0]) and approx(got[1], want[1]) and approx(got[2], want[2]);
     try out.print("Metal clear: center=({d},{d},{d}) want=({d},{d},{d}) {s}\n", .{ got[0], got[1], got[2], want[0], want[1], want[2], if (ok) "PASS" else "FAIL" });
 
+    // The remaining renderers share one device + queue (the Backend does too).
+    var ctx = try metal.MetalContext.create();
+    defer ctx.destroy();
+
     // Slice 2: textured-quad round-trip. Upload a known image, render it 1:1
     // through the shader/texture pipeline, and check it comes back (NEAREST,
     // same size → near-exact), incl. correct top-down orientation.
-    var qr = metal.MetalQuadRenderer.init() catch |err| {
+    var qr = metal.MetalQuadRenderer.init(ctx.device, ctx.queue) catch |err| {
         try out.print("METAL-QUAD-INIT-FAILED: {t}\n", .{err});
         try out.flush();
         std.process.exit(1);
@@ -72,7 +76,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Slice 3: native rect geometry. Render left-half red / right-half blue
     // via the rect shader; check the halves came out.
-    var rr = metal.MetalRectRenderer.init() catch |err| {
+    var rr = metal.MetalRectRenderer.init(ctx.device, ctx.queue) catch |err| {
         try out.print("METAL-RECT-INIT-FAILED: {t}\n", .{err});
         try out.flush();
         std.process.exit(1);
@@ -90,7 +94,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Slice 4: SDF rounded rect + border. White rounded card, blue border, on
     // black. center=white(bg), mid-left edge=blue(border), corner=cut(black).
-    var rrr = metal.MetalRoundedRectRenderer.init() catch |err| {
+    var rrr = metal.MetalRoundedRectRenderer.init(ctx.device, ctx.queue) catch |err| {
         try out.print("METAL-ROUND-INIT-FAILED: {t}\n", .{err});
         try out.flush();
         std.process.exit(1);
@@ -112,7 +116,7 @@ pub fn main(init: std.process.Init) !void {
     // Metal glyph atlas; assert ink exists and the far-right region is empty.
     const zooee = @import("zooee");
     const font = try zooee.font.ttf.Font.parse(zooee.test_font_ttf);
-    var gr = metal.MetalGlyphRenderer.init(gpa, &font, 48) catch |err| {
+    var gr = metal.MetalGlyphRenderer.init(ctx.device, ctx.queue, gpa, &font, 48) catch |err| {
         try out.print("METAL-GLYPH-INIT-FAILED: {t}\n", .{err});
         try out.flush();
         std.process.exit(1);
@@ -134,8 +138,62 @@ pub fn main(init: std.process.Init) !void {
     const glyph_ok = ink > 60 and right_ink == 0;
     try out.print("Metal glyph text: ink_px={d} right_margin_ink={d} {s}\n", .{ ink, right_ink, if (glyph_ok) "PASS" else "FAIL" });
 
+    // Slice 6: MetalBackend vtable. Render fixtures through the Metal Backend
+    // AND raster; compare with tolerance (proves the Backend matches the raster
+    // reference via the real interface). overlap/nested_clip pixel-exact (hard
+    // rects + scissor); sides exercises per-side borders + a rounded corner via
+    // the exact renderer; card/layout_card mix border + text; image; hello_text.
+    var backend_ok = true;
+    {
+        var mb = metal.MetalBackend.initOffscreen(gpa) catch |err| {
+            try out.print("METAL-BACKEND-INIT-FAILED: {t}\n", .{err});
+            try out.flush();
+            std.process.exit(1);
+        };
+        defer mb.deinit();
+        try mb.setFont(zooee.test_font_ttf);
+        const text_scenes = [_][]const u8{ "hello_text", "card", "layout_card" };
+        for ([_][]const u8{ "overlap", "nested_clip", "sides", "image", "hello_text", "card", "layout_card" }) |name| {
+            const scene = findScene(name) orelse continue;
+            try zooee.fixtures.run(scene, mb.interface(), 8);
+            const mpx = try mb.readPixels();
+            defer gpa.free(mpx);
+            var ras = zooee.backends.raster.RasterBackend.init(gpa);
+            defer ras.deinit();
+            try ras.setFont(zooee.test_font_ttf);
+            try zooee.fixtures.run(scene, ras.interface(), 8);
+            var bad: usize = 0;
+            const n = @min(mpx.len, ras.pixels.len) / 4;
+            for (0..n) |p| {
+                var md: u8 = 0;
+                for (0..3) |ch| {
+                    const a = mpx[p * 4 + ch];
+                    const bch = ras.pixels[p * 4 + ch];
+                    const d = if (a > bch) a - bch else bch - a;
+                    if (d > md) md = d;
+                }
+                if (md > 32) bad += 1;
+            }
+            const frac = @as(f32, @floatFromInt(bad)) / @as(f32, @floatFromInt(n));
+            var is_text = false;
+            for (text_scenes) |t| {
+                if (std.mem.eql(u8, name, t)) is_text = true;
+            }
+            const scene_ok = frac < if (is_text) @as(f32, 0.05) else 0.03;
+            if (!scene_ok) backend_ok = false;
+            try out.print("Metal Backend vs raster [{s}]: bad_frac={d:.4} {s}\n", .{ name, frac, if (scene_ok) "PASS" else "FAIL" });
+        }
+    }
+
     try out.flush();
-    if (!ok or !quad_ok or !rect_ok or !round_ok or !glyph_ok) std.process.exit(1);
+    if (!ok or !quad_ok or !rect_ok or !round_ok or !glyph_ok or !backend_ok) std.process.exit(1);
+}
+
+fn findScene(name: []const u8) ?@import("zooee").fixtures.Scene {
+    for (@import("zooee").fixtures.all) |s| {
+        if (std.mem.eql(u8, s.name, name)) return s;
+    }
+    return null;
 }
 
 fn rectScene(rr: *metal.MetalRectRenderer) void {
