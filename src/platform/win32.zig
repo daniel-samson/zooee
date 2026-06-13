@@ -61,8 +61,10 @@ const CW_USEDEFAULT: i32 = @bitCast(@as(u32, 0x80000000));
 const SW_SHOWNORMAL = 1;
 const GWLP_USERDATA = -21;
 const WHITE_BRUSH = 0;
+const IDC_ARROW: usize = 32512;
 
 extern "gdi32" fn GetStockObject(i32) callconv(WINAPI) ?*anyopaque;
+extern "user32" fn LoadCursorW(?HINSTANCE, ?*const anyopaque) callconv(WINAPI) ?*anyopaque;
 
 extern "user32" fn RegisterClassExW(*const WNDCLASSEXW) callconv(WINAPI) u16;
 extern "user32" fn CreateWindowExW(u32, [*:0]const u16, [*:0]const u16, u32, i32, i32, i32, i32, ?HWND, ?*anyopaque, HINSTANCE, ?*anyopaque) callconv(WINAPI) ?HWND;
@@ -154,6 +156,10 @@ pub const Window = struct {
                 // background brush the client area is undefined (renders
                 // black) — caught by the e2e window visual test.
                 .hbrBackground = GetStockObject(WHITE_BRUSH),
+                // Arrow cursor for the client area. Without a class cursor
+                // the window never resets the pointer, so the launch
+                // "app-starting" hourglass lingers over our window.
+                .hCursor = LoadCursorW(null, @ptrFromInt(IDC_ARROW)),
             };
             if (RegisterClassExW(&wc) == 0) return error.BackendFailure;
             class_registered = true;
