@@ -48,12 +48,15 @@ const session_mod = if (builtin.os.tag == .windows)
 else
     @import("platform/posix_tty.zig");
 
-/// GL backend (#11), Linux/GLX only — the GPU-present path for runWindow.
-/// Empty struct elsewhere so the file only compiles where it's valid.
-const gl_backend = if (builtin.os.tag == .linux)
+/// GL backend (#11) — the GPU-present path for runWindow. Linux/GLX and
+/// macOS/NSOpenGL; empty struct elsewhere so it only compiles where valid.
+const gl_backend = if (builtin.os.tag == .linux or builtin.os.tag == .macos)
     @import("backends/gl.zig")
 else
     struct {};
+
+/// OSes whose native window can carry a GL context (the GPU-present path).
+const has_gl_window = builtin.os.tag == .linux or builtin.os.tag == .macos;
 
 /// Run a Model as a terminal app. Msg is the app's message type
 /// (any integer-backed enum or integer type).
@@ -148,14 +151,14 @@ pub fn runWindow(
 
     // GPU-present by default on platforms with a GL backend (#11 decision);
     // ZOOEE_SOFTWARE forces the CPU raster path (deterministic CI, debugging).
-    const want_gl = builtin.os.tag == .linux and !init.environ_map.contains("ZOOEE_SOFTWARE");
+    const want_gl = has_gl_window and !init.environ_map.contains("ZOOEE_SOFTWARE");
 
     const window = try platform.Window.create(gpa, .{ .title = opts.title, .width = opts.width, .height = opts.height, .gl = want_gl });
     defer window.destroy();
 
     // GL window + current context succeeded → drive the GPU-present loop.
     // Otherwise fall through to the CPU raster + OS blit path below.
-    if (comptime builtin.os.tag == .linux) {
+    if (comptime has_gl_window) {
         if (window.gl_ctx != null) return runWindowGl(Model, Msg, model, window, init);
     }
 
@@ -204,7 +207,7 @@ pub fn runWindow(
 /// context current; GlBackend renders straight to the window's default
 /// framebuffer and the platform swaps buffers. Same view→layout→render and
 /// event dispatch as the raster loop — only the backend and present differ.
-/// Linux/GLX only; referenced solely behind a comptime os==.linux guard.
+/// Linux/GLX and macOS/NSOpenGL; referenced only behind a comptime guard.
 fn runWindowGl(
     comptime Model: type,
     comptime Msg: type,
@@ -215,6 +218,12 @@ fn runWindowGl(
     const platform = WindowPlatform;
     const gpa = init.arena.allocator();
     const io = init.io;
+
+    // Headless capture hook: ZOOEE_CAPTURE=<path> renders one frame, reads
+    // the window's GL back buffer back, writes it as a PPM, and exits — so
+    // the real on-window GPU render can be snapshotted without a screenshot
+    // (screen-recording perms) on either platform.
+    const capture_path = init.environ_map.get("ZOOEE_CAPTURE");
 
     var glb = try gl_backend.GlBackend.initOnCurrent(gpa);
     defer glb.deinit();
@@ -247,6 +256,16 @@ fn runWindowGl(
             try b.beginFrame(viewport);
             layout_mod.render(b, result);
             try b.endFrame();
+            // Capture before swap: read the back buffer we just drew.
+            if (capture_path) |path| {
+                const pixels = try glb.readPixels();
+                defer gpa.free(pixels);
+                var ppm: std.ArrayList(u8) = .empty;
+                var pw: std.Io.Writer.Allocating = .fromArrayList(gpa, &ppm);
+                try gl_backend.writePpmRgba(&pw.writer, pixels, glb.width, glb.height);
+                try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = pw.toArrayList().items });
+                return;
+            }
             window.glSwap();
             dirty = false;
         }
