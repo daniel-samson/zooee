@@ -13,9 +13,20 @@ Most UI frameworks lock you into one rendering target. Zooee separates *what* yo
 - **Terminal backend** — render your app as a TUI over ANSI escape sequences. Great for CLIs, servers, and SSH sessions.
 - **DirectX backend** — GPU-accelerated rendering on Windows.
 - **OpenGL backend** — GPU-accelerated rendering on Linux and macOS.
-- **Web backend** — compile to WebAssembly and render to a `<canvas>` in the browser.
+- **Web backend** — compile to WebAssembly and render as real DOM elements + CSS in the browser (targeting Baseline 2025), for native text, accessibility, and selection for free.
 
-The same widget tree, layout, and event handling drive all of them. Build a dashboard once; ship it as a terminal tool, a native desktop app, and a web app — from one codebase, in binaries under 2MB.
+The same widget tree, layout, and event handling drive all of them. Build a dashboard once; ship it as a terminal tool, a native desktop app, and a web app — from one codebase.
+
+### Tiny binaries
+
+No bundled runtime. A zooee app is native code that dynamically links the OS's *own* UI libraries (AppKit / X11 / Direct3D) — so the whole thing ships in **kilobytes, not the hundreds of megabytes** a bundled-browser app drags around. Measured `ReleaseSmall` builds:
+
+| Binary | Size |
+|---|---:|
+| Terminal app | **~180 KB** |
+| Native GPU window app | **~240 KB** |
+
+That's the entire framework + app. CI gates the shipping size at a 2 MB tripwire ([`ci/check-size.sh`](ci/check-size.sh)) — currently ~10× under it. (Debug builds are ~2 MB; that's just DWARF debug info, stripped in release.)
 
 ### Rendering: GPU-accelerated, with a software fallback
 
