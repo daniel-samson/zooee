@@ -869,6 +869,113 @@ pub const D3dGradientRenderer = struct {
     }
 };
 
+// === Box shadow (#119) ======================================================
+// Mirrors the Metal/GL shadow renderers: a quad over the expanded bounds whose
+// PS computes style.BoxShadow.coverage (same erf polynomial) from SV_Position
+// (top-down pixel center, like raster — no y-flip). src-over blend.
+
+const shadow_hlsl =
+    \\cbuffer CB : register(b0) { float2 viewport; float2 pad; float4 rect; float4 sh; float4 color; };
+    \\struct VSIn  { float2 pos : POSITION; };
+    \\struct VSOut { float4 pos : SV_POSITION; };
+    \\VSOut VSMain(VSIn i) {
+    \\  VSOut o;
+    \\  o.pos = float4(i.pos.x / viewport.x * 2.0 - 1.0, 1.0 - i.pos.y / viewport.y * 2.0, 0, 1);
+    \\  return o;
+    \\}
+    \\float erf_(float x){ float t=1.0/(1.0+0.3275911*abs(x)); float y=1.0-(((((1.061405429*t-1.453152027)*t)+1.421413741)*t-0.284496736)*t+0.254829592)*t*exp(-x*x); return x<0.0?-y:y; }
+    \\float band_(float p,float lo,float hi,float s){ float inv=1.0/(s*1.4142135623730951); return 0.5*(erf_((hi-p)*inv)-erf_((lo-p)*inv)); }
+    \\float4 PSMain(VSOut i) : SV_TARGET {
+    \\  float2 p = i.pos.xy;
+    \\  float dx=sh.x, dy=sh.y, blur=sh.z, spread=sh.w;
+    \\  float x0=rect.x+dx-spread, y0=rect.y+dy-spread;
+    \\  float x1=rect.x+rect.z+dx+spread, y1=rect.y+rect.w+dy+spread;
+    \\  float cov;
+    \\  if (blur<=0.0) cov = (p.x>=x0 && p.x<x1 && p.y>=y0 && p.y<y1) ? 1.0 : 0.0;
+    \\  else { float s=blur*0.5; cov = clamp(band_(p.x,x0,x1,s)*band_(p.y,y0,y1,s), 0.0, 1.0); }
+    \\  return float4(color.rgb, cov*color.a);
+    \\}
+;
+const ShadowCB = extern struct { vw: f32, vh: f32, pad0: f32 = 0, pad1: f32 = 0, rect: [4]f32, sh: [4]f32, color: [4]f32 };
+
+pub const D3dShadowRenderer = struct {
+    device: *IDevice,
+    context: *IContext,
+    vs: *IVertexShader,
+    ps: *IPixelShader,
+    layout: *IInputLayout,
+    raster: *IRasterizerState,
+    blend: *IBlendState,
+
+    pub fn init(device: *IDevice, context: *IContext, scissor: bool) Error!D3dShadowRenderer {
+        const d3d_compile = loadD3DCompile() orelse return error.ShaderFailed;
+        const vs_blob = compileSrc(d3d_compile, shadow_hlsl, "VSMain", "vs_4_0") orelse return error.ShaderFailed;
+        defer release(vs_blob);
+        const ps_blob = compileSrc(d3d_compile, shadow_hlsl, "PSMain", "ps_4_0") orelse return error.ShaderFailed;
+        defer release(ps_blob);
+        const vs_ptr = vs_blob.vtbl.GetBufferPointer(vs_blob).?;
+        const vs_len = vs_blob.vtbl.GetBufferSize(vs_blob);
+        var vs: ?*IVertexShader = null;
+        if (!ok(device.vtbl.CreateVertexShader(device, vs_ptr, vs_len, null, &vs)) or vs == null) return error.ShaderFailed;
+        var ps: ?*IPixelShader = null;
+        if (!ok(device.vtbl.CreatePixelShader(device, ps_blob.vtbl.GetBufferPointer(ps_blob).?, ps_blob.vtbl.GetBufferSize(ps_blob), null, &ps)) or ps == null) return error.ShaderFailed;
+        var elems = [_]D3D11_INPUT_ELEMENT_DESC{
+            .{ .semantic_name = "POSITION", .format = DXGI_FORMAT_R32G32_FLOAT, .aligned_byte_offset = 0 },
+        };
+        var layout: ?*IInputLayout = null;
+        if (!ok(device.vtbl.CreateInputLayout(device, &elems, 1, vs_ptr, vs_len, &layout)) or layout == null) return error.ShaderFailed;
+        var rdesc: D3D11_RASTERIZER_DESC = .{ .scissor_enable = @intFromBool(scissor) };
+        var raster: ?*IRasterizerState = null;
+        if (!ok(device.vtbl.CreateRasterizerState(device, &rdesc, &raster)) or raster == null) return error.ShaderFailed;
+        const blend = try srcOverBlend(device);
+        return .{ .device = device, .context = context, .vs = vs.?, .ps = ps.?, .layout = layout.?, .raster = raster.?, .blend = blend };
+    }
+
+    pub fn deinit(self: *D3dShadowRenderer) void {
+        release(self.blend);
+        release(self.raster);
+        release(self.layout);
+        release(self.ps);
+        release(self.vs);
+    }
+
+    pub fn draw(self: *D3dShadowRenderer, rtv: *IRtv, vw: f32, vh: f32, quad: [4]f32, rect: [4]f32, sh: [4]f32, color: [4]f32) Error!void {
+        const dev = self.device;
+        const ctx = self.context;
+        const verts = [_]f32{ quad[0], quad[1], quad[0] + quad[2], quad[1], quad[0], quad[1] + quad[3], quad[0] + quad[2], quad[1] + quad[3] };
+        var vb_data: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = &verts };
+        var vb_desc: D3D11_BUFFER_DESC = .{ .byte_width = @sizeOf(@TypeOf(verts)), .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_VERTEX_BUFFER };
+        var vb: ?*IBuffer = null;
+        if (!ok(dev.vtbl.CreateBuffer(dev, &vb_desc, &vb_data, &vb)) or vb == null) return error.ShaderFailed;
+        defer release(vb.?);
+        var cbv: ShadowCB = .{ .vw = vw, .vh = vh, .rect = rect, .sh = sh, .color = color };
+        var cb_data: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = &cbv };
+        var cb_desc: D3D11_BUFFER_DESC = .{ .byte_width = @sizeOf(ShadowCB), .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_CONSTANT_BUFFER };
+        var cb: ?*IBuffer = null;
+        if (!ok(dev.vtbl.CreateBuffer(dev, &cb_desc, &cb_data, &cb)) or cb == null) return error.ShaderFailed;
+        defer release(cb.?);
+
+        var vp: D3D11_VIEWPORT = .{ .width = vw, .height = vh };
+        ctx.vtbl.RSSetViewports(ctx, 1, &vp);
+        ctx.vtbl.RSSetState(ctx, self.raster);
+        ctx.vtbl.OMSetBlendState(ctx, self.blend, null, 0xffffffff);
+        var rtv_slot: ?*IRtv = rtv;
+        ctx.vtbl.OMSetRenderTargets(ctx, 1, &rtv_slot, null);
+        ctx.vtbl.IASetInputLayout(ctx, self.layout);
+        var vb_slot: ?*IBuffer = vb.?;
+        const stride: UINT = 8;
+        const offset: UINT = 0;
+        ctx.vtbl.IASetVertexBuffers(ctx, 0, 1, &vb_slot, &stride, &offset);
+        ctx.vtbl.IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        ctx.vtbl.VSSetShader(ctx, self.vs, null, 0);
+        var cb_slot: ?*IBuffer = cb.?;
+        ctx.vtbl.VSSetConstantBuffers(ctx, 0, 1, &cb_slot);
+        ctx.vtbl.PSSetConstantBuffers(ctx, 0, 1, &cb_slot); // rect/sh/color read by the PS — bind to PS too
+        ctx.vtbl.PSSetShader(ctx, self.ps, null, 0);
+        ctx.vtbl.Draw(ctx, 4, 0);
+    }
+};
+
 // === Slice 4: SDF rounded rects + border ====================================
 // Ports gl.zig's RoundedRectRenderer: a signed-distance pixel shader gives
 // anti-aliased rounded corners + a uniform border in one draw, matching
@@ -1832,6 +1939,7 @@ pub const D3dBackend = struct {
     exact: D3dExactRectRenderer,
     image: D3dImageRenderer,
     grad: D3dGradientRenderer,
+    shadow: D3dShadowRenderer,
     comp: D3dLayerCompositor,
     rclip: D3dRoundClipCompositor,
     font: ?ttf.Font = null,
@@ -1868,6 +1976,7 @@ pub const D3dBackend = struct {
             .exact = try D3dExactRectRenderer.init(off.device, off.context, true),
             .image = try D3dImageRenderer.init(off.device, off.context),
             .grad = try D3dGradientRenderer.init(off.device, off.context, true),
+            .shadow = try D3dShadowRenderer.init(off.device, off.context, true),
             .comp = try D3dLayerCompositor.init(off.device, off.context),
             .rclip = try D3dRoundClipCompositor.init(off.device, off.context),
         };
@@ -1932,6 +2041,7 @@ pub const D3dBackend = struct {
         self.clip_ops.deinit(self.gpa);
         self.comp.deinit();
         self.rclip.deinit();
+        self.shadow.deinit();
         self.image.deinit();
         self.grad.deinit();
         self.exact.deinit();
@@ -1998,6 +2108,16 @@ pub const D3dBackend = struct {
         const self = self_(ptr);
         const w: f32 = @floatFromInt(self.off.width);
         const h: f32 = @floatFromInt(self.off.height);
+        if (rs.shadow) |sh| {
+            const margin = sh.blur * 2 + @abs(sh.spread) + 2;
+            const quad: [4]f32 = .{
+                rect.x + sh.dx - sh.spread - margin,
+                rect.y + sh.dy - sh.spread - margin,
+                rect.width + 2 * (sh.spread + margin),
+                rect.height + 2 * (sh.spread + margin),
+            };
+            self.shadow.draw(self.target(), w, h, quad, .{ rect.x, rect.y, rect.width, rect.height }, .{ sh.dx, sh.dy, sh.blur, sh.spread }, col(sh.color)) catch {};
+        }
         if (rs.gradient) |g| {
             self.grad.fill(self.target(), w, h, rect, if (g.axis == .vertical) 1 else 0, col(g.from), col(g.to)) catch {};
             return;
