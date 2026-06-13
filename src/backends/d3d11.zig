@@ -768,6 +768,107 @@ pub const D3dRectRenderer = struct {
     }
 };
 
+// === Linear gradient fill (#118) ============================================
+// Mirrors the Metal/GL gradient renderers: a full-rect quad whose PS
+// interpolates from→to along the axis using the fragment's pixel position.
+// SV_Position is the pixel center, top-left origin (like raster) — no y-flip.
+
+const grad_hlsl =
+    \\cbuffer CB : register(b0) { float2 viewport; float axis; float pad; float4 rect; float4 c0; float4 c1; };
+    \\struct VSIn  { float2 pos : POSITION; };
+    \\struct VSOut { float4 pos : SV_POSITION; };
+    \\VSOut VSMain(VSIn i) {
+    \\  VSOut o;
+    \\  o.pos = float4(i.pos.x / viewport.x * 2.0 - 1.0, 1.0 - i.pos.y / viewport.y * 2.0, 0, 1);
+    \\  return o;
+    \\}
+    \\float4 PSMain(VSOut i) : SV_TARGET {
+    \\  float t = (axis < 0.5) ? (i.pos.x - rect.x) / rect.z : (i.pos.y - rect.y) / rect.w;
+    \\  t = saturate(t);
+    \\  return lerp(c0, c1, t);
+    \\}
+;
+
+const GradCB = extern struct { vw: f32, vh: f32, axis: f32, pad: f32 = 0, rect: [4]f32, c0: [4]f32, c1: [4]f32 };
+
+pub const D3dGradientRenderer = struct {
+    device: *IDevice,
+    context: *IContext,
+    vs: *IVertexShader,
+    ps: *IPixelShader,
+    layout: *IInputLayout,
+    raster: *IRasterizerState,
+
+    pub fn init(device: *IDevice, context: *IContext, scissor: bool) Error!D3dGradientRenderer {
+        const d3d_compile = loadD3DCompile() orelse return error.ShaderFailed;
+        const vs_blob = compileSrc(d3d_compile, grad_hlsl, "VSMain", "vs_4_0") orelse return error.ShaderFailed;
+        defer release(vs_blob);
+        const ps_blob = compileSrc(d3d_compile, grad_hlsl, "PSMain", "ps_4_0") orelse return error.ShaderFailed;
+        defer release(ps_blob);
+        const vs_ptr = vs_blob.vtbl.GetBufferPointer(vs_blob).?;
+        const vs_len = vs_blob.vtbl.GetBufferSize(vs_blob);
+
+        var vs: ?*IVertexShader = null;
+        if (!ok(device.vtbl.CreateVertexShader(device, vs_ptr, vs_len, null, &vs)) or vs == null) return error.ShaderFailed;
+        var ps: ?*IPixelShader = null;
+        if (!ok(device.vtbl.CreatePixelShader(device, ps_blob.vtbl.GetBufferPointer(ps_blob).?, ps_blob.vtbl.GetBufferSize(ps_blob), null, &ps)) or ps == null) return error.ShaderFailed;
+        var elems = [_]D3D11_INPUT_ELEMENT_DESC{
+            .{ .semantic_name = "POSITION", .format = DXGI_FORMAT_R32G32_FLOAT, .aligned_byte_offset = 0 },
+        };
+        var layout: ?*IInputLayout = null;
+        if (!ok(device.vtbl.CreateInputLayout(device, &elems, 1, vs_ptr, vs_len, &layout)) or layout == null) return error.ShaderFailed;
+        var rdesc: D3D11_RASTERIZER_DESC = .{ .scissor_enable = @intFromBool(scissor) };
+        var raster: ?*IRasterizerState = null;
+        if (!ok(device.vtbl.CreateRasterizerState(device, &rdesc, &raster)) or raster == null) return error.ShaderFailed;
+
+        return .{ .device = device, .context = context, .vs = vs.?, .ps = ps.?, .layout = layout.?, .raster = raster.? };
+    }
+
+    pub fn deinit(self: *D3dGradientRenderer) void {
+        release(self.raster);
+        release(self.layout);
+        release(self.ps);
+        release(self.vs);
+    }
+
+    pub fn fill(self: *D3dGradientRenderer, rtv: *IRtv, vw: f32, vh: f32, rect: geometry.Rect, axis: f32, c0: [4]f32, c1: [4]f32) Error!void {
+        const dev = self.device;
+        const ctx = self.context;
+        const verts = [_]f32{ rect.x, rect.y, rect.x + rect.width, rect.y, rect.x, rect.y + rect.height, rect.x + rect.width, rect.y + rect.height };
+        var vb_data: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = &verts };
+        var vb_desc: D3D11_BUFFER_DESC = .{ .byte_width = @sizeOf(@TypeOf(verts)), .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_VERTEX_BUFFER };
+        var vb: ?*IBuffer = null;
+        if (!ok(dev.vtbl.CreateBuffer(dev, &vb_desc, &vb_data, &vb)) or vb == null) return error.ShaderFailed;
+        defer release(vb.?);
+
+        var cbv: GradCB = .{ .vw = vw, .vh = vh, .axis = axis, .rect = .{ rect.x, rect.y, rect.width, rect.height }, .c0 = c0, .c1 = c1 };
+        var cb_data: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = &cbv };
+        var cb_desc: D3D11_BUFFER_DESC = .{ .byte_width = @sizeOf(GradCB), .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_CONSTANT_BUFFER };
+        var cb: ?*IBuffer = null;
+        if (!ok(dev.vtbl.CreateBuffer(dev, &cb_desc, &cb_data, &cb)) or cb == null) return error.ShaderFailed;
+        defer release(cb.?);
+
+        var vp: D3D11_VIEWPORT = .{ .width = vw, .height = vh };
+        ctx.vtbl.RSSetViewports(ctx, 1, &vp);
+        ctx.vtbl.RSSetState(ctx, self.raster);
+        ctx.vtbl.OMSetBlendState(ctx, null, null, 0xffffffff); // opaque fill
+        var rtv_slot: ?*IRtv = rtv;
+        ctx.vtbl.OMSetRenderTargets(ctx, 1, &rtv_slot, null);
+        ctx.vtbl.IASetInputLayout(ctx, self.layout);
+        var vb_slot: ?*IBuffer = vb.?;
+        const stride: UINT = 8;
+        const offset: UINT = 0;
+        ctx.vtbl.IASetVertexBuffers(ctx, 0, 1, &vb_slot, &stride, &offset);
+        ctx.vtbl.IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        ctx.vtbl.VSSetShader(ctx, self.vs, null, 0);
+        var cb_slot: ?*IBuffer = cb.?;
+        ctx.vtbl.VSSetConstantBuffers(ctx, 0, 1, &cb_slot);
+        ctx.vtbl.PSSetConstantBuffers(ctx, 0, 1, &cb_slot);
+        ctx.vtbl.PSSetShader(ctx, self.ps, null, 0);
+        ctx.vtbl.Draw(ctx, 4, 0);
+    }
+};
+
 // === Slice 4: SDF rounded rects + border ====================================
 // Ports gl.zig's RoundedRectRenderer: a signed-distance pixel shader gives
 // anti-aliased rounded corners + a uniform border in one draw, matching
@@ -1457,6 +1558,7 @@ pub const D3dBackend = struct {
     rect: D3dRectRenderer,
     exact: D3dExactRectRenderer,
     image: D3dImageRenderer,
+    grad: D3dGradientRenderer,
     font: ?ttf.Font = null,
     glyphs: std.AutoHashMapUnmanaged(u32, D3dGlyphRenderer) = .empty,
     clips: std.ArrayList(ScissorRect) = .empty,
@@ -1484,6 +1586,7 @@ pub const D3dBackend = struct {
             .rect = try D3dRectRenderer.init(off.device, off.context, true),
             .exact = try D3dExactRectRenderer.init(off.device, off.context, true),
             .image = try D3dImageRenderer.init(off.device, off.context),
+            .grad = try D3dGradientRenderer.init(off.device, off.context, true),
         };
     }
 
@@ -1503,6 +1606,7 @@ pub const D3dBackend = struct {
         self.glyphs.deinit(self.gpa);
         self.clips.deinit(self.gpa);
         self.image.deinit();
+        self.grad.deinit();
         self.exact.deinit();
         self.rect.deinit();
         self.off.destroy();
@@ -1562,6 +1666,10 @@ pub const D3dBackend = struct {
         const self = self_(ptr);
         const w: f32 = @floatFromInt(self.off.width);
         const h: f32 = @floatFromInt(self.off.height);
+        if (rs.gradient) |g| {
+            self.grad.fill(self.off.rtv, w, h, rect, if (g.axis == .vertical) 1 else 0, col(g.from), col(g.to)) catch {};
+            return;
+        }
         if (rs.corner_radius.isNone() and rs.border.isNone()) {
             if (rs.background) |bg| {
                 self.rect.fillRect(self.off.rtv, w, h, rect.x, rect.y, rect.width, rect.height, col(bg)) catch {};
