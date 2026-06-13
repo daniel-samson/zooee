@@ -56,6 +56,10 @@ pub fn build(b: *std.Build) void {
         mod.linkSystemLibrary("X11", .{});
         mod.linkSystemLibrary("GL", .{}); // GLX/OpenGL — the platform GPU API
     }
+    if (target.result.os.tag == .windows) {
+        mod.linkSystemLibrary("d3d11", .{}); // the Windows GPU backend (#12)
+        mod.linkSystemLibrary("dxgi", .{});
+    }
     // Test font for the font pipeline (#10): OFL Poppins, tests/goldens only.
     mod.addAnonymousImport("poppins", .{
         .root_source_file = b.path("testdata/fonts/Poppins-Regular.ttf"),
@@ -254,6 +258,22 @@ pub fn build(b: *std.Build) void {
             }),
         });
         b.installArtifact(gl_demo);
+    }
+
+    // D3D11 bring-up demo (#12 slice 1), Windows only — self-checking
+    // device/swapchain clear + readback. Console subsystem so PASS/FAIL
+    // prints; uses an invisible window, so it runs headless.
+    if (target.result.os.tag == .windows) {
+        const d3d11_demo = b.addExecutable(.{
+            .name = "zooee-d3d11-demo",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("examples/d3d11_demo.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "zooee", .module = mod }},
+            }),
+        });
+        b.installArtifact(d3d11_demo);
     }
 
     // Native window demo, Windows targets only — the e2e visual subject.
