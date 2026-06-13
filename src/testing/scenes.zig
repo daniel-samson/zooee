@@ -12,6 +12,7 @@ const std = @import("std");
 const backend = @import("../backend.zig");
 const style = @import("../style.zig");
 const layout = @import("../layout.zig");
+const geometry = @import("../geometry.zig");
 
 const Backend = backend.Backend;
 const Color = style.Color;
@@ -148,6 +149,28 @@ pub fn drawRoundedClip(b: Backend, s: f32) !void {
         .background = Color.rgb(40, 120, 220),
     });
     b.popClip();
+}
+
+/// Build a 5-point star centered at (cx,cy), outer radius R, inner r — a
+/// concave self-overlap-free polygon that exercises the even-odd fill (#120).
+pub fn star(cx: f32, cy: f32, R: f32, r: f32) [10]geometry.Point {
+    var pts: [10]geometry.Point = undefined;
+    var i: usize = 0;
+    while (i < 5) : (i += 1) {
+        const fi: f32 = @floatFromInt(i);
+        const ao = -std.math.pi / 2.0 + fi * (2.0 * std.math.pi / 5.0);
+        const ai = ao + std.math.pi / 5.0;
+        pts[i * 2] = .{ .x = cx + R * @cos(ao), .y = cy + R * @sin(ao) };
+        pts[i * 2 + 1] = .{ .x = cx + r * @cos(ai), .y = cy + r * @sin(ai) };
+    }
+    return pts;
+}
+
+/// Filled arbitrary path (#120): a concave 5-point star, even-odd fill. Not in
+/// `all` (cross-harness goldens); the GPU checks compare vs the raster reference.
+pub fn drawPath(b: Backend, s: f32) !void {
+    const pts = star(5 * s, 5 * s, 4 * s, 1.7 * s);
+    b.fillPath(&pts, Color.rgb(230, 170, 30));
 }
 
 /// Box shadow (#119): a filled rect with an offset, blurred shadow behind it.

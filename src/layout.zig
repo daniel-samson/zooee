@@ -74,6 +74,11 @@ pub const Element = struct {
     text: ?[]const u8 = null,
     text_style: style.TextStyle = .{},
 
+    // Filled path (#120): a closed polygon in the element's LOCAL coords
+    // (relative to its border-box origin), filled with `path_color` (even-odd).
+    path: ?[]const geometry.Point = null,
+    path_color: style.Color = .black,
+
     // Effects (#117/#121): wrap this element's subtree when set.
     /// Group opacity 0..1: the subtree renders into an isolated layer
     /// composited back at this alpha (#121).
@@ -141,6 +146,13 @@ fn renderNode(b: Backend, placements: []const Placement, i: *usize) void {
     const rs = el.rect_style;
     if (rs.background != null or rs.gradient != null or rs.shadow != null or !rs.border.isNone()) {
         b.drawRect(p.rect, rs);
+    }
+    if (el.path) |pts| {
+        // Offset local path points by the element's border-box origin.
+        var buf: [64]geometry.Point = undefined;
+        const n = @min(pts.len, buf.len);
+        for (0..n) |k| buf[k] = .{ .x = p.rect.x + pts[k].x, .y = p.rect.y + pts[k].y };
+        b.fillPath(buf[0..n], el.path_color);
     }
     if (el.text) |t| {
         const inner = contentBox(el, p.rect);
