@@ -1356,7 +1356,7 @@ const comp_hlsl =
     \\}
     \\Texture2D tex : register(t0);
     \\SamplerState smp : register(s0);
-    \\float4 PSMain(VSOut i) : SV_TARGET { float4 c = tex.Sample(smp, i.uv); return float4(c.rgb, opacity); }
+    \\float4 PSMain(VSOut i) : SV_TARGET { float4 c = tex.Sample(smp, i.uv); return float4(c.rgb, c.a * opacity); }
 ;
 const CompCB = extern struct { vw: f32, vh: f32, opacity: f32, pad: f32 = 0 };
 
@@ -1934,7 +1934,10 @@ pub const D3dBackend = struct {
         self.cur_rtv = l.parent_rtv;
         const w: f32 = @floatFromInt(self.off.width);
         const h: f32 = @floatFromInt(self.off.height);
-        self.comp.composite(l.parent_rtv, w, h, l.srv, l.opacity) catch {};
+        self.comp.composite(l.parent_rtv, w, h, l.srv, l.opacity) catch {
+            // DIAG: paint magenta on the error path so a swallowed failure is visible.
+            self.rect.fillRect(l.parent_rtv, w, h, 0, 0, w, h, .{ 1, 0, 1, 1 }) catch {};
+        };
         release(l.srv);
         release(l.rtv);
         release(l.tex);
