@@ -1455,6 +1455,7 @@ pub const D3dLayerCompositor = struct {
         ctx.vtbl.VSSetShader(ctx, self.vs, null, 0);
         var cb_slot: ?*IBuffer = cb.?;
         ctx.vtbl.VSSetConstantBuffers(ctx, 0, 1, &cb_slot);
+        ctx.vtbl.PSSetConstantBuffers(ctx, 0, 1, &cb_slot); // opacity (PS) — was missing
         ctx.vtbl.PSSetShader(ctx, self.ps, null, 0);
         var srv_slot: ?*ISrv = srv;
         ctx.vtbl.PSSetShaderResources(ctx, 0, 1, &srv_slot);
@@ -1934,10 +1935,7 @@ pub const D3dBackend = struct {
         self.cur_rtv = l.parent_rtv;
         const w: f32 = @floatFromInt(self.off.width);
         const h: f32 = @floatFromInt(self.off.height);
-        self.comp.composite(l.parent_rtv, w, h, l.srv, l.opacity) catch {
-            // DIAG: paint magenta on the error path so a swallowed failure is visible.
-            self.rect.fillRect(l.parent_rtv, w, h, 0, 0, w, h, .{ 1, 0, 1, 1 }) catch {};
-        };
+        self.comp.composite(l.parent_rtv, w, h, l.srv, l.opacity) catch {};
         release(l.srv);
         release(l.rtv);
         release(l.tex);
