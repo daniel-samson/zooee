@@ -72,9 +72,43 @@ pub const CornerRadius = struct {
     }
 };
 
+/// A two-stop linear gradient fill (#118). Slice 1: axis-aligned (horizontal
+/// or vertical), straight-RGB interpolation. Multi-stop, diagonal, radial, and
+/// sRGB-correct interpolation are follow-ups. When set on a RectStyle it fills
+/// the rect interior in place of `background`.
+pub const Gradient = struct {
+    pub const Axis = enum { horizontal, vertical };
+    axis: Axis = .horizontal,
+    from: Color,
+    to: Color,
+
+    /// The interpolated color at pixel (px,py) within a rect (pixel centers).
+    pub fn colorAt(self: Gradient, rect_x: f32, rect_y: f32, rect_w: f32, rect_h: f32, px: f32, py: f32) Color {
+        const t = switch (self.axis) {
+            .horizontal => if (rect_w > 0) (px - rect_x) / rect_w else 0,
+            .vertical => if (rect_h > 0) (py - rect_y) / rect_h else 0,
+        };
+        const tc = @max(0, @min(1, t));
+        return .{
+            .r = lerp8(self.from.r, self.to.r, tc),
+            .g = lerp8(self.from.g, self.to.g, tc),
+            .b = lerp8(self.from.b, self.to.b, tc),
+            .a = lerp8(self.from.a, self.to.a, tc),
+        };
+    }
+
+    fn lerp8(a: u8, b: u8, t: f32) u8 {
+        const fa: f32 = @floatFromInt(a);
+        const fb: f32 = @floatFromInt(b);
+        return @intFromFloat(@round(fa + (fb - fa) * t));
+    }
+};
+
 pub const RectStyle = struct {
     /// null = no fill.
     background: ?Color = null,
+    /// Gradient fill for the rect interior; overrides `background` when set.
+    gradient: ?Gradient = null,
     border: Border = .none,
     corner_radius: CornerRadius = .none,
 };

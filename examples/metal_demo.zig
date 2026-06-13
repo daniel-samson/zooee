@@ -166,6 +166,10 @@ pub fn main(init: std.process.Init) !void {
         // goldens); proves Metal renders arbitrary Unicode == raster.
         const unicode_scene: zooee.fixtures.Scene = .{ .name = "unicode_text", .width = 20, .height = 4, .draw = zooee.fixtures.drawUnicode };
         if (!(try compareScene(gpa, out, &mb, unicode_scene, true))) backend_ok = false;
+        // Gradients (#118): linear fills vs raster (smooth interpolation, allow
+        // ±1 rounding via the text tolerance).
+        const gradient_scene: zooee.fixtures.Scene = .{ .name = "gradient", .width = 10, .height = 11, .draw = zooee.fixtures.drawGradient };
+        if (!(try compareScene(gpa, out, &mb, gradient_scene, true))) backend_ok = false;
     }
 
     try out.flush();
