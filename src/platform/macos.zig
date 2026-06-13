@@ -25,6 +25,9 @@ const Class = ?*anyopaque;
 extern "objc" fn objc_getClass([*:0]const u8) Class;
 extern "objc" fn sel_registerName([*:0]const u8) SEL;
 extern "objc" fn objc_msgSend() void;
+extern "objc" fn objc_allocateClassPair(Class, [*:0]const u8, usize) Class;
+extern "objc" fn objc_registerClassPair(Class) void;
+extern "objc" fn class_addMethod(Class, SEL, *const anyopaque, [*:0]const u8) bool;
 
 const NSRect = extern struct { x: f64, y: f64, w: f64, h: f64 };
 
@@ -106,6 +109,33 @@ fn keyCodeToKey(kc: u16) ?core_event.Key {
     };
 }
 
+// --- live-resize delegate ---------------------------------------------------
+// AppKit runs a modal tracking loop while the user drags the resize edge, so
+// our pumpEvents-driven loop is parked and the GL surface stretches the stale
+// frame. A tiny NSWindowDelegate whose windowDidResize: fires *inside* that
+// loop gives us the hook to redraw live. Single-window (the demo) for now.
+
+var live_resize_window: ?*Window = null;
+var delegate_instance: id = null;
+
+fn resizeDelegate() id {
+    if (delegate_instance) |d| return d;
+    const class = objc_allocateClassPair(cls("NSObject"), "ZooeeWindowDelegate", 0);
+    _ = class_addMethod(class, sel("windowDidResize:"), @ptrCast(&onWindowDidResize), "v@:@");
+    // windowDidEndLiveResize: guarantees one final redraw at the settled size
+    // even if the last windowDidResize: raced the drag's end.
+    _ = class_addMethod(class, sel("windowDidEndLiveResize:"), @ptrCast(&onWindowDidResize), "v@:@");
+    objc_registerClassPair(class);
+    const inst = msg(id, struct {}, msg(id, struct {}, class, sel("alloc"), .{}), sel("init"), .{});
+    delegate_instance = inst;
+    return inst;
+}
+
+/// IMP for `windowDidResize:` — redraw the live window during the modal drag.
+fn onWindowDidResize(_: id, _: SEL, _: id) callconv(.c) void {
+    if (live_resize_window) |w| if (w.redraw_fn) |f| f(w.redraw_ctx);
+}
+
 // --- window ----------------------------------------------------------------
 
 const NSWindowStyleMask = struct {
@@ -127,6 +157,12 @@ pub const Window = struct {
     /// null = CPU raster + CoreGraphics blit. Named gl_ctx to match the
     /// x11 window so runWindow's GL branch is platform-agnostic.
     gl_ctx: id = null,
+    /// Render-one-frame callback (set by runWindow). AppKit's modal resize
+    /// loop parks our event loop mid-drag, so without this the surface just
+    /// stretches the last frame until release. The `windowDidResize:`
+    /// delegate calls this to redraw live. See [[fix-live-resize]].
+    redraw_ctx: ?*anyopaque = null,
+    redraw_fn: ?*const fn (?*anyopaque) void = null,
 
     pub const CreateOptions = struct {
         title: [:0]const u8 = "zooee",
@@ -136,6 +172,15 @@ pub const Window = struct {
         /// Falls back to raster + CoreGraphics if context creation fails.
         gl: bool = false,
     };
+
+    /// Register the redraw callback and mark this as the window whose
+    /// `windowDidResize:` should drive it. Single-window today (the demo);
+    /// multi-window would store the Window* on the delegate via an ivar.
+    pub fn setRedraw(self: *Window, ctx: ?*anyopaque, f: *const fn (?*anyopaque) void) void {
+        self.redraw_ctx = ctx;
+        self.redraw_fn = f;
+        live_resize_window = self;
+    }
 
     pub fn create(gpa: std.mem.Allocator, opts: CreateOptions) !*Window {
         const app = msg(id, struct {}, cls("NSApplication"), sel("sharedApplication"), .{});
@@ -156,8 +201,17 @@ pub const Window = struct {
         _ = msg(void, struct { id }, window, sel("setTitle:"), .{nsString(opts.title)});
         _ = msg(void, struct { bool }, window, sel("setReleasedWhenClosed:"), .{false});
         _ = msg(void, struct { bool }, window, sel("setAcceptsMouseMovedEvents:"), .{true});
+        // Don't let AppKit cache-and-stretch the old frame during a live
+        // resize drag — rely on our windowDidResize: redraw instead, so the
+        // content snaps to each size rather than morphing toward it.
+        _ = msg(void, struct { bool }, window, sel("setPreservesContentDuringLiveResize:"), .{false});
         _ = msg(void, struct { id }, window, sel("makeKeyAndOrderFront:"), .{null});
         _ = msg(void, struct { bool }, app, sel("activateIgnoringOtherApps:"), .{true});
+
+        // A minimal NSWindowDelegate so `windowDidResize:` fires during
+        // AppKit's modal resize tracking loop — the one chance to redraw
+        // while the user is dragging (else the GL surface stretches).
+        _ = msg(void, struct { id }, window, sel("setDelegate:"), .{resizeDelegate()});
 
         // Optional GPU context on the contentView (#11). Legacy 2.1 profile
         // (no NSOpenGLPFAOpenGLProfile attr) → GLSL 120, matching the shaders.
@@ -298,6 +352,13 @@ fn createGlContext(window: id) id {
     _ = msg(void, struct { bool }, view, sel("setWantsBestResolutionOpenGLSurface:"), .{true});
     _ = msg(void, struct { id }, ctx, sel("setView:"), .{view});
     _ = msg(void, struct {}, ctx, sel("makeCurrentContext"), .{});
+    // Swap interval 0: don't block flushBuffer on vsync. During a live resize
+    // AppKit drives windowDidResize: faster than vblank; waiting on the swap
+    // adds a frame of latency, so the surface lags the window edge. The idle
+    // loop already throttles itself with a 16ms sleep, so unsynced presents
+    // cost nothing there. NSOpenGLContextParameterSwapInterval = 222.
+    const swap_interval: i32 = 0;
+    _ = msg(void, struct { *const i32, u64 }, ctx, sel("setValues:forParameter:"), .{ &swap_interval, 222 });
     return ctx;
 }
 
