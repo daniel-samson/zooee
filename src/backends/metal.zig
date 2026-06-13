@@ -869,6 +869,53 @@ pub const MetalImageRenderer = struct {
     }
 };
 
+// Packed all-float4 uniform. vp_axis = {vw, vh, axis (0=horizontal, 1=vertical), 0}.
+const GradUniform = extern struct { rect: [4]f32, vp_axis: [4]f32, from: [4]f32, to: [4]f32 };
+
+/// Fills a rect with a two-stop axis-aligned linear gradient (#118),
+/// interpolated per-fragment from the pixel position — matching raster's
+/// `Gradient.colorAt` (straight RGB, pixel centers).
+pub const MetalGradientRenderer = struct {
+    device: id,
+    queue: id,
+    pipeline: id,
+    enc: id = null,
+    vw: f32 = 0,
+    vh: f32 = 0,
+
+    const shader =
+        \\#include <metal_stdlib>
+        \\using namespace metal;
+        \\struct GradU { float4 rect; float4 vp_axis; float4 from; float4 to; };
+        \\vertex float4 v_main(uint vid [[vertex_id]], constant GradU& u [[buffer(0)]]) {
+        \\    float2 corner[4] = { float2(0,0), float2(1,0), float2(0,1), float2(1,1) };
+        \\    float2 px = u.rect.xy + corner[vid] * u.rect.zw;
+        \\    return float4(px.x / u.vp_axis.x * 2.0 - 1.0, 1.0 - px.y / u.vp_axis.y * 2.0, 0, 1);
+        \\}
+        \\fragment float4 f_main(float4 fragpos [[position]], constant GradU& u [[buffer(0)]]) {
+        \\    float t = (u.vp_axis.z < 0.5) ? (fragpos.x - u.rect.x) / u.rect.z : (fragpos.y - u.rect.y) / u.rect.w;
+        \\    t = clamp(t, 0.0, 1.0);
+        \\    return mix(u.from, u.to, t);
+        \\}
+    ;
+
+    pub fn init(device: id, queue: id) Error!MetalGradientRenderer {
+        const pipeline = try compilePipeline(device, shader, MTLPixelFormatRGBA8Unorm, false);
+        return .{ .device = device, .queue = queue, .pipeline = pipeline };
+    }
+
+    pub fn deinit(self: *MetalGradientRenderer) void {
+        release(self.pipeline);
+    }
+
+    pub fn fill(self: *MetalGradientRenderer, x: f32, y: f32, w: f32, h: f32, axis: f32, from: [4]f32, to: [4]f32) void {
+        var u: GradUniform = .{ .rect = .{ x, y, w, h }, .vp_axis = .{ self.vw, self.vh, axis, 0 }, .from = from, .to = to };
+        _ = msg(void, struct { *const GradUniform, u64, u64 }, self.enc, sel("setVertexBytes:length:atIndex:"), .{ &u, @as(u64, @sizeOf(GradUniform)), 0 });
+        _ = msg(void, struct { *const GradUniform, u64, u64 }, self.enc, sel("setFragmentBytes:length:atIndex:"), .{ &u, @as(u64, @sizeOf(GradUniform)), 0 });
+        _ = msg(void, struct { u64, u64, u64 }, self.enc, sel("drawPrimitives:vertexStart:vertexCount:"), .{ MTLPrimitiveTypeTriangleStrip, 0, 4 });
+    }
+};
+
 const ScissorRect = struct { x0: i32, y0: i32, x1: i32, y1: i32 };
 const MTLScissorRect = extern struct { x: u64, y: u64, width: u64, height: u64 };
 
@@ -885,6 +932,7 @@ pub const MetalBackend = struct {
     rect: MetalRectRenderer,
     exact: MetalExactRectRenderer,
     image: MetalImageRenderer,
+    grad: MetalGradientRenderer,
     glyphs: std.AutoHashMapUnmanaged(u16, MetalGlyphRenderer) = .empty,
     clips: std.ArrayList(ScissorRect) = .empty,
     font: ?ttf.Font = null,
@@ -931,6 +979,7 @@ pub const MetalBackend = struct {
             .rect = try MetalRectRenderer.init(ctx.device, ctx.queue),
             .exact = try MetalExactRectRenderer.init(ctx.device, ctx.queue),
             .image = try MetalImageRenderer.init(ctx.device, ctx.queue),
+            .grad = try MetalGradientRenderer.init(ctx.device, ctx.queue),
         };
     }
 
@@ -942,6 +991,7 @@ pub const MetalBackend = struct {
         self.image.deinit();
         self.exact.deinit();
         self.rect.deinit();
+        self.grad.deinit();
         if (self.present_sampler != null) release(self.present_sampler);
         if (self.present_pipeline != null) release(self.present_pipeline);
         if (self.target != null) release(self.target);
@@ -1023,6 +1073,9 @@ pub const MetalBackend = struct {
         self.image.enc = enc;
         self.image.vw = w;
         self.image.vh = h;
+        self.grad.enc = enc;
+        self.grad.vw = w;
+        self.grad.vh = h;
     }
 
     fn beginFrame(ptr: *anyopaque, viewport: geometry.Size) Backend.Error!void {
@@ -1065,6 +1118,11 @@ pub const MetalBackend = struct {
 
     fn drawRect(ptr: *anyopaque, rect: geometry.Rect, rs: style.RectStyle) void {
         const self = self_(ptr);
+        if (rs.gradient) |g| {
+            _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{self.grad.pipeline});
+            self.grad.fill(rect.x, rect.y, rect.width, rect.height, if (g.axis == .vertical) 1 else 0, col4(g.from), col4(g.to));
+            return;
+        }
         if (rs.corner_radius.isNone() and rs.border.isNone()) {
             if (rs.background) |bg| {
                 _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{self.rect.pipeline});

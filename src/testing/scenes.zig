@@ -112,6 +112,18 @@ pub fn drawUnicode(b: Backend, s: f32) !void {
     b.drawText(.{ .x = 1 * s, .y = 1 * s }, "café — déjà", .{ .size = 2.5 * s });
 }
 
+/// Linear gradient fill (#118): a horizontal red→blue and a vertical
+/// green→white rect. Not in `all` (cross-harness goldens); the GPU checks
+/// build local Scenes and compare vs the raster reference.
+pub fn drawGradient(b: Backend, s: f32) !void {
+    b.drawRect(.{ .x = 1 * s, .y = 1 * s, .width = 8 * s, .height = 4 * s }, .{
+        .gradient = .{ .axis = .horizontal, .from = Color.rgb(220, 40, 40), .to = Color.rgb(40, 60, 220) },
+    });
+    b.drawRect(.{ .x = 1 * s, .y = 6 * s, .width = 8 * s, .height = 4 * s }, .{
+        .gradient = .{ .axis = .vertical, .from = Color.rgb(40, 200, 80), .to = Color.white },
+    });
+}
+
 /// Built via the layout engine (#3) rather than hand-placed draws: a
 /// padded column holding a bordered text card and a row of two flex-grow
 /// fills. Exercises box model, gap, text measurement, and remainder

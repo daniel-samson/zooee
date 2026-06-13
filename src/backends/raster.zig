@@ -247,6 +247,8 @@ pub const RasterBackend = struct {
                 const in_inner = insideRounded(inner, inner_radius, px, py);
                 if (has_border and !in_inner) {
                     self.setPixel(x, y, borderColorAt(rect, rect_style, inner, px, py));
+                } else if (rect_style.gradient) |g| {
+                    self.setPixel(x, y, g.colorAt(rect.x, rect.y, rect.width, rect.height, px, py));
                 } else if (rect_style.background) |bg| {
                     self.setPixel(x, y, bg);
                 }
