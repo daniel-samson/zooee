@@ -250,8 +250,35 @@ pub const RasterBackend = struct {
         return true;
     }
 
+    /// Paint a box shadow (#119) behind the rect: analytic Gaussian coverage
+    /// (style.BoxShadow.coverage) blended as the shadow color, over the
+    /// expanded bounds that capture the blur tail.
+    fn drawShadow(self: *RasterBackend, rect: Rect, sh: style.BoxShadow) void {
+        const margin = sh.blur * 2 + @abs(sh.spread) + 2;
+        const sx0 = rect.x + sh.dx - sh.spread - margin;
+        const sy0 = rect.y + sh.dy - sh.spread - margin;
+        const sw = rect.width + 2 * (sh.spread + margin);
+        const shh = rect.height + 2 * (sh.spread + margin);
+        const bounds = IRect.fromRect(.{ .x = sx0, .y = sy0, .width = sw, .height = shh }).intersect(self.currentClip());
+        if (bounds.isEmpty()) return;
+        var y = bounds.y0;
+        while (y < bounds.y1) : (y += 1) {
+            var x = bounds.x0;
+            while (x < bounds.x1) : (x += 1) {
+                const px = @as(f32, @floatFromInt(x)) + 0.5;
+                const py = @as(f32, @floatFromInt(y)) + 0.5;
+                const cov = sh.coverage(rect.x, rect.y, rect.width, rect.height, px, py);
+                if (cov <= 0) continue;
+                const a: u8 = @intFromFloat(@round(cov * @as(f32, @floatFromInt(sh.color.a))));
+                if (a == 0) continue;
+                self.setPixel(x, y, .{ .r = sh.color.r, .g = sh.color.g, .b = sh.color.b, .a = a });
+            }
+        }
+    }
+
     fn drawRect(ptr: *anyopaque, rect: Rect, rect_style: style.RectStyle) void {
         const self = self_(ptr);
+        if (rect_style.shadow) |sh| self.drawShadow(rect, sh);
         const bounds = IRect.fromRect(rect).intersect(self.currentClip());
         if (bounds.isEmpty()) return;
 
@@ -644,6 +671,28 @@ test "rounded clip cuts the corner of clipped content" {
     try expectPixel(&raster, 8, 0, Color.rgb(255, 0, 0)); // top edge midpoint kept
     try expectPixel(&raster, 15, 15, Color.white); // opposite corner cut
     try testing.expectEqual(@as(usize, 0), raster.rounded_clips); // balanced pop
+}
+
+test "box shadow paints a blurred halo behind the rect" {
+    var raster = RasterBackend.init(testing.allocator);
+    defer raster.deinit();
+    const b = raster.interface();
+
+    try b.beginFrame(.{ .width = 40, .height = 40 });
+    // Opaque black rect with a blurred black shadow, no offset.
+    b.drawRect(.{ .x = 14, .y = 14, .width = 12, .height = 12 }, .{
+        .background = Color.black,
+        .shadow = .{ .color = Color.black, .blur = 8 },
+    });
+    try b.endFrame();
+
+    // Rect interior stays solid black.
+    try expectPixel(&raster, 20, 20, Color.black);
+    // Just outside the rect: a gray shadow halo (between white and black).
+    const halo = raster.pixelAt(28, 20);
+    try testing.expect(halo.r > 20 and halo.r < 235);
+    // Far away: untouched white.
+    try expectPixel(&raster, 2, 2, Color.white);
 }
 
 test "group opacity composites layer over backdrop" {

@@ -104,6 +104,50 @@ pub const Gradient = struct {
     }
 };
 
+/// A box shadow (#119): a Gaussian-blurred rectangle painted *behind* the
+/// element, offset by (dx,dy), grown by `spread`, in `color`. Coverage is
+/// computed analytically as a product of 1D Gaussian-box integrals (erf), so
+/// the CPU reference and every GPU shader evaluate the SAME closed form and
+/// match pixel-exact — no CPU-blur-vs-GPU-SDF divergence. Rounded-corner and
+/// inset shadows are follow-ups (slice 1 = axis-aligned outer box).
+pub const BoxShadow = struct {
+    color: Color,
+    dx: f32 = 0,
+    dy: f32 = 0,
+    /// Blur radius; the Gaussian sigma is blur/2 (≈ the CSS convention).
+    blur: f32 = 0,
+    spread: f32 = 0,
+
+    /// Abramowitz-Stegun 7.1.26 erf approximation (max abs error ~1.5e-7).
+    /// Backends MUST replicate this exact polynomial so results match.
+    fn erf(x: f32) f32 {
+        const t = 1.0 / (1.0 + 0.3275911 * @abs(x));
+        const y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * @exp(-x * x);
+        return if (x < 0) -y else y;
+    }
+
+    /// 1D coverage of the blurred interval [lo,hi] at p, sigma s.
+    fn band(p: f32, lo: f32, hi: f32, s: f32) f32 {
+        const inv = 1.0 / (s * 1.4142135623730951);
+        return 0.5 * (erf((hi - p) * inv) - erf((lo - p) * inv));
+    }
+
+    /// Shadow coverage [0,1] at pixel center (px,py) for the rect at
+    /// (rect_x,rect_y) sized rect_w×rect_h.
+    pub fn coverage(self: BoxShadow, rect_x: f32, rect_y: f32, rect_w: f32, rect_h: f32, px: f32, py: f32) f32 {
+        const x0 = rect_x + self.dx - self.spread;
+        const y0 = rect_y + self.dy - self.spread;
+        const x1 = rect_x + rect_w + self.dx + self.spread;
+        const y1 = rect_y + rect_h + self.dy + self.spread;
+        if (self.blur <= 0) {
+            return if (px >= x0 and px < x1 and py >= y0 and py < y1) 1 else 0;
+        }
+        const s = self.blur * 0.5;
+        const c = band(px, x0, x1, s) * band(py, y0, y1, s);
+        return @max(0, @min(1, c));
+    }
+};
+
 pub const RectStyle = struct {
     /// null = no fill.
     background: ?Color = null,
@@ -111,6 +155,8 @@ pub const RectStyle = struct {
     gradient: ?Gradient = null,
     border: Border = .none,
     corner_radius: CornerRadius = .none,
+    /// Box shadow painted behind the rect (#119).
+    shadow: ?BoxShadow = null,
 };
 
 pub const TextStyle = struct {

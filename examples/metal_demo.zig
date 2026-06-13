@@ -182,6 +182,10 @@ pub fn main(init: std.process.Init) !void {
         // rounded clip + opacity through the layout engine must match raster.
         const layout_effects_scene: zooee.fixtures.Scene = .{ .name = "layout_effects", .width = 14, .height = 15, .draw = zooee.fixtures.drawLayoutEffects };
         if (!(try compareScene(gpa, out, &mb, layout_effects_scene, false))) backend_ok = false;
+        // Box shadow (#119): analytic erf coverage; allow the text-level (0.05)
+        // tolerance for float-precision differences in the blur gradient.
+        const box_shadow_scene: zooee.fixtures.Scene = .{ .name = "box_shadow", .width = 12, .height = 12, .draw = zooee.fixtures.drawBoxShadow };
+        if (!(try compareScene(gpa, out, &mb, box_shadow_scene, true))) backend_ok = false;
     }
 
     try out.flush();
