@@ -594,6 +594,101 @@ pub const GradientRenderer = struct {
     }
 };
 
+// Box shadow (#119). v_px carries the top-down pixel pos (gl_FragCoord is
+// bottom-up); the PS replicates style.BoxShadow.coverage's erf/band exactly.
+const shadow_vert: [*:0]const u8 =
+    \\#version 120
+    \\attribute vec2 pos;
+    \\uniform vec2 viewport;
+    \\varying vec2 v_px;
+    \\void main() {
+    \\  v_px = pos;
+    \\  gl_Position = vec4(pos.x / viewport.x * 2.0 - 1.0, 1.0 - pos.y / viewport.y * 2.0, 0.0, 1.0);
+    \\}
+;
+const shadow_frag: [*:0]const u8 =
+    \\#version 120
+    \\uniform vec4 rect;  // x,y,w,h
+    \\uniform vec4 sh;    // dx,dy,blur,spread
+    \\uniform vec4 color;
+    \\varying vec2 v_px;
+    \\float erf_(float x){ float t=1.0/(1.0+0.3275911*abs(x)); float y=1.0-(((((1.061405429*t-1.453152027)*t)+1.421413741)*t-0.284496736)*t+0.254829592)*t*exp(-x*x); return x<0.0?-y:y; }
+    \\float band_(float p,float lo,float hi,float s){ float inv=1.0/(s*1.4142135623730951); return 0.5*(erf_((hi-p)*inv)-erf_((lo-p)*inv)); }
+    \\void main(){
+    \\  float dx=sh.x, dy=sh.y, blur=sh.z, spread=sh.w;
+    \\  float x0=rect.x+dx-spread, y0=rect.y+dy-spread;
+    \\  float x1=rect.x+rect.z+dx+spread, y1=rect.y+rect.w+dy+spread;
+    \\  float cov;
+    \\  if (blur<=0.0) cov = (v_px.x>=x0 && v_px.x<x1 && v_px.y>=y0 && v_px.y<y1) ? 1.0 : 0.0;
+    \\  else { float s=blur*0.5; cov = clamp(band_(v_px.x,x0,x1,s)*band_(v_px.y,y0,y1,s), 0.0, 1.0); }
+    \\  gl_FragColor = vec4(color.rgb, cov*color.a);
+    \\}
+;
+
+/// Paints a Gaussian box shadow (#119) — the GL port of style.BoxShadow.coverage.
+pub const ShadowRenderer = struct {
+    gl: Gl,
+    program: GLuint,
+    vao: GLuint,
+    vbo: GLuint,
+    pos_loc: GLuint,
+    u_viewport: GLint,
+    u_rect: GLint,
+    u_sh: GLint,
+    u_color: GLint,
+    vw: f32 = 0,
+    vh: f32 = 0,
+
+    pub fn init() Error!ShadowRenderer {
+        const gl = try Gl.load();
+        const vs = QuadRenderer.compile(gl, GL_VERTEX_SHADER, shadow_vert) orelse return error.NoContext;
+        const fs = QuadRenderer.compile(gl, GL_FRAGMENT_SHADER, shadow_frag) orelse return error.NoContext;
+        const prog = gl.createProgram();
+        gl.attachShader(prog, vs);
+        gl.attachShader(prog, fs);
+        gl.linkProgram(prog);
+        var ok: GLint = 0;
+        gl.getProgramiv(prog, GL_LINK_STATUS, &ok);
+        if (ok == 0) return error.NoContext;
+        var vao: GLuint = 0;
+        gl.genVertexArrays(1, @ptrCast(&vao));
+        var vbo: GLuint = 0;
+        gl.genBuffers(1, @ptrCast(&vbo));
+        return .{
+            .gl = gl,
+            .program = prog,
+            .vao = vao,
+            .vbo = vbo,
+            .pos_loc = @intCast(gl.getAttribLocation(prog, "pos")),
+            .u_viewport = gl.getUniformLocation(prog, "viewport"),
+            .u_rect = gl.getUniformLocation(prog, "rect"),
+            .u_sh = gl.getUniformLocation(prog, "sh"),
+            .u_color = gl.getUniformLocation(prog, "color"),
+        };
+    }
+
+    /// Draw the shadow over the expanded `quad` (x,y,w,h pixel space).
+    pub fn draw(self: *ShadowRenderer, quad: [4]f32, rect: [4]f32, sh: [4]f32, color: [4]f32) void {
+        const gl = self.gl;
+        gl.useProgram(self.program);
+        gl.uniform2f(self.u_viewport, self.vw, self.vh);
+        gl.uniform4f(self.u_rect, rect[0], rect[1], rect[2], rect[3]);
+        gl.uniform4f(self.u_sh, sh[0], sh[1], sh[2], sh[3]);
+        gl.uniform4f(self.u_color, color[0], color[1], color[2], color[3]);
+        const x = quad[0];
+        const y = quad[1];
+        const w = quad[2];
+        const h = quad[3];
+        const verts = [_]f32{ x, y, x + w, y, x, y + h, x + w, y + h };
+        gl.bindVertexArray(self.vao);
+        gl.bindBuffer(GL_ARRAY_BUFFER, self.vbo);
+        gl.bufferData(GL_ARRAY_BUFFER, @sizeOf(@TypeOf(verts)), &verts, GL_STATIC_DRAW);
+        gl.vertexAttribPointer(self.pos_loc, 2, GL_FLOAT, GL_FALSE, 0, @ptrFromInt(0));
+        gl.enableVertexAttribArray(self.pos_loc);
+        gl.drawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
+};
+
 const comp_vert: [*:0]const u8 =
     \\#version 120
     \\attribute vec2 pos;
@@ -1515,6 +1610,7 @@ pub const GlBackend = struct {
     exact: ExactRectRenderer,
     image: ImageRenderer,
     grad: GradientRenderer,
+    shadow: ShadowRenderer,
     comp: LayerCompositor,
     rclip: RoundClipCompositor,
     /// Active group-opacity layers (#121): each holds its offscreen FBO +
@@ -1548,6 +1644,7 @@ pub const GlBackend = struct {
             .exact = try ExactRectRenderer.init(),
             .image = try ImageRenderer.init(),
             .grad = try GradientRenderer.init(),
+            .shadow = try ShadowRenderer.init(),
             .comp = try LayerCompositor.init(),
             .rclip = try RoundClipCompositor.init(),
         };
@@ -1564,6 +1661,7 @@ pub const GlBackend = struct {
             .exact = try ExactRectRenderer.init(),
             .image = try ImageRenderer.init(),
             .grad = try GradientRenderer.init(),
+            .shadow = try ShadowRenderer.init(),
             .comp = try LayerCompositor.init(),
             .rclip = try RoundClipCompositor.init(),
             .default_fb = true,
@@ -1689,6 +1787,19 @@ pub const GlBackend = struct {
         const self = self_(ptr);
         const w: f32 = @floatFromInt(self.width);
         const h: f32 = @floatFromInt(self.height);
+        if (rs.shadow) |sh| {
+            enableBlend();
+            self.shadow.vw = w;
+            self.shadow.vh = h;
+            const margin = sh.blur * 2 + @abs(sh.spread) + 2;
+            const quad: [4]f32 = .{
+                rect.x + sh.dx - sh.spread - margin,
+                rect.y + sh.dy - sh.spread - margin,
+                rect.width + 2 * (sh.spread + margin),
+                rect.height + 2 * (sh.spread + margin),
+            };
+            self.shadow.draw(quad, .{ rect.x, rect.y, rect.width, rect.height }, .{ sh.dx, sh.dy, sh.blur, sh.spread }, col(sh.color));
+        }
         if (rs.gradient) |g| {
             enableBlend();
             self.grad.vw = w;
