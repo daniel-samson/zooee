@@ -1468,6 +1468,139 @@ pub const D3dLayerCompositor = struct {
     }
 };
 
+// === Rounded-rect clipping (#117) ===========================================
+// Mirrors the Metal/GL round-clip compositors: composite a clip layer back
+// over its parent, but the PS discards pixels outside insideRounded(rect,
+// radius) at the pixel center (SV_Position, top-down like raster) — hard
+// edges. The insideRounded/cornerOut helpers mirror exact_hlsl + raster.
+
+const rclip_hlsl =
+    \\cbuffer CB : register(b0) { float2 viewport; float2 pad0; float4 rect; float4 rad; };
+    \\struct VSIn  { float2 pos : POSITION; float2 uv : TEXCOORD; };
+    \\struct VSOut { float4 pos : SV_POSITION; float2 uv : TEXCOORD; };
+    \\VSOut VSMain(VSIn i) {
+    \\  VSOut o;
+    \\  o.pos = float4(i.pos.x / viewport.x * 2.0 - 1.0, 1.0 - i.pos.y / viewport.y * 2.0, 0, 1);
+    \\  o.uv = i.uv;
+    \\  return o;
+    \\}
+    \\bool cornerOut(float2 p, float trad, float cx, float cy, float2 r0, float2 rsz) {
+    \\  if (trad <= 0.0) return false;
+    \\  bool in_x = (cx <= r0.x + rsz.x*0.5) ? (p.x < cx) : (p.x > cx);
+    \\  bool in_y = (cy <= r0.y + rsz.y*0.5) ? (p.y < cy) : (p.y > cy);
+    \\  if (in_x && in_y) { float dx = p.x-cx; float dy = p.y-cy; return dx*dx+dy*dy > trad*trad; }
+    \\  return false;
+    \\}
+    \\bool insideRounded(float4 r, float4 rd, float2 p) {
+    \\  if (p.x < r.x || p.x >= r.x + r.z || p.y < r.y || p.y >= r.y + r.w) return false;
+    \\  float mx = min(r.z, r.w) * 0.5;
+    \\  float2 r0 = r.xy; float2 rsz = r.zw;
+    \\  if (cornerOut(p, min(rd.x, mx), r.x + rd.x,       r.y + rd.x,       r0, rsz)) return false;
+    \\  if (cornerOut(p, min(rd.y, mx), r.x + r.z - rd.y, r.y + rd.y,       r0, rsz)) return false;
+    \\  if (cornerOut(p, min(rd.z, mx), r.x + r.z - rd.z, r.y + r.w - rd.z, r0, rsz)) return false;
+    \\  if (cornerOut(p, min(rd.w, mx), r.x + rd.w,       r.y + r.w - rd.w, r0, rsz)) return false;
+    \\  return true;
+    \\}
+    \\Texture2D tex : register(t0);
+    \\SamplerState smp : register(s0);
+    \\float4 PSMain(VSOut i) : SV_TARGET {
+    \\  if (!insideRounded(rect, rad, i.pos.xy)) { discard; }
+    \\  return tex.Sample(smp, i.uv);
+    \\}
+;
+const RClipCB = extern struct { vw: f32, vh: f32, pad0: f32 = 0, pad1: f32 = 0, rect: [4]f32, rad: [4]f32 };
+
+pub const D3dRoundClipCompositor = struct {
+    device: *IDevice,
+    context: *IContext,
+    vs: *IVertexShader,
+    ps: *IPixelShader,
+    layout: *IInputLayout,
+    raster: *IRasterizerState,
+    sampler: *ISampler,
+    blend: *IBlendState,
+
+    pub fn init(device: *IDevice, context: *IContext) Error!D3dRoundClipCompositor {
+        const d3d_compile = loadD3DCompile() orelse return error.ShaderFailed;
+        const vs_blob = compileSrc(d3d_compile, rclip_hlsl, "VSMain", "vs_4_0") orelse return error.ShaderFailed;
+        defer release(vs_blob);
+        const ps_blob = compileSrc(d3d_compile, rclip_hlsl, "PSMain", "ps_4_0") orelse return error.ShaderFailed;
+        defer release(ps_blob);
+        const vs_ptr = vs_blob.vtbl.GetBufferPointer(vs_blob).?;
+        const vs_len = vs_blob.vtbl.GetBufferSize(vs_blob);
+        var vs: ?*IVertexShader = null;
+        if (!ok(device.vtbl.CreateVertexShader(device, vs_ptr, vs_len, null, &vs)) or vs == null) return error.ShaderFailed;
+        var ps: ?*IPixelShader = null;
+        if (!ok(device.vtbl.CreatePixelShader(device, ps_blob.vtbl.GetBufferPointer(ps_blob).?, ps_blob.vtbl.GetBufferSize(ps_blob), null, &ps)) or ps == null) return error.ShaderFailed;
+        var elems = [_]D3D11_INPUT_ELEMENT_DESC{
+            .{ .semantic_name = "POSITION", .format = DXGI_FORMAT_R32G32_FLOAT, .aligned_byte_offset = 0 },
+            .{ .semantic_name = "TEXCOORD", .format = DXGI_FORMAT_R32G32_FLOAT, .aligned_byte_offset = 8 },
+        };
+        var layout: ?*IInputLayout = null;
+        if (!ok(device.vtbl.CreateInputLayout(device, &elems, 2, vs_ptr, vs_len, &layout)) or layout == null) return error.ShaderFailed;
+        var rdesc: D3D11_RASTERIZER_DESC = .{ .scissor_enable = 0 };
+        var raster: ?*IRasterizerState = null;
+        if (!ok(device.vtbl.CreateRasterizerState(device, &rdesc, &raster)) or raster == null) return error.ShaderFailed;
+        var sdesc: D3D11_SAMPLER_DESC = .{ .filter = D3D11_FILTER_MIN_MAG_MIP_POINT, .address_u = D3D11_TEXTURE_ADDRESS_CLAMP, .address_v = D3D11_TEXTURE_ADDRESS_CLAMP, .address_w = D3D11_TEXTURE_ADDRESS_CLAMP };
+        var sampler: ?*ISampler = null;
+        if (!ok(device.vtbl.CreateSamplerState(device, &sdesc, &sampler)) or sampler == null) return error.ShaderFailed;
+        const blend = try srcOverBlend(device);
+        return .{ .device = device, .context = context, .vs = vs.?, .ps = ps.?, .layout = layout.?, .raster = raster.?, .sampler = sampler.?, .blend = blend };
+    }
+
+    pub fn deinit(self: *D3dRoundClipCompositor) void {
+        release(self.blend);
+        release(self.sampler);
+        release(self.raster);
+        release(self.layout);
+        release(self.ps);
+        release(self.vs);
+    }
+
+    /// Composite `srv` over `rtv`, masked to the rounded rect.
+    pub fn composite(self: *D3dRoundClipCompositor, rtv: *IRtv, vw: f32, vh: f32, srv: *ISrv, rect: geometry.Rect, radius: style.CornerRadius) Error!void {
+        const dev = self.device;
+        const ctx = self.context;
+        const verts = [_]f32{ 0, 0, 0, 0, vw, 0, 1, 0, 0, vh, 0, 1, vw, vh, 1, 1 };
+        var vb_data: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = &verts };
+        var vb_desc: D3D11_BUFFER_DESC = .{ .byte_width = @sizeOf(@TypeOf(verts)), .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_VERTEX_BUFFER };
+        var vb: ?*IBuffer = null;
+        if (!ok(dev.vtbl.CreateBuffer(dev, &vb_desc, &vb_data, &vb)) or vb == null) return error.ShaderFailed;
+        defer release(vb.?);
+        var cbv: RClipCB = .{ .vw = vw, .vh = vh, .rect = .{ rect.x, rect.y, rect.width, rect.height }, .rad = .{ radius.top_left, radius.top_right, radius.bottom_right, radius.bottom_left } };
+        var cb_data: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = &cbv };
+        var cb_desc: D3D11_BUFFER_DESC = .{ .byte_width = @sizeOf(RClipCB), .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_CONSTANT_BUFFER };
+        var cb: ?*IBuffer = null;
+        if (!ok(dev.vtbl.CreateBuffer(dev, &cb_desc, &cb_data, &cb)) or cb == null) return error.ShaderFailed;
+        defer release(cb.?);
+
+        var vp: D3D11_VIEWPORT = .{ .width = vw, .height = vh };
+        ctx.vtbl.RSSetViewports(ctx, 1, &vp);
+        ctx.vtbl.RSSetState(ctx, self.raster);
+        ctx.vtbl.OMSetBlendState(ctx, self.blend, null, 0xffffffff);
+        var rtv_slot: ?*IRtv = rtv;
+        ctx.vtbl.OMSetRenderTargets(ctx, 1, &rtv_slot, null);
+        ctx.vtbl.IASetInputLayout(ctx, self.layout);
+        var vb_slot: ?*IBuffer = vb.?;
+        const stride: UINT = 16;
+        const offset: UINT = 0;
+        ctx.vtbl.IASetVertexBuffers(ctx, 0, 1, &vb_slot, &stride, &offset);
+        ctx.vtbl.IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        ctx.vtbl.VSSetShader(ctx, self.vs, null, 0);
+        var cb_slot: ?*IBuffer = cb.?;
+        ctx.vtbl.VSSetConstantBuffers(ctx, 0, 1, &cb_slot);
+        ctx.vtbl.PSSetConstantBuffers(ctx, 0, 1, &cb_slot); // rect+rad read by the PS — bind to PS too
+        ctx.vtbl.PSSetShader(ctx, self.ps, null, 0);
+        var srv_slot: ?*ISrv = srv;
+        ctx.vtbl.PSSetShaderResources(ctx, 0, 1, &srv_slot);
+        var samp_slot: ?*ISampler = self.sampler;
+        ctx.vtbl.PSSetSamplers(ctx, 0, 1, &samp_slot);
+        ctx.vtbl.Draw(ctx, 4, 0);
+        var none: ?*ISrv = null;
+        ctx.vtbl.PSSetShaderResources(ctx, 0, 1, &none);
+    }
+};
+
 // === Slice 7: exact rect renderer (per-side borders, per-corner radii) ======
 // Ports gl.zig's ExactRectRenderer: a pixel shader that replicates
 // raster.zig's insideRounded() + borderColorAt() per fragment (pixel-center
@@ -1676,6 +1809,13 @@ const ScissorRect = struct { x0: i32, y0: i32, x1: i32, y1: i32 };
 /// the offscreen layer texture + its views, and the composite opacity.
 const LayerState = struct { parent_rtv: *IRtv, tex: *ITexture2D, rtv: *IRtv, srv: *ISrv, opacity: f32 };
 
+/// A pushed rounded clip (#117): like a layer, composited back masked to the
+/// rounded rect on popClip.
+const RoundState = struct { parent_rtv: *IRtv, tex: *ITexture2D, rtv: *IRtv, srv: *ISrv, rect: geometry.Rect, radius: style.CornerRadius };
+
+/// Which stack a popClip unwinds: a plain scissor entry or a rounded-clip layer.
+const ClipOp = enum { scissor, rounded };
+
 fn col(c: style.Color) [4]f32 {
     return .{
         @as(f32, @floatFromInt(c.r)) / 255,
@@ -1693,6 +1833,7 @@ pub const D3dBackend = struct {
     image: D3dImageRenderer,
     grad: D3dGradientRenderer,
     comp: D3dLayerCompositor,
+    rclip: D3dRoundClipCompositor,
     font: ?ttf.Font = null,
     glyphs: std.AutoHashMapUnmanaged(u32, D3dGlyphRenderer) = .empty,
     clips: std.ArrayList(ScissorRect) = .empty,
@@ -1700,6 +1841,8 @@ pub const D3dBackend = struct {
     /// while a group-opacity layer (#121) is active.
     cur_rtv: ?*IRtv = null,
     layers: std.ArrayList(LayerState) = .empty,
+    rounds: std.ArrayList(RoundState) = .empty,
+    clip_ops: std.ArrayList(ClipOp) = .empty,
 
     /// Headless D3D11 Backend over an offscreen render target (golden tests).
     pub fn initOffscreen(gpa: std.mem.Allocator) !D3dBackend {
@@ -1726,6 +1869,7 @@ pub const D3dBackend = struct {
             .image = try D3dImageRenderer.init(off.device, off.context),
             .grad = try D3dGradientRenderer.init(off.device, off.context, true),
             .comp = try D3dLayerCompositor.init(off.device, off.context),
+            .rclip = try D3dRoundClipCompositor.init(off.device, off.context),
         };
     }
 
@@ -1779,7 +1923,15 @@ pub const D3dBackend = struct {
             release(l.tex);
         }
         self.layers.deinit(self.gpa);
+        for (self.rounds.items) |r| {
+            release(r.srv);
+            release(r.rtv);
+            release(r.tex);
+        }
+        self.rounds.deinit(self.gpa);
+        self.clip_ops.deinit(self.gpa);
         self.comp.deinit();
+        self.rclip.deinit();
         self.image.deinit();
         self.grad.deinit();
         self.exact.deinit();
@@ -1808,6 +1960,7 @@ pub const D3dBackend = struct {
         .draw_image = drawImage,
         .push_clip = pushClip,
         .pop_clip = popClip,
+        .push_clip_rounded = pushClipRounded,
         .push_layer = pushLayer,
         .pop_layer = popLayer,
         .create_texture = createTexture,
@@ -1833,6 +1986,7 @@ pub const D3dBackend = struct {
         self.off.clear(1, 1, 1, 1); // match raster's white clear
         self.cur_rtv = self.off.rtv;
         self.clips.clearRetainingCapacity();
+        self.clip_ops.clearRetainingCapacity();
         self.fullScissor();
     }
 
@@ -1906,13 +2060,45 @@ pub const D3dBackend = struct {
             .x1 = @intFromFloat(@round(rect.x + rect.width)),
             .y1 = @intFromFloat(@round(rect.y + rect.height)),
         }) catch {};
+        self.clip_ops.append(self.gpa, .scissor) catch {};
         self.applyScissor();
+    }
+
+    /// Rounded clip (#117): redirect draws into an offscreen layer (like
+    /// pushLayer); popClip composites it back masked to the rounded rect.
+    fn pushClipRounded(ptr: *anyopaque, rect: geometry.Rect, radius: style.CornerRadius) void {
+        const self = self_(ptr);
+        if (radius.isNone()) return pushClip(ptr, rect);
+        const l = self.createLayer() catch return;
+        self.rounds.append(self.gpa, .{ .parent_rtv = self.target(), .tex = l.tex, .rtv = l.rtv, .srv = l.srv, .rect = rect, .radius = radius }) catch {
+            release(l.srv);
+            release(l.rtv);
+            release(l.tex);
+            return;
+        };
+        self.clip_ops.append(self.gpa, .rounded) catch {};
+        self.cur_rtv = l.rtv;
     }
 
     fn popClip(ptr: *anyopaque) void {
         const self = self_(ptr);
-        if (self.clips.items.len > 0) _ = self.clips.pop();
-        self.applyScissor();
+        const op = self.clip_ops.pop() orelse .scissor;
+        switch (op) {
+            .scissor => {
+                if (self.clips.items.len > 0) _ = self.clips.pop();
+                self.applyScissor();
+            },
+            .rounded => {
+                const r = self.rounds.pop() orelse return;
+                self.cur_rtv = r.parent_rtv;
+                const w: f32 = @floatFromInt(self.off.width);
+                const h: f32 = @floatFromInt(self.off.height);
+                self.rclip.composite(r.parent_rtv, w, h, r.srv, r.rect, r.radius) catch {};
+                release(r.srv);
+                release(r.rtv);
+                release(r.tex);
+            },
+        }
     }
 
     /// Redirect draws into a fresh transparent offscreen layer (#121); popLayer
