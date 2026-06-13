@@ -24,6 +24,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 const ttf = @import("../font/ttf.zig");
 const grast = @import("../font/raster.zig");
+const geometry = @import("../geometry.zig");
+const style = @import("../style.zig");
+const backend_mod = @import("../backend.zig");
+const Backend = backend_mod.Backend;
 
 comptime {
     if (builtin.os.tag != .windows) @compileError("d3d11.zig is Windows-only; gate imports on builtin.os.tag");
@@ -134,7 +138,8 @@ const IContext = extern struct {
         _pad5: [7]*const anyopaque, // 36..42
         RSSetState: *const fn (*IContext, ?*IRasterizerState) callconv(WINAPI) void, // 43
         RSSetViewports: *const fn (*IContext, UINT, *const D3D11_VIEWPORT) callconv(WINAPI) void, // 44
-        _pad6: [2]*const anyopaque, // 45,46
+        RSSetScissorRects: *const fn (*IContext, UINT, *const D3D11_RECT) callconv(WINAPI) void, // 45
+        _pad6: [1]*const anyopaque, // 46
         CopyResource: *const fn (*IContext, *ITexture2D, *ITexture2D) callconv(WINAPI) void, // 47
         _pad7: [2]*const anyopaque, // 48,49
         ClearRenderTargetView: *const fn (*IContext, *IRtv, *const [4]f32) callconv(WINAPI) void, // 50
@@ -244,6 +249,7 @@ const D3D11_VIEWPORT = extern struct {
     min_depth: f32 = 0,
     max_depth: f32 = 1,
 };
+const D3D11_RECT = extern struct { left: i32, top: i32, right: i32, bottom: i32 };
 
 // D3DCompile lives in d3dcompiler_47.dll, which ships with Windows but has
 // no Zig-bundled import lib — so load it dynamically (kernel32 does have an
@@ -353,6 +359,27 @@ pub const D3dOffscreen = struct {
         release(self.target);
         release(self.context);
         release(self.device);
+    }
+
+    /// Recreate the render-target texture + view at a new size (keeps the
+    /// device/context). Used by D3dBackend.beginFrame when the viewport
+    /// changes across frames/fixtures.
+    pub fn resize(self: *D3dOffscreen, width: u32, height: u32) Error!void {
+        if (width == self.width and height == self.height) return;
+        var tdesc: D3D11_TEXTURE2D_DESC = .{ .width = width, .height = height, .format = DXGI_FORMAT_R8G8B8A8_UNORM, .usage = D3D11_USAGE_DEFAULT, .bind_flags = D3D11_BIND_RENDER_TARGET };
+        var target: ?*ITexture2D = null;
+        if (!ok(self.device.vtbl.CreateTexture2D(self.device, &tdesc, null, &target)) or target == null) return error.NoBackBuffer;
+        var rtv: ?*IRtv = null;
+        if (!ok(self.device.vtbl.CreateRenderTargetView(self.device, target.?, null, &rtv)) or rtv == null) {
+            release(target.?);
+            return error.NoRtv;
+        }
+        release(self.rtv);
+        release(self.target);
+        self.target = target.?;
+        self.rtv = rtv.?;
+        self.width = width;
+        self.height = height;
     }
 
     /// Clear the render target to an RGBA color.
@@ -538,7 +565,7 @@ pub const D3dRectRenderer = struct {
     layout: *IInputLayout,
     raster: *IRasterizerState,
 
-    pub fn init(device: *IDevice, context: *IContext) Error!D3dRectRenderer {
+    pub fn init(device: *IDevice, context: *IContext, scissor: bool) Error!D3dRectRenderer {
         const d3d_compile = loadD3DCompile() orelse return error.ShaderFailed;
         const vs_blob = compileSrc(d3d_compile, rect_hlsl, "VSMain", "vs_4_0") orelse return error.ShaderFailed;
         defer release(vs_blob);
@@ -556,7 +583,7 @@ pub const D3dRectRenderer = struct {
         };
         var layout: ?*IInputLayout = null;
         if (!ok(device.vtbl.CreateInputLayout(device, &elems, 1, vs_ptr, vs_len, &layout)) or layout == null) return error.ShaderFailed;
-        var rdesc: D3D11_RASTERIZER_DESC = .{};
+        var rdesc: D3D11_RASTERIZER_DESC = .{ .scissor_enable = @intFromBool(scissor) };
         var raster: ?*IRasterizerState = null;
         if (!ok(device.vtbl.CreateRasterizerState(device, &rdesc, &raster)) or raster == null) return error.ShaderFailed;
 
@@ -667,7 +694,7 @@ pub const D3dRoundedRectRenderer = struct {
     raster: *IRasterizerState,
     blend: *IBlendState,
 
-    pub fn init(device: *IDevice, context: *IContext) Error!D3dRoundedRectRenderer {
+    pub fn init(device: *IDevice, context: *IContext, scissor: bool) Error!D3dRoundedRectRenderer {
         const d3d_compile = loadD3DCompile() orelse return error.ShaderFailed;
         const vs_blob = compileSrc(d3d_compile, round_hlsl, "VSMain", "vs_4_0") orelse return error.ShaderFailed;
         defer release(vs_blob);
@@ -686,7 +713,7 @@ pub const D3dRoundedRectRenderer = struct {
         };
         var layout: ?*IInputLayout = null;
         if (!ok(device.vtbl.CreateInputLayout(device, &elems, 2, vs_ptr, vs_len, &layout)) or layout == null) return error.ShaderFailed;
-        var rdesc: D3D11_RASTERIZER_DESC = .{};
+        var rdesc: D3D11_RASTERIZER_DESC = .{ .scissor_enable = @intFromBool(scissor) };
         var raster: ?*IRasterizerState = null;
         if (!ok(device.vtbl.CreateRasterizerState(device, &rdesc, &raster)) or raster == null) return error.ShaderFailed;
 
@@ -823,7 +850,7 @@ pub const D3dGlyphRenderer = struct {
     entries: [glyph_count]GlyphEntry,
     ascent: f32,
 
-    pub fn init(gpa: std.mem.Allocator, device: *IDevice, context: *IContext, font: *const ttf.Font, size_px: f32) !D3dGlyphRenderer {
+    pub fn init(gpa: std.mem.Allocator, device: *IDevice, context: *IContext, font: *const ttf.Font, size_px: f32, scissor: bool) !D3dGlyphRenderer {
         // Rasterize ASCII glyphs, shelf-pack, build the atlas RGBA (identical
         // packing to gl.zig's GlyphRenderer).
         var entries: [glyph_count]GlyphEntry = undefined;
@@ -907,7 +934,7 @@ pub const D3dGlyphRenderer = struct {
         };
         var layout: ?*IInputLayout = null;
         if (!ok(device.vtbl.CreateInputLayout(device, &elems, 2, vs_ptr, vs_len, &layout)) or layout == null) return error.ShaderFailed;
-        var rdesc: D3D11_RASTERIZER_DESC = .{};
+        var rdesc: D3D11_RASTERIZER_DESC = .{ .scissor_enable = @intFromBool(scissor) };
         var raster: ?*IRasterizerState = null;
         if (!ok(device.vtbl.CreateRasterizerState(device, &rdesc, &raster)) or raster == null) return error.ShaderFailed;
         var bdesc: D3D11_BLEND_DESC = .{ .render_target = [_]D3D11_RENDER_TARGET_BLEND_DESC{.{}} ** 8 };
@@ -1018,5 +1045,334 @@ pub const D3dGlyphRenderer = struct {
         var samp_slot: ?*ISampler = self.sampler;
         ctx.vtbl.PSSetSamplers(ctx, 0, 1, &samp_slot);
         ctx.vtbl.Draw(ctx, @intCast(verts.items.len / 4), 0);
+    }
+};
+
+// === Image renderer (positioned textured quad) ==============================
+// drawImage: sample a texture (by SRV) into a pixel-space rect. Point/clamp
+// to match raster's nearest, no blend (opaque copy). Scissor-enabled so the
+// Backend's clip stack applies.
+
+const image_hlsl =
+    \\cbuffer CB : register(b0) { float2 viewport; float2 pad; };
+    \\struct VSIn  { float2 pos : POSITION; float2 uv : TEXCOORD; };
+    \\struct VSOut { float4 pos : SV_POSITION; float2 uv : TEXCOORD; };
+    \\VSOut VSMain(VSIn i) {
+    \\  VSOut o;
+    \\  o.pos = float4(i.pos.x / viewport.x * 2.0 - 1.0, 1.0 - i.pos.y / viewport.y * 2.0, 0, 1);
+    \\  o.uv = i.uv;
+    \\  return o;
+    \\}
+    \\Texture2D tex : register(t0);
+    \\SamplerState smp : register(s0);
+    \\float4 PSMain(VSOut i) : SV_TARGET { return tex.Sample(smp, i.uv); }
+;
+const ImageCB = extern struct { vw: f32, vh: f32, pad0: f32 = 0, pad1: f32 = 0 };
+
+const D3dImageRenderer = struct {
+    device: *IDevice,
+    context: *IContext,
+    vs: *IVertexShader,
+    ps: *IPixelShader,
+    layout: *IInputLayout,
+    raster: *IRasterizerState,
+    sampler: *ISampler,
+
+    fn init(device: *IDevice, context: *IContext) Error!D3dImageRenderer {
+        const d3d_compile = loadD3DCompile() orelse return error.ShaderFailed;
+        const vs_blob = compileSrc(d3d_compile, image_hlsl, "VSMain", "vs_4_0") orelse return error.ShaderFailed;
+        defer release(vs_blob);
+        const ps_blob = compileSrc(d3d_compile, image_hlsl, "PSMain", "ps_4_0") orelse return error.ShaderFailed;
+        defer release(ps_blob);
+        const vs_ptr = vs_blob.vtbl.GetBufferPointer(vs_blob).?;
+        const vs_len = vs_blob.vtbl.GetBufferSize(vs_blob);
+        var vs: ?*IVertexShader = null;
+        if (!ok(device.vtbl.CreateVertexShader(device, vs_ptr, vs_len, null, &vs)) or vs == null) return error.ShaderFailed;
+        var ps: ?*IPixelShader = null;
+        if (!ok(device.vtbl.CreatePixelShader(device, ps_blob.vtbl.GetBufferPointer(ps_blob).?, ps_blob.vtbl.GetBufferSize(ps_blob), null, &ps)) or ps == null) return error.ShaderFailed;
+        var elems = [_]D3D11_INPUT_ELEMENT_DESC{
+            .{ .semantic_name = "POSITION", .format = DXGI_FORMAT_R32G32_FLOAT, .aligned_byte_offset = 0 },
+            .{ .semantic_name = "TEXCOORD", .format = DXGI_FORMAT_R32G32_FLOAT, .aligned_byte_offset = 8 },
+        };
+        var layout: ?*IInputLayout = null;
+        if (!ok(device.vtbl.CreateInputLayout(device, &elems, 2, vs_ptr, vs_len, &layout)) or layout == null) return error.ShaderFailed;
+        var rdesc: D3D11_RASTERIZER_DESC = .{ .scissor_enable = 1 };
+        var raster: ?*IRasterizerState = null;
+        if (!ok(device.vtbl.CreateRasterizerState(device, &rdesc, &raster)) or raster == null) return error.ShaderFailed;
+        var sdesc: D3D11_SAMPLER_DESC = .{ .filter = D3D11_FILTER_MIN_MAG_MIP_POINT, .address_u = D3D11_TEXTURE_ADDRESS_CLAMP, .address_v = D3D11_TEXTURE_ADDRESS_CLAMP, .address_w = D3D11_TEXTURE_ADDRESS_CLAMP };
+        var sampler: ?*ISampler = null;
+        if (!ok(device.vtbl.CreateSamplerState(device, &sdesc, &sampler)) or sampler == null) return error.ShaderFailed;
+        return .{ .device = device, .context = context, .vs = vs.?, .ps = ps.?, .layout = layout.?, .raster = raster.?, .sampler = sampler.? };
+    }
+
+    fn deinit(self: *D3dImageRenderer) void {
+        release(self.sampler);
+        release(self.raster);
+        release(self.layout);
+        release(self.ps);
+        release(self.vs);
+    }
+
+    fn draw(self: *D3dImageRenderer, rtv: *IRtv, vw: f32, vh: f32, rect: geometry.Rect, srv: *ISrv) Error!void {
+        const dev = self.device;
+        const ctx = self.context;
+        const x0 = rect.x;
+        const y0 = rect.y;
+        const x1 = rect.x + rect.width;
+        const y1 = rect.y + rect.height;
+        const verts = [_]f32{ x0, y0, 0, 0, x1, y0, 1, 0, x0, y1, 0, 1, x1, y1, 1, 1 };
+        var vb_data: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = &verts };
+        var vb_desc: D3D11_BUFFER_DESC = .{ .byte_width = @sizeOf(@TypeOf(verts)), .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_VERTEX_BUFFER };
+        var vb: ?*IBuffer = null;
+        if (!ok(dev.vtbl.CreateBuffer(dev, &vb_desc, &vb_data, &vb)) or vb == null) return error.ShaderFailed;
+        defer release(vb.?);
+        var cbv: ImageCB = .{ .vw = vw, .vh = vh };
+        var cb_data: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = &cbv };
+        var cb_desc: D3D11_BUFFER_DESC = .{ .byte_width = @sizeOf(ImageCB), .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_CONSTANT_BUFFER };
+        var cb: ?*IBuffer = null;
+        if (!ok(dev.vtbl.CreateBuffer(dev, &cb_desc, &cb_data, &cb)) or cb == null) return error.ShaderFailed;
+        defer release(cb.?);
+
+        var vp: D3D11_VIEWPORT = .{ .width = vw, .height = vh };
+        ctx.vtbl.RSSetViewports(ctx, 1, &vp);
+        ctx.vtbl.RSSetState(ctx, self.raster);
+        ctx.vtbl.OMSetBlendState(ctx, null, null, 0xffffffff); // opaque copy
+        var rtv_slot: ?*IRtv = rtv;
+        ctx.vtbl.OMSetRenderTargets(ctx, 1, &rtv_slot, null);
+        ctx.vtbl.IASetInputLayout(ctx, self.layout);
+        var vb_slot: ?*IBuffer = vb.?;
+        const stride: UINT = 16;
+        const offset: UINT = 0;
+        ctx.vtbl.IASetVertexBuffers(ctx, 0, 1, &vb_slot, &stride, &offset);
+        ctx.vtbl.IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        ctx.vtbl.VSSetShader(ctx, self.vs, null, 0);
+        var cb_slot: ?*IBuffer = cb.?;
+        ctx.vtbl.VSSetConstantBuffers(ctx, 0, 1, &cb_slot);
+        ctx.vtbl.PSSetShader(ctx, self.ps, null, 0);
+        var srv_slot: ?*ISrv = srv;
+        ctx.vtbl.PSSetShaderResources(ctx, 0, 1, &srv_slot);
+        var samp_slot: ?*ISampler = self.sampler;
+        ctx.vtbl.PSSetSamplers(ctx, 0, 1, &samp_slot);
+        ctx.vtbl.Draw(ctx, 4, 0);
+    }
+};
+
+// === Slice 6: the D3D11 Backend vtable =======================================
+// Implements backend.zig's draw-primitive interface on the D3D11 renderers,
+// so layout.render() drives D3D11 directly — matching GlBackend in gl.zig.
+// drawRect routes solid→D3dRectRenderer (hard edges, matches raster) and
+// bg/border/radius→D3dRoundedRectRenderer; clip→D3D11 scissor (intersection
+// stack); text→a per-size glyph atlas cache. Per-side borders / per-corner
+// radii approximate to uniform — a later "exact" slice (the GL slice-7
+// equivalent) handles those pixel-exact, so the demo compares only the
+// fixtures the current renderers reproduce exactly.
+
+const ScissorRect = struct { x0: i32, y0: i32, x1: i32, y1: i32 };
+
+fn col(c: style.Color) [4]f32 {
+    return .{
+        @as(f32, @floatFromInt(c.r)) / 255,
+        @as(f32, @floatFromInt(c.g)) / 255,
+        @as(f32, @floatFromInt(c.b)) / 255,
+        @as(f32, @floatFromInt(c.a)) / 255,
+    };
+}
+
+pub const D3dBackend = struct {
+    gpa: std.mem.Allocator,
+    off: D3dOffscreen,
+    rect: D3dRectRenderer,
+    rounded: D3dRoundedRectRenderer,
+    image: D3dImageRenderer,
+    font: ?ttf.Font = null,
+    glyphs: std.AutoHashMapUnmanaged(u32, D3dGlyphRenderer) = .empty,
+    clips: std.ArrayList(ScissorRect) = .empty,
+
+    /// Headless D3D11 Backend over an offscreen render target (golden tests).
+    pub fn initOffscreen(gpa: std.mem.Allocator) !D3dBackend {
+        var off = try D3dOffscreen.create(1, 1);
+        errdefer off.destroy();
+        return .{
+            .gpa = gpa,
+            .off = off,
+            .rect = try D3dRectRenderer.init(off.device, off.context, true),
+            .rounded = try D3dRoundedRectRenderer.init(off.device, off.context, true),
+            .image = try D3dImageRenderer.init(off.device, off.context),
+        };
+    }
+
+    pub fn deinit(self: *D3dBackend) void {
+        var it = self.glyphs.valueIterator();
+        while (it.next()) |g| g.deinit();
+        self.glyphs.deinit(self.gpa);
+        self.clips.deinit(self.gpa);
+        self.image.deinit();
+        self.rounded.deinit();
+        self.rect.deinit();
+        self.off.destroy();
+    }
+
+    pub fn setFont(self: *D3dBackend, data: []const u8) !void {
+        self.font = try ttf.Font.parse(data);
+    }
+
+    pub fn interface(self: *D3dBackend) Backend {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    /// Read the render target back as top-down RGBA (caller owns).
+    pub fn readPixels(self: *D3dBackend) ![]u8 {
+        return self.off.readPixels(self.gpa);
+    }
+
+    const vtable: Backend.VTable = .{
+        .begin_frame = beginFrame,
+        .end_frame = endFrame,
+        .draw_rect = drawRect,
+        .draw_text = drawText,
+        .draw_image = drawImage,
+        .push_clip = pushClip,
+        .pop_clip = popClip,
+        .create_texture = createTexture,
+        .destroy_texture = destroyTexture,
+        .measure_text = measureText,
+        .snap = snap,
+    };
+
+    fn self_(ptr: *anyopaque) *D3dBackend {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn fullScissor(self: *D3dBackend) void {
+        var r: D3D11_RECT = .{ .left = 0, .top = 0, .right = @intCast(self.off.width), .bottom = @intCast(self.off.height) };
+        self.off.context.vtbl.RSSetScissorRects(self.off.context, 1, &r);
+    }
+
+    fn beginFrame(ptr: *anyopaque, viewport: geometry.Size) Backend.Error!void {
+        const self = self_(ptr);
+        const w: u32 = @intFromFloat(@max(1, @round(viewport.width)));
+        const h: u32 = @intFromFloat(@max(1, @round(viewport.height)));
+        self.off.resize(w, h) catch return error.OutOfMemory;
+        self.off.clear(1, 1, 1, 1); // match raster's white clear
+        self.clips.clearRetainingCapacity();
+        self.fullScissor();
+    }
+
+    fn endFrame(ptr: *anyopaque) Backend.Error!void {
+        _ = self_(ptr);
+    }
+
+    fn drawRect(ptr: *anyopaque, rect: geometry.Rect, rs: style.RectStyle) void {
+        const self = self_(ptr);
+        const w: f32 = @floatFromInt(self.off.width);
+        const h: f32 = @floatFromInt(self.off.height);
+        if (rs.corner_radius.isNone() and rs.border.isNone()) {
+            if (rs.background) |bg| {
+                self.rect.fillRect(self.off.rtv, w, h, rect.x, rect.y, rect.width, rect.height, col(bg)) catch {};
+            }
+            return;
+        }
+        // bg + border + radius. Uniform approximation (top side / top-left
+        // radius) — exact per-side is a later slice.
+        const bg = if (rs.background) |b| col(b) else [4]f32{ 0, 0, 0, 0 };
+        self.rounded.draw(self.off.rtv, w, h, rect.x, rect.y, rect.width, rect.height, rs.corner_radius.top_left, rs.border.top.width, bg, col(rs.border.top.color)) catch {};
+    }
+
+    fn glyphFor(self: *D3dBackend, size_px: u16) ?*D3dGlyphRenderer {
+        if (self.font == null) return null;
+        if (self.glyphs.getPtr(size_px)) |g| return g;
+        const g = D3dGlyphRenderer.init(self.gpa, self.off.device, self.off.context, &self.font.?, @floatFromInt(size_px), true) catch return null;
+        self.glyphs.put(self.gpa, size_px, g) catch return null;
+        return self.glyphs.getPtr(size_px);
+    }
+
+    fn drawText(ptr: *anyopaque, origin: geometry.Point, text: []const u8, ts: style.TextStyle) void {
+        const self = self_(ptr);
+        const size_px: u16 = @intFromFloat(@max(4, ts.size));
+        const gr = self.glyphFor(size_px) orelse return;
+        const w: f32 = @floatFromInt(self.off.width);
+        const h: f32 = @floatFromInt(self.off.height);
+        const color = ts.color orelse style.Color.black;
+        gr.drawText(self.gpa, self.off.rtv, w, h, origin.x, origin.y, text, col(color)) catch {};
+    }
+
+    fn drawImage(ptr: *anyopaque, rect: geometry.Rect, texture: *Backend.Texture) void {
+        const self = self_(ptr);
+        const w: f32 = @floatFromInt(self.off.width);
+        const h: f32 = @floatFromInt(self.off.height);
+        const srv: *ISrv = @ptrCast(@alignCast(texture));
+        self.image.draw(self.off.rtv, w, h, rect, srv) catch {};
+    }
+
+    fn applyScissor(self: *D3dBackend) void {
+        var s: ScissorRect = .{ .x0 = 0, .y0 = 0, .x1 = @intCast(self.off.width), .y1 = @intCast(self.off.height) };
+        for (self.clips.items) |c| {
+            s.x0 = @max(s.x0, c.x0);
+            s.y0 = @max(s.y0, c.y0);
+            s.x1 = @min(s.x1, c.x1);
+            s.y1 = @min(s.y1, c.y1);
+        }
+        // D3D scissor is top-left origin like our rects — no y-flip.
+        var r: D3D11_RECT = .{ .left = s.x0, .top = s.y0, .right = @max(s.x0, s.x1), .bottom = @max(s.y0, s.y1) };
+        self.off.context.vtbl.RSSetScissorRects(self.off.context, 1, &r);
+    }
+
+    fn pushClip(ptr: *anyopaque, rect: geometry.Rect) void {
+        const self = self_(ptr);
+        self.clips.append(self.gpa, .{
+            .x0 = @intFromFloat(@round(rect.x)),
+            .y0 = @intFromFloat(@round(rect.y)),
+            .x1 = @intFromFloat(@round(rect.x + rect.width)),
+            .y1 = @intFromFloat(@round(rect.y + rect.height)),
+        }) catch {};
+        self.applyScissor();
+    }
+
+    fn popClip(ptr: *anyopaque) void {
+        const self = self_(ptr);
+        if (self.clips.items.len > 0) _ = self.clips.pop();
+        self.applyScissor();
+    }
+
+    fn createTexture(ptr: *anyopaque, width: u32, height: u32, rgba: []const u8) Backend.Error!*Backend.Texture {
+        const self = self_(ptr);
+        const dev = self.off.device;
+        var tdesc: D3D11_TEXTURE2D_DESC = .{ .width = width, .height = height, .format = DXGI_FORMAT_R8G8B8A8_UNORM, .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_SHADER_RESOURCE };
+        var tdata: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = rgba.ptr, .sys_mem_pitch = width * 4 };
+        var tex: ?*ITexture2D = null;
+        if (!ok(dev.vtbl.CreateTexture2D(dev, &tdesc, &tdata, &tex)) or tex == null) return error.OutOfMemory;
+        defer release(tex.?); // the SRV keeps the texture alive
+        var srv: ?*ISrv = null;
+        if (!ok(dev.vtbl.CreateShaderResourceView(dev, tex.?, null, &srv)) or srv == null) return error.OutOfMemory;
+        return @ptrCast(srv.?);
+    }
+
+    fn destroyTexture(ptr: *anyopaque, texture: *Backend.Texture) void {
+        _ = self_(ptr);
+        const srv: *ISrv = @ptrCast(@alignCast(texture));
+        release(srv);
+    }
+
+    fn measureText(ptr: *anyopaque, text: []const u8, ts: style.TextStyle) geometry.Size {
+        const self = self_(ptr);
+        if (self.font) |*font| {
+            const upem: f32 = @floatFromInt(font.units_per_em);
+            const fscale = ts.size / upem;
+            var width: f32 = 0;
+            var it = std.unicode.Utf8View.initUnchecked(text).iterator();
+            while (it.nextCodepoint()) |cp| {
+                width += @as(f32, @floatFromInt(font.hMetrics(font.glyphIndex(cp)).advance)) * fscale;
+            }
+            const line = @as(f32, @floatFromInt(font.ascent - font.descent + font.line_gap)) * fscale;
+            return .{ .width = width, .height = line };
+        }
+        const n = std.unicode.utf8CountCodepoints(text) catch text.len;
+        return .{ .width = @as(f32, @floatFromInt(n)) * 8, .height = 16 };
+    }
+
+    fn snap(ptr: *anyopaque, value: f32, axis: geometry.Axis) f32 {
+        _ = ptr;
+        _ = axis;
+        return @round(value);
     }
 };
