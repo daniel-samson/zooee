@@ -159,7 +159,7 @@ pub fn runWindow(
 
     // GPU-present by default on platforms with a GPU backend (#11/#12);
     // ZOOEE_SOFTWARE forces the CPU raster path (deterministic CI, debugging).
-    const want_gpu = has_gpu_window and !init.environ_map.contains("ZOOEE_SOFTWARE");
+    const want_gpu = has_gpu_window and !opts.force_software and !init.environ_map.contains("ZOOEE_SOFTWARE");
 
     const window = try platform.Window.create(gpa, .{ .title = opts.title, .width = opts.width, .height = opts.height, .gl = want_gpu });
     defer window.destroy();
@@ -377,6 +377,10 @@ pub const WindowOptions = struct {
     title: [:0]const u8 = "zooee",
     width: u32 = 800,
     height: u32 = 600,
+    /// Force the CPU raster + OS-blit path even where a GPU backend exists
+    /// (same effect as the ZOOEE_SOFTWARE env var). Lets a build bake the
+    /// renderer choice in — e.g. separate GL and raster demo apps.
+    force_software: bool = false,
 };
 
 /// Render a Model's view into `b` once, offscreen — no window, no event
