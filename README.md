@@ -78,6 +78,13 @@ zig build run-gui  # run the native GUI demo (GPU-rendered)
 zig build clean    # remove zig-out (the build output)
 ```
 
+Builds are **Debug** by default (~2 MB, mostly debug info). For the small
+shipping binaries (~180–240 KB), build in release:
+
+```sh
+zig build demos -Doptimize=ReleaseSmall   # smallest; or ReleaseFast for speed
+```
+
 Other steps: `check` (headless GPU backend self-checks — `zooee-gl-check` /
 `zooee-d3d11-check`, not demos), `visual-test` (raster golden comparison).
 
