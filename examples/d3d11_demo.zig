@@ -233,6 +233,12 @@ pub fn main(init: std.process.Init) !void {
             const scene_ok = frac < 0.05;
             if (!scene_ok) backend_ok = false;
             try out.print("D3D11 Backend vs raster [{s}]: bad_frac={d:.4} {s}\n", .{ scene.name, frac, if (scene_ok) "PASS" else "FAIL" });
+            // DIAG: sample blue-over-red (36,30), blue-over-white (60,30), red-only (16,30).
+            const W = 80;
+            inline for ([_][2]usize{ .{ 36, 30 }, .{ 60, 30 }, .{ 16, 30 } }) |pt| {
+                const i = (pt[1] * W + pt[0]) * 4;
+                try out.print("  DIAG ({d},{d}) d3d=({d},{d},{d}) raster=({d},{d},{d})\n", .{ pt[0], pt[1], dpx[i], dpx[i + 1], dpx[i + 2], ras.pixels[i], ras.pixels[i + 1], ras.pixels[i + 2] });
+            }
         }
         // Gradients (#118): linear fills via the gradient pipeline, vs raster.
         {
