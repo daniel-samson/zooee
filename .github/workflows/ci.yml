@@ -40,6 +40,14 @@ jobs:
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a ./zig-out/bin/zooee-gl-check
 
+      # The D3D11 backend falls back to the WARP software rasterizer when no
+      # GPU is present, so this headless pixel-exact check runs on the
+      # GitHub-hosted Windows runner — no self-hosted VM needed. (The VM is
+      # only required for the on-screen window e2e in ci-selfhosted.yml.)
+      - name: D3D11 backend self-check (Windows, WARP)
+        if: runner.os == 'Windows'
+        run: ./zig-out/bin/zooee-d3d11-check.exe
+
       - name: Binary size gate
         shell: bash
         run: bash ci/check-size.sh
