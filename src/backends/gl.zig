@@ -160,3 +160,219 @@ pub const GlWindow = struct {
         return buf;
     }
 };
+
+// === Slice 2: proc loader + shader pipeline + textured-quad ================
+// Loads modern GL via glXGetProcAddressARB, compiles a textured-quad
+// program, and renders an uploaded RGBA image — to the window (present)
+// or to an offscreen FBO (headless golden tests). This is the texture/
+// shader/FBO foundation the glyph atlas and final present both reuse.
+
+const GLuint = c_uint;
+const GLint = c_int;
+const GLenum = c_uint;
+const GLsizei = c_int;
+
+const GL_FRAGMENT_SHADER: GLenum = 0x8B30;
+const GL_VERTEX_SHADER: GLenum = 0x8B31;
+const GL_COMPILE_STATUS: GLenum = 0x8B81;
+const GL_LINK_STATUS: GLenum = 0x8B82;
+const GL_ARRAY_BUFFER: GLenum = 0x8892;
+const GL_STATIC_DRAW: GLenum = 0x88E4;
+const GL_FLOAT: GLenum = 0x1406;
+const GL_FALSE: u8 = 0;
+const GL_TEXTURE_2D: GLenum = 0x0DE1;
+const GL_TEXTURE0: GLenum = 0x84C0;
+const GL_TEXTURE_MIN_FILTER: GLenum = 0x2801;
+const GL_TEXTURE_MAG_FILTER: GLenum = 0x2800;
+const GL_TEXTURE_WRAP_S: GLenum = 0x2802;
+const GL_TEXTURE_WRAP_T: GLenum = 0x2803;
+const GL_NEAREST: GLint = 0x2600;
+const GL_CLAMP_TO_EDGE: GLint = 0x812F;
+const GL_TRIANGLE_STRIP: GLenum = 0x0005;
+const GL_FRAMEBUFFER: GLenum = 0x8D40;
+const GL_COLOR_ATTACHMENT0: GLenum = 0x8CE0;
+const GL_FRAMEBUFFER_COMPLETE: GLenum = 0x8CD5;
+
+extern "GL" fn glXGetProcAddressARB([*:0]const u8) ?*const anyopaque;
+
+/// Loaded modern-GL entry points (glXGetProcAddressARB works for both
+/// core-1.1 and 2.0+ in Mesa).
+const Gl = struct {
+    createShader: *const fn (GLenum) callconv(.c) GLuint,
+    shaderSource: *const fn (GLuint, GLsizei, [*]const [*:0]const u8, ?[*]const GLint) callconv(.c) void,
+    compileShader: *const fn (GLuint) callconv(.c) void,
+    getShaderiv: *const fn (GLuint, GLenum, *GLint) callconv(.c) void,
+    createProgram: *const fn () callconv(.c) GLuint,
+    attachShader: *const fn (GLuint, GLuint) callconv(.c) void,
+    linkProgram: *const fn (GLuint) callconv(.c) void,
+    getProgramiv: *const fn (GLuint, GLenum, *GLint) callconv(.c) void,
+    useProgram: *const fn (GLuint) callconv(.c) void,
+    genVertexArrays: *const fn (GLsizei, [*]GLuint) callconv(.c) void,
+    bindVertexArray: *const fn (GLuint) callconv(.c) void,
+    genBuffers: *const fn (GLsizei, [*]GLuint) callconv(.c) void,
+    bindBuffer: *const fn (GLenum, GLuint) callconv(.c) void,
+    bufferData: *const fn (GLenum, isize, ?*const anyopaque, GLenum) callconv(.c) void,
+    vertexAttribPointer: *const fn (GLuint, GLint, GLenum, u8, GLsizei, ?*const anyopaque) callconv(.c) void,
+    enableVertexAttribArray: *const fn (GLuint) callconv(.c) void,
+    genTextures: *const fn (GLsizei, [*]GLuint) callconv(.c) void,
+    bindTexture: *const fn (GLenum, GLuint) callconv(.c) void,
+    texImage2D: *const fn (GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, ?*const anyopaque) callconv(.c) void,
+    texParameteri: *const fn (GLenum, GLenum, GLint) callconv(.c) void,
+    activeTexture: *const fn (GLenum) callconv(.c) void,
+    getUniformLocation: *const fn (GLuint, [*:0]const u8) callconv(.c) GLint,
+    uniform1i: *const fn (GLint, GLint) callconv(.c) void,
+    drawArrays: *const fn (GLenum, GLint, GLsizei) callconv(.c) void,
+    genFramebuffers: *const fn (GLsizei, [*]GLuint) callconv(.c) void,
+    bindFramebuffer: *const fn (GLenum, GLuint) callconv(.c) void,
+    framebufferTexture2D: *const fn (GLenum, GLenum, GLenum, GLuint, GLint) callconv(.c) void,
+    checkFramebufferStatus: *const fn (GLenum) callconv(.c) GLenum,
+
+    fn load() Error!Gl {
+        var g: Gl = undefined;
+        inline for (@typeInfo(Gl).@"struct".fields) |f| {
+            // GL symbol = "gl" + CamelCase field name.
+            const sym = "gl" ++ [1]u8{std.ascii.toUpper(f.name[0])} ++ f.name[1..] ++ "\x00";
+            const p = glXGetProcAddressARB(sym[0 .. sym.len - 1 :0]) orelse return error.NoContext;
+            @field(g, f.name) = @ptrCast(p);
+        }
+        return g;
+    }
+};
+
+const vert_src: [*:0]const u8 =
+    \\#version 120
+    \\attribute vec2 pos;
+    \\attribute vec2 uv;
+    \\varying vec2 v_uv;
+    \\void main() { v_uv = uv; gl_Position = vec4(pos, 0.0, 1.0); }
+;
+const frag_src: [*:0]const u8 =
+    \\#version 120
+    \\varying vec2 v_uv;
+    \\uniform sampler2D tex;
+    \\void main() { gl_FragColor = texture2D(tex, v_uv); }
+;
+
+/// Textured-quad renderer over a current GL context. Renders an uploaded
+/// RGBA image to the bound framebuffer (default = window; or an FBO).
+pub const QuadRenderer = struct {
+    gl: Gl,
+    program: GLuint,
+    vao: GLuint,
+    tex: GLuint,
+
+    pub fn init() Error!QuadRenderer {
+        const gl = try Gl.load();
+        const program = try buildProgram(gl);
+
+        var vao: GLuint = 0;
+        gl.genVertexArrays(1, @ptrCast(&vao));
+        gl.bindVertexArray(vao);
+        var vbo: GLuint = 0;
+        gl.genBuffers(1, @ptrCast(&vbo));
+        gl.bindBuffer(GL_ARRAY_BUFFER, vbo);
+        // Fullscreen triangle strip: pos.xy, uv.xy. v flips (texture is
+        // top-down RGBA; GL samples bottom-up).
+        const verts = [_]f32{
+            -1, -1, 0, 1,
+            1,  -1, 1, 1,
+            -1, 1,  0, 0,
+            1,  1,  1, 0,
+        };
+        gl.bufferData(GL_ARRAY_BUFFER, @sizeOf(@TypeOf(verts)), &verts, GL_STATIC_DRAW);
+        const pos_loc = 0;
+        const uv_loc = 1;
+        gl.vertexAttribPointer(pos_loc, 2, GL_FLOAT, GL_FALSE, 16, @ptrFromInt(0));
+        gl.enableVertexAttribArray(pos_loc);
+        gl.vertexAttribPointer(uv_loc, 2, GL_FLOAT, GL_FALSE, 16, @ptrFromInt(8));
+        gl.enableVertexAttribArray(uv_loc);
+
+        var tex: GLuint = 0;
+        gl.genTextures(1, @ptrCast(&tex));
+
+        return .{ .gl = gl, .program = program, .vao = vao, .tex = tex };
+    }
+
+    fn buildProgram(gl: Gl) Error!GLuint {
+        const vs = compile(gl, GL_VERTEX_SHADER, vert_src) orelse return error.NoContext;
+        const fs = compile(gl, GL_FRAGMENT_SHADER, frag_src) orelse return error.NoContext;
+        const prog = gl.createProgram();
+        gl.attachShader(prog, vs);
+        gl.attachShader(prog, fs);
+        // Bind attribute locations before link (GLSL 120 has no layout()).
+        // Locations 0/1 match pos/uv via the default ordering in Mesa;
+        // explicit binding would need glBindAttribLocation — fine here as
+        // we set pointers by the same indices.
+        gl.linkProgram(prog);
+        var ok: GLint = 0;
+        gl.getProgramiv(prog, GL_LINK_STATUS, &ok);
+        if (ok == 0) return error.NoContext;
+        return prog;
+    }
+
+    fn compile(gl: Gl, kind: GLenum, src: [*:0]const u8) ?GLuint {
+        const sh = gl.createShader(kind);
+        var srcs = [_][*:0]const u8{src};
+        gl.shaderSource(sh, 1, &srcs, null);
+        gl.compileShader(sh);
+        var ok: GLint = 0;
+        gl.getShaderiv(sh, GL_COMPILE_STATUS, &ok);
+        return if (ok == 0) null else sh;
+    }
+
+    /// Draw `rgba` (w×h, top-down) as a fullscreen quad into the current
+    /// framebuffer/viewport.
+    pub fn drawImage(self: *QuadRenderer, rgba: []const u8, w: u32, h: u32) void {
+        const gl = self.gl;
+        gl.useProgram(self.program);
+        gl.activeTexture(GL_TEXTURE0);
+        gl.bindTexture(GL_TEXTURE_2D, self.tex);
+        gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        gl.texImage2D(GL_TEXTURE_2D, 0, GL_RGBA, @intCast(w), @intCast(h), 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.ptr);
+        gl.uniform1i(gl.getUniformLocation(self.program, "tex"), 0);
+        gl.bindVertexArray(self.vao);
+        gl.drawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
+
+    /// Render `rgba` into an offscreen FBO and read it back as RGBA
+    /// (top-down). Headless — the path GPU golden tests use (#13).
+    pub fn renderOffscreen(self: *QuadRenderer, gpa: std.mem.Allocator, rgba: []const u8, w: u32, h: u32) ![]u8 {
+        const gl = self.gl;
+        var fbo: GLuint = 0;
+        gl.genFramebuffers(1, @ptrCast(&fbo));
+        gl.bindFramebuffer(GL_FRAMEBUFFER, fbo);
+        var target: GLuint = 0;
+        gl.genTextures(1, @ptrCast(&target));
+        gl.bindTexture(GL_TEXTURE_2D, target);
+        gl.texImage2D(GL_TEXTURE_2D, 0, GL_RGBA, @intCast(w), @intCast(h), 0, GL_RGBA, GL_UNSIGNED_BYTE, null);
+        gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        gl.framebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target, 0);
+        if (gl.checkFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) return error.NoContext;
+
+        glViewport(0, 0, w, h);
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        self.drawImage(rgba, w, h);
+        glFinish();
+
+        const out = try gpa.alloc(u8, @as(usize, w) * h * 4);
+        glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, out.ptr);
+        // GL readback is bottom-up; flip to top-down to match the input.
+        flipY(out, w, h);
+        return out;
+    }
+};
+
+fn flipY(px: []u8, w: u32, h: u32) void {
+    const row = @as(usize, w) * 4;
+    var y: usize = 0;
+    while (y < h / 2) : (y += 1) {
+        const top = px[y * row ..][0..row];
+        const bot = px[(h - 1 - y) * row ..][0..row];
+        for (top, bot) |*t, *b| std.mem.swap(u8, t, b);
+    }
+}
