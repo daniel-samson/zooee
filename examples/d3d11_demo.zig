@@ -91,6 +91,26 @@ pub fn main(init: std.process.Init) !void {
         approx(rpx[ri], 0) and approx(rpx[ri + 1], 0) and approx(rpx[ri + 2], 255);
     try out.print("D3D11 native rects: left=({d},{d},{d}) right=({d},{d},{d}) {s}\n", .{ rpx[li], rpx[li + 1], rpx[li + 2], rpx[ri], rpx[ri + 1], rpx[ri + 2], if (rect_ok) "PASS" else "FAIL" });
 
+    // Slice 4: SDF rounded rect + border. White rounded card, blue border, on
+    // black. center=white(bg), mid-left edge=blue(border), corner=cut(black),
+    // like gl_demo slice 4.
+    const sw: u32 = 40;
+    const sh: u32 = 32;
+    var d3d4 = try d3d11.D3dOffscreen.create(sw, sh);
+    defer d3d4.destroy();
+    d3d4.clear(0, 0, 0, 1); // black background
+    var rounded = try d3d11.D3dRoundedRectRenderer.init(d3d4.device, d3d4.context);
+    defer rounded.deinit();
+    try rounded.draw(d3d4.rtv, @floatFromInt(sw), @floatFromInt(sh), 4, 4, 32, 24, 6, 3, .{ 1, 1, 1, 1 }, .{ 0, 0.47, 1, 1 });
+    const spx = try d3d4.readPixels(gpa);
+    const ci = ((sh / 2) * sw + sw / 2) * 4; // center → bg white
+    const ei = ((sh / 2) * sw + 5) * 4; // mid-left edge → border blue
+    const corner = (5 * sw + 5) * 4; // near top-left corner → cut (black)
+    const round_ok = approx(spx[ci], 255) and approx(spx[ci + 1], 255) and approx(spx[ci + 2], 255) and
+        spx[ei] < 40 and spx[ei + 2] > 200 and
+        spx[corner] < 40 and spx[corner + 2] < 70;
+    try out.print("D3D11 rounded+border: center=({d},{d},{d}) edge=({d},{d},{d}) corner=({d},{d},{d}) {s}\n", .{ spx[ci], spx[ci + 1], spx[ci + 2], spx[ei], spx[ei + 1], spx[ei + 2], spx[corner], spx[corner + 1], spx[corner + 2], if (round_ok) "PASS" else "FAIL" });
+
     try out.flush();
-    if (!okc or !quad_ok or !rect_ok) std.process.exit(1);
+    if (!okc or !quad_ok or !rect_ok or !round_ok) std.process.exit(1);
 }
