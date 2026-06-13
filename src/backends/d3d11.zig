@@ -98,7 +98,9 @@ const IDevice = extern struct {
         CreateVertexShader: *const fn (*IDevice, *const anyopaque, usize, ?*anyopaque, *?*IVertexShader) callconv(WINAPI) HRESULT, // 12
         _pad5: [2]*const anyopaque, // CreateGeometryShader(13), …WithStreamOutput(14)
         CreatePixelShader: *const fn (*IDevice, *const anyopaque, usize, ?*anyopaque, *?*IPixelShader) callconv(WINAPI) HRESULT, // 15
-        _pad6: [6]*const anyopaque, // 16..21
+        _pad6: [4]*const anyopaque, // 16..19
+        CreateBlendState: *const fn (*IDevice, *const D3D11_BLEND_DESC, *?*IBlendState) callconv(WINAPI) HRESULT, // 20
+        _pad6b: [1]*const anyopaque, // CreateDepthStencilState(21)
         CreateRasterizerState: *const fn (*IDevice, *const D3D11_RASTERIZER_DESC, *?*IRasterizerState) callconv(WINAPI) HRESULT, // 22
         CreateSamplerState: *const fn (*IDevice, *const D3D11_SAMPLER_DESC, *?*ISampler) callconv(WINAPI) HRESULT, // 23
     };
@@ -124,7 +126,9 @@ const IContext = extern struct {
         IASetPrimitiveTopology: *const fn (*IContext, UINT) callconv(WINAPI) void, // 24
         _pad4: [8]*const anyopaque, // 25..32
         OMSetRenderTargets: *const fn (*IContext, UINT, *const ?*IRtv, ?*anyopaque) callconv(WINAPI) void, // 33
-        _pad5: [9]*const anyopaque, // 34..42
+        _pad5a: [1]*const anyopaque, // OMSetRenderTargetsAndUnorderedAccessViews(34)
+        OMSetBlendState: *const fn (*IContext, ?*IBlendState, ?*const [4]f32, UINT) callconv(WINAPI) void, // 35
+        _pad5: [7]*const anyopaque, // 36..42
         RSSetState: *const fn (*IContext, ?*IRasterizerState) callconv(WINAPI) void, // 43
         RSSetViewports: *const fn (*IContext, UINT, *const D3D11_VIEWPORT) callconv(WINAPI) void, // 44
         _pad6: [2]*const anyopaque, // 45,46
@@ -158,6 +162,29 @@ const IVertexShader = extern struct { vtbl: *const IUnknownVtbl };
 const IPixelShader = extern struct { vtbl: *const IUnknownVtbl };
 const IInputLayout = extern struct { vtbl: *const IUnknownVtbl };
 const IRasterizerState = extern struct { vtbl: *const IUnknownVtbl };
+const IBlendState = extern struct { vtbl: *const IUnknownVtbl };
+
+const D3D11_BLEND_SRC_ALPHA: UINT = 5;
+const D3D11_BLEND_INV_SRC_ALPHA: UINT = 6;
+const D3D11_BLEND_ONE: UINT = 2;
+const D3D11_BLEND_ZERO: UINT = 1;
+const D3D11_BLEND_OP_ADD: UINT = 1;
+
+const D3D11_RENDER_TARGET_BLEND_DESC = extern struct {
+    blend_enable: BOOL = 0,
+    src_blend: UINT = D3D11_BLEND_ONE,
+    dest_blend: UINT = D3D11_BLEND_ZERO,
+    blend_op: UINT = D3D11_BLEND_OP_ADD,
+    src_blend_alpha: UINT = D3D11_BLEND_ONE,
+    dest_blend_alpha: UINT = D3D11_BLEND_ZERO,
+    blend_op_alpha: UINT = D3D11_BLEND_OP_ADD,
+    render_target_write_mask: u8 = 0x0F,
+};
+const D3D11_BLEND_DESC = extern struct {
+    alpha_to_coverage_enable: BOOL = 0,
+    independent_blend_enable: BOOL = 0,
+    render_target: [8]D3D11_RENDER_TARGET_BLEND_DESC,
+};
 
 const D3D11_RASTERIZER_DESC = extern struct {
     fill_mode: UINT = D3D11_FILL_SOLID,
@@ -574,6 +601,162 @@ pub const D3dRectRenderer = struct {
         var cb_slot: ?*IBuffer = cb.?;
         ctx.vtbl.VSSetConstantBuffers(ctx, 0, 1, &cb_slot); // viewport (VS)
         ctx.vtbl.PSSetConstantBuffers(ctx, 0, 1, &cb_slot); // color (PS)
+        ctx.vtbl.PSSetShader(ctx, self.ps, null, 0);
+        ctx.vtbl.Draw(ctx, 4, 0);
+    }
+};
+
+// === Slice 4: SDF rounded rects + border ====================================
+// Ports gl.zig's RoundedRectRenderer: a signed-distance pixel shader gives
+// anti-aliased rounded corners + a uniform border in one draw, matching
+// raster's RectStyle (bg + corner_radius + border). The VS passes a per-
+// vertex `local` (rect-center-relative) coord; the PS evaluates sdRoundBox,
+// smoothsteps the edge (~1px AA) and the border, and mixes the two colors.
+
+const round_hlsl =
+    \\cbuffer CB : register(b0) {
+    \\  float2 viewport; float2 half_size;
+    \\  float radius; float border; float2 pad;
+    \\  float4 bg; float4 border_color;
+    \\};
+    \\struct VSIn  { float2 pos : POSITION; float2 local : TEXCOORD; };
+    \\struct VSOut { float4 pos : SV_POSITION; float2 local : TEXCOORD; };
+    \\VSOut VSMain(VSIn i) {
+    \\  VSOut o;
+    \\  float2 ndc = float2(i.pos.x / viewport.x * 2.0 - 1.0, 1.0 - i.pos.y / viewport.y * 2.0);
+    \\  o.pos = float4(ndc, 0, 1);
+    \\  o.local = i.local;
+    \\  return o;
+    \\}
+    \\float sdRoundBox(float2 p, float2 b, float r) {
+    \\  float2 q = abs(p) - b + r;
+    \\  return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
+    \\}
+    \\float4 PSMain(VSOut i) : SV_TARGET {
+    \\  float d = sdRoundBox(i.local, half_size, radius);
+    \\  float outer = smoothstep(1.0, -1.0, d);
+    \\  float fill = smoothstep(1.0, -1.0, d + border);
+    \\  float4 col = lerp(border_color, bg, fill);
+    \\  col.a *= outer;
+    \\  return col;
+    \\}
+;
+
+const RoundCB = extern struct {
+    vw: f32,
+    vh: f32,
+    hw: f32,
+    hh: f32,
+    radius: f32,
+    border: f32,
+    pad0: f32 = 0,
+    pad1: f32 = 0,
+    bg: [4]f32,
+    border_color: [4]f32,
+};
+
+pub const D3dRoundedRectRenderer = struct {
+    device: *IDevice,
+    context: *IContext,
+    vs: *IVertexShader,
+    ps: *IPixelShader,
+    layout: *IInputLayout,
+    raster: *IRasterizerState,
+    blend: *IBlendState,
+
+    pub fn init(device: *IDevice, context: *IContext) Error!D3dRoundedRectRenderer {
+        const d3d_compile = loadD3DCompile() orelse return error.ShaderFailed;
+        const vs_blob = compileSrc(d3d_compile, round_hlsl, "VSMain", "vs_4_0") orelse return error.ShaderFailed;
+        defer release(vs_blob);
+        const ps_blob = compileSrc(d3d_compile, round_hlsl, "PSMain", "ps_4_0") orelse return error.ShaderFailed;
+        defer release(ps_blob);
+        const vs_ptr = vs_blob.vtbl.GetBufferPointer(vs_blob).?;
+        const vs_len = vs_blob.vtbl.GetBufferSize(vs_blob);
+
+        var vs: ?*IVertexShader = null;
+        if (!ok(device.vtbl.CreateVertexShader(device, vs_ptr, vs_len, null, &vs)) or vs == null) return error.ShaderFailed;
+        var ps: ?*IPixelShader = null;
+        if (!ok(device.vtbl.CreatePixelShader(device, ps_blob.vtbl.GetBufferPointer(ps_blob).?, ps_blob.vtbl.GetBufferSize(ps_blob), null, &ps)) or ps == null) return error.ShaderFailed;
+        var elems = [_]D3D11_INPUT_ELEMENT_DESC{
+            .{ .semantic_name = "POSITION", .format = DXGI_FORMAT_R32G32_FLOAT, .aligned_byte_offset = 0 },
+            .{ .semantic_name = "TEXCOORD", .format = DXGI_FORMAT_R32G32_FLOAT, .aligned_byte_offset = 8 },
+        };
+        var layout: ?*IInputLayout = null;
+        if (!ok(device.vtbl.CreateInputLayout(device, &elems, 2, vs_ptr, vs_len, &layout)) or layout == null) return error.ShaderFailed;
+        var rdesc: D3D11_RASTERIZER_DESC = .{};
+        var raster: ?*IRasterizerState = null;
+        if (!ok(device.vtbl.CreateRasterizerState(device, &rdesc, &raster)) or raster == null) return error.ShaderFailed;
+
+        // Source-over alpha blend so the SDF coverage/cut composites against
+        // the background (D3D has no blending by default — GL had it on).
+        var bdesc: D3D11_BLEND_DESC = .{ .render_target = [_]D3D11_RENDER_TARGET_BLEND_DESC{.{}} ** 8 };
+        bdesc.render_target[0] = .{
+            .blend_enable = 1,
+            .src_blend = D3D11_BLEND_SRC_ALPHA,
+            .dest_blend = D3D11_BLEND_INV_SRC_ALPHA,
+            .blend_op = D3D11_BLEND_OP_ADD,
+            .src_blend_alpha = D3D11_BLEND_ONE,
+            .dest_blend_alpha = D3D11_BLEND_INV_SRC_ALPHA,
+            .blend_op_alpha = D3D11_BLEND_OP_ADD,
+        };
+        var blend: ?*IBlendState = null;
+        if (!ok(device.vtbl.CreateBlendState(device, &bdesc, &blend)) or blend == null) return error.ShaderFailed;
+
+        return .{ .device = device, .context = context, .vs = vs.?, .ps = ps.?, .layout = layout.?, .raster = raster.?, .blend = blend.? };
+    }
+
+    pub fn deinit(self: *D3dRoundedRectRenderer) void {
+        release(self.blend);
+        release(self.raster);
+        release(self.layout);
+        release(self.ps);
+        release(self.vs);
+    }
+
+    /// Rounded rect (pixel coords, y-down) with uniform radius + border.
+    /// bg/border_color are RGBA 0..1.
+    pub fn draw(self: *D3dRoundedRectRenderer, rtv: *IRtv, vw: f32, vh: f32, x: f32, y: f32, w: f32, h: f32, radius: f32, border: f32, bg: [4]f32, border_color: [4]f32) Error!void {
+        const dev = self.device;
+        const ctx = self.context;
+        const hw = w / 2;
+        const hh = h / 2;
+        const p = 1.0; // AA padding
+        // Interleaved pos.xy, local.xy for the 4 padded corners.
+        const verts = [_]f32{
+            x - p,     y - p,     -(hw + p), -(hh + p),
+            x + w + p, y - p,     hw + p,    -(hh + p),
+            x - p,     y + h + p, -(hw + p), hh + p,
+            x + w + p, y + h + p, hw + p,    hh + p,
+        };
+        var vb_data: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = &verts };
+        var vb_desc: D3D11_BUFFER_DESC = .{ .byte_width = @sizeOf(@TypeOf(verts)), .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_VERTEX_BUFFER };
+        var vb: ?*IBuffer = null;
+        if (!ok(dev.vtbl.CreateBuffer(dev, &vb_desc, &vb_data, &vb)) or vb == null) return error.ShaderFailed;
+        defer release(vb.?);
+
+        var cbv: RoundCB = .{ .vw = vw, .vh = vh, .hw = hw, .hh = hh, .radius = radius, .border = border, .bg = bg, .border_color = border_color };
+        var cb_data: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = &cbv };
+        var cb_desc: D3D11_BUFFER_DESC = .{ .byte_width = @sizeOf(RoundCB), .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_CONSTANT_BUFFER };
+        var cb: ?*IBuffer = null;
+        if (!ok(dev.vtbl.CreateBuffer(dev, &cb_desc, &cb_data, &cb)) or cb == null) return error.ShaderFailed;
+        defer release(cb.?);
+
+        var vp: D3D11_VIEWPORT = .{ .width = vw, .height = vh };
+        ctx.vtbl.RSSetViewports(ctx, 1, &vp);
+        ctx.vtbl.RSSetState(ctx, self.raster);
+        ctx.vtbl.OMSetBlendState(ctx, self.blend, null, 0xffffffff);
+        var rtv_slot: ?*IRtv = rtv;
+        ctx.vtbl.OMSetRenderTargets(ctx, 1, &rtv_slot, null);
+        ctx.vtbl.IASetInputLayout(ctx, self.layout);
+        var vb_slot: ?*IBuffer = vb.?;
+        const stride: UINT = 16;
+        const offset: UINT = 0;
+        ctx.vtbl.IASetVertexBuffers(ctx, 0, 1, &vb_slot, &stride, &offset);
+        ctx.vtbl.IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        ctx.vtbl.VSSetShader(ctx, self.vs, null, 0);
+        var cb_slot: ?*IBuffer = cb.?;
+        ctx.vtbl.VSSetConstantBuffers(ctx, 0, 1, &cb_slot); // viewport (VS)
+        ctx.vtbl.PSSetConstantBuffers(ctx, 0, 1, &cb_slot); // sdf params + colors (PS)
         ctx.vtbl.PSSetShader(ctx, self.ps, null, 0);
         ctx.vtbl.Draw(ctx, 4, 0);
     }
