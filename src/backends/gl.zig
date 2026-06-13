@@ -14,6 +14,9 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const geometry = @import("../geometry.zig");
+const style = @import("../style.zig");
+const backend_mod = @import("../backend.zig");
 
 comptime {
     if (builtin.os.tag != .linux) @compileError("gl.zig slice 1 is Linux/GLX-only");
@@ -937,3 +940,259 @@ pub fn writePpmRgba(writer: *std.Io.Writer, rgba: []const u8, w: u32, h: u32) st
     var i: usize = 0;
     while (i < rgba.len) : (i += 4) try writer.writeAll(rgba[i .. i + 3]);
 }
+
+// === Slice 6: the GL Backend vtable =========================================
+// Implements the draw-primitive Backend interface (backend.zig) on the
+// GL renderers, so layout.render() drives GL directly. Renders to an
+// offscreen FBO (headless golden tests); the windowed/runWindow path +
+// raster fallback is the next slice. drawRect routes solid→RectRenderer
+// (hard edges, matches raster) and bg/border/radius→RoundedRectRenderer;
+// clip → glScissor (intersection stack, GL y-flip); text → per-size glyph
+// atlas cache. Per-side borders / per-corner radii approximate to uniform
+// (a refinement); validated against raster goldens within tolerance.
+
+extern "GL" fn glScissor(c_int, c_int, c_int, c_int) void;
+extern "GL" fn glDisable(c_uint) void;
+const GL_SCISSOR_TEST: c_uint = 0x0C11;
+
+const Backend = backend_mod.Backend;
+
+const ScissorRect = struct { x0: i32, y0: i32, x1: i32, y1: i32 };
+
+pub const GlBackend = struct {
+    gpa: std.mem.Allocator,
+    win: GlWindow,
+    rect: RectRenderer,
+    rounded: RoundedRectRenderer,
+    fbo: GLuint = 0,
+    target: GLuint = 0,
+    width: u32 = 0,
+    height: u32 = 0,
+    clips: std.ArrayList(ScissorRect) = .empty,
+    font: ?ttf.Font = null,
+    glyphs: std.AutoHashMapUnmanaged(u32, GlyphRenderer) = .empty,
+
+    /// Headless GL backend over an offscreen FBO (for golden tests).
+    pub fn initOffscreen(gpa: std.mem.Allocator) !GlBackend {
+        const win = try GlWindow.create("zooee-gl-backend", 16, 16); // hidden context
+        return .{
+            .gpa = gpa,
+            .win = win,
+            .rect = try RectRenderer.init(),
+            .rounded = try RoundedRectRenderer.init(),
+        };
+    }
+
+    pub fn deinit(self: *GlBackend) void {
+        self.clips.deinit(self.gpa);
+        self.glyphs.deinit(self.gpa);
+        self.win.destroy();
+    }
+
+    pub fn setFont(self: *GlBackend, data: []const u8) !void {
+        self.font = try ttf.Font.parse(data);
+    }
+
+    pub fn interface(self: *GlBackend) Backend {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    /// Read the FBO back as top-down RGBA (caller owns).
+    pub fn readPixels(self: *GlBackend) ![]u8 {
+        const out = try self.gpa.alloc(u8, @as(usize, self.width) * self.height * 4);
+        glReadPixels(0, 0, self.width, self.height, GL_RGBA, GL_UNSIGNED_BYTE, out.ptr);
+        flipY(out, self.width, self.height);
+        return out;
+    }
+
+    const vtable: Backend.VTable = .{
+        .begin_frame = beginFrame,
+        .end_frame = endFrame,
+        .draw_rect = drawRect,
+        .draw_text = drawText,
+        .draw_image = drawImage,
+        .push_clip = pushClip,
+        .pop_clip = popClip,
+        .create_texture = createTexture,
+        .destroy_texture = destroyTexture,
+        .measure_text = measureText,
+        .snap = snap,
+    };
+
+    fn self_(ptr: *anyopaque) *GlBackend {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn beginFrame(ptr: *anyopaque, viewport: geometry.Size) Backend.Error!void {
+        const self = self_(ptr);
+        const w: u32 = @intFromFloat(@max(1, @round(viewport.width)));
+        const h: u32 = @intFromFloat(@max(1, @round(viewport.height)));
+        const gl = self.rect.gl;
+        if (self.fbo == 0 or w != self.width or h != self.height) {
+            if (self.fbo == 0) gl.genFramebuffers(1, @ptrCast(&self.fbo));
+            gl.bindFramebuffer(GL_FRAMEBUFFER, self.fbo);
+            if (self.target == 0) gl.genTextures(1, @ptrCast(&self.target));
+            gl.bindTexture(GL_TEXTURE_2D, self.target);
+            gl.texImage2D(GL_TEXTURE_2D, 0, GL_RGBA, @intCast(w), @intCast(h), 0, GL_RGBA, GL_UNSIGNED_BYTE, null);
+            gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            gl.framebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, self.target, 0);
+            self.width = w;
+            self.height = h;
+        }
+        gl.bindFramebuffer(GL_FRAMEBUFFER, self.fbo);
+        glViewport(0, 0, w, h);
+        glDisable(GL_SCISSOR_TEST);
+        glClearColor(1, 1, 1, 1); // match raster's white clear
+        glClear(GL_COLOR_BUFFER_BIT);
+        enableBlend();
+        self.clips.clearRetainingCapacity();
+    }
+
+    fn endFrame(ptr: *anyopaque) Backend.Error!void {
+        _ = self_(ptr);
+        glFinish();
+    }
+
+    fn col(c: style.Color) [4]f32 {
+        return .{
+            @as(f32, @floatFromInt(c.r)) / 255,
+            @as(f32, @floatFromInt(c.g)) / 255,
+            @as(f32, @floatFromInt(c.b)) / 255,
+            @as(f32, @floatFromInt(c.a)) / 255,
+        };
+    }
+
+    fn drawRect(ptr: *anyopaque, rect: geometry.Rect, rs: style.RectStyle) void {
+        const self = self_(ptr);
+        const w: f32 = @floatFromInt(self.width);
+        const h: f32 = @floatFromInt(self.height);
+        if (rs.corner_radius.isNone() and rs.border.isNone()) {
+            // Solid fill, hard edges (matches raster).
+            if (rs.background) |bg| {
+                const rr = &self.rect;
+                rr.gl.useProgram(rr.program);
+                rr.vw = w;
+                rr.vh = h;
+                rr.gl.uniform2f(rr.u_viewport, w, h);
+                rr.fillRect(rect.x, rect.y, rect.width, rect.height, col(bg));
+            }
+            return;
+        }
+        // bg + border + radius via the SDF renderer. Per-side/per-corner
+        // approximated to uniform (top side, top-left radius).
+        const rr = &self.rounded;
+        rr.gl.useProgram(rr.program);
+        rr.vw = w;
+        rr.vh = h;
+        rr.gl.uniform2f(rr.u_viewport, w, h);
+        const bg = if (rs.background) |b| col(b) else [4]f32{ 0, 0, 0, 0 };
+        rr.draw(rect.x, rect.y, rect.width, rect.height, rs.corner_radius.top_left, rs.border.top.width, bg, col(rs.border.top.color));
+    }
+
+    fn glyphFor(self: *GlBackend, size_px: u16) ?*GlyphRenderer {
+        if (self.font == null) return null;
+        if (self.glyphs.getPtr(size_px)) |g| return g;
+        const g = GlyphRenderer.init(self.gpa, &self.font.?, @floatFromInt(size_px)) catch return null;
+        self.glyphs.put(self.gpa, size_px, g) catch return null;
+        return self.glyphs.getPtr(size_px);
+    }
+
+    fn drawText(ptr: *anyopaque, origin: geometry.Point, text: []const u8, ts: style.TextStyle) void {
+        const self = self_(ptr);
+        const size_px: u16 = @intFromFloat(@max(4, ts.size));
+        const gr = self.glyphFor(size_px) orelse return;
+        gr.gl.useProgram(gr.program);
+        gr.vw = @floatFromInt(self.width);
+        gr.vh = @floatFromInt(self.height);
+        gr.gl.uniform2f(gr.u_viewport, gr.vw, gr.vh);
+        enableBlend();
+        const color = ts.color orelse style.Color.black;
+        gr.drawText(self.gpa, origin.x, origin.y, text, col(color)) catch {};
+    }
+
+    fn drawImage(ptr: *anyopaque, rect: geometry.Rect, texture: *Backend.Texture) void {
+        // GL drawImage (positioned textured quad) is a follow-up; the
+        // fixtures validated this slice have no images.
+        _ = ptr;
+        _ = rect;
+        _ = texture;
+    }
+
+    fn applyScissor(self: *GlBackend) void {
+        if (self.clips.items.len == 0) {
+            glDisable(GL_SCISSOR_TEST);
+            return;
+        }
+        var s: ScissorRect = .{ .x0 = 0, .y0 = 0, .x1 = @intCast(self.width), .y1 = @intCast(self.height) };
+        for (self.clips.items) |c| {
+            s.x0 = @max(s.x0, c.x0);
+            s.y0 = @max(s.y0, c.y0);
+            s.x1 = @min(s.x1, c.x1);
+            s.y1 = @min(s.y1, c.y1);
+        }
+        glEnable(GL_SCISSOR_TEST);
+        // GL scissor origin is bottom-left; our rects are top-left.
+        const gh: i32 = @intCast(self.height);
+        const sw = @max(0, s.x1 - s.x0);
+        const sh = @max(0, s.y1 - s.y0);
+        glScissor(s.x0, gh - s.y1, sw, sh);
+    }
+
+    fn pushClip(ptr: *anyopaque, rect: geometry.Rect) void {
+        const self = self_(ptr);
+        self.clips.append(self.gpa, .{
+            .x0 = @intFromFloat(@round(rect.x)),
+            .y0 = @intFromFloat(@round(rect.y)),
+            .x1 = @intFromFloat(@round(rect.x + rect.width)),
+            .y1 = @intFromFloat(@round(rect.y + rect.height)),
+        }) catch {};
+        self.applyScissor();
+    }
+
+    fn popClip(ptr: *anyopaque) void {
+        const self = self_(ptr);
+        if (self.clips.items.len > 0) _ = self.clips.pop();
+        self.applyScissor();
+    }
+
+    fn createTexture(ptr: *anyopaque, width: u32, height: u32, rgba: []const u8) Backend.Error!*Backend.Texture {
+        // Minimal: GL texture upload; drawImage wiring is a follow-up.
+        const self = self_(ptr);
+        const gl = self.rect.gl;
+        _ = rgba;
+        _ = width;
+        _ = height;
+        var tex: GLuint = 0;
+        gl.genTextures(1, @ptrCast(&tex));
+        return @ptrFromInt(tex);
+    }
+
+    fn destroyTexture(ptr: *anyopaque, texture: *Backend.Texture) void {
+        _ = ptr;
+        _ = texture;
+    }
+
+    fn measureText(ptr: *anyopaque, text: []const u8, ts: style.TextStyle) geometry.Size {
+        const self = self_(ptr);
+        if (self.font) |*font| {
+            const upem: f32 = @floatFromInt(font.units_per_em);
+            const fscale = ts.size / upem;
+            var width: f32 = 0;
+            var it = std.unicode.Utf8View.initUnchecked(text).iterator();
+            while (it.nextCodepoint()) |cp| {
+                width += @as(f32, @floatFromInt(font.hMetrics(font.glyphIndex(cp)).advance)) * fscale;
+            }
+            const line = @as(f32, @floatFromInt(font.ascent - font.descent + font.line_gap)) * fscale;
+            return .{ .width = width, .height = line };
+        }
+        const n = std.unicode.utf8CountCodepoints(text) catch text.len;
+        return .{ .width = @as(f32, @floatFromInt(n)) * 8, .height = 16 };
+    }
+
+    fn snap(ptr: *anyopaque, value: f32, axis: geometry.Axis) f32 {
+        _ = ptr;
+        _ = axis;
+        return @round(value);
+    }
+};
