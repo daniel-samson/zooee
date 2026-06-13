@@ -61,14 +61,17 @@ jobs:
           & "zig-out\bin\zooee-d3d11-check.exe"
           if ($LASTEXITCODE -ne 0) { throw "d3d11 self-check failed" }
 
-      - name: E2E window visual test
+      - name: E2E on-screen window render (GUI demo)
         run: |
-          $demo = Start-Process -FilePath "zig-out\bin\zooee-window-demo.exe" -PassThru
+          # Launch the real GUI demo, screenshot its on-screen window, and
+          # assert it actually painted content — a blank/solid window means
+          # the GPU present loop regressed (the "opens blank then closes" bug).
+          $demo = Start-Process -FilePath "zig-out\bin\zooee-gui-demo.exe" -PassThru
+          Start-Sleep -Seconds 2  # let the window open and render its first frame
           try {
-            powershell -NoProfile -ExecutionPolicy Bypass -File ci\capture-window.ps1 -TitlePattern "zooee window demo" -OutFile window.bmp
-            # Until a GPU backend paints the client area (#12), it must be solid white.
-            & "zig-out\bin\visual-diff.exe" --expect-solid 255,255,255 window.bmp
-            if ($LASTEXITCODE -ne 0) { throw "visual-diff failed" }
+            powershell -NoProfile -ExecutionPolicy Bypass -File ci\capture-window.ps1 -TitlePattern "*zooee*" -OutFile window.bmp
+            & "zig-out\bin\visual-diff.exe" --reject-solid 255,255,255 window.bmp
+            if ($LASTEXITCODE -ne 0) { throw "GUI window blank or capture failed" }
           } finally {
             Stop-Process -Id $demo.Id -Force -ErrorAction SilentlyContinue
           }
