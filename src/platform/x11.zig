@@ -172,6 +172,66 @@ extern "X11" fn XCreateGC(*Display, Drawable, c_ulong, ?*anyopaque) ?*GC;
 extern "X11" fn XCreateImage(*Display, ?*Visual, c_uint, c_int, c_int, [*]u8, c_uint, c_uint, c_int, c_int) ?*XImage;
 extern "X11" fn XPutImage(*Display, Drawable, *GC, *XImage, c_int, c_int, c_int, c_int, c_uint, c_uint) c_int;
 
+// --- GLX (optional GPU window; #11 GPU-present path) -------------------------
+// When a GL window is requested we create the X11 window over a GLX-chosen
+// visual and make a context current, so GlBackend can render straight to it.
+// If any step fails the caller falls back to the raster (XCreateSimpleWindow
+// + XPutImage) window. Mirrors the proven sequence in backends/gl.zig.
+const Colormap = XID;
+const GLXContext = ?*opaque {};
+
+const XVisualInfo = extern struct {
+    visual: ?*Visual,
+    visualid: c_ulong,
+    screen: c_int,
+    depth: c_int,
+    class: c_int,
+    red_mask: c_ulong,
+    green_mask: c_ulong,
+    blue_mask: c_ulong,
+    colormap_size: c_int,
+    bits_per_rgb: c_int,
+};
+
+const XSetWindowAttributes = extern struct {
+    background_pixmap: XID = 0,
+    background_pixel: c_ulong = 0,
+    border_pixmap: XID = 0,
+    border_pixel: c_ulong = 0,
+    bit_gravity: c_int = 0,
+    win_gravity: c_int = 0,
+    backing_store: c_int = 0,
+    backing_planes: c_ulong = 0,
+    backing_pixel: c_ulong = 0,
+    save_under: Bool = 0,
+    event_mask: c_long = 0,
+    do_not_propagate_mask: c_long = 0,
+    override_redirect: Bool = 0,
+    colormap: Colormap = 0,
+    cursor: XID = 0,
+};
+
+extern "X11" fn XCreateColormap(*Display, Window_, ?*Visual, c_int) Colormap;
+extern "X11" fn XCreateWindow(*Display, Window_, c_int, c_int, c_uint, c_uint, c_uint, c_int, c_uint, ?*Visual, c_ulong, *XSetWindowAttributes) Window_;
+extern "X11" fn XSync(*Display, Bool) c_int;
+extern "X11" fn XFree(?*anyopaque) c_int;
+extern "GL" fn glXChooseVisual(*Display, c_int, [*]c_int) ?*XVisualInfo;
+extern "GL" fn glXCreateContext(*Display, *XVisualInfo, GLXContext, Bool) GLXContext;
+extern "GL" fn glXDestroyContext(*Display, GLXContext) void;
+extern "GL" fn glXMakeCurrent(*Display, XID, GLXContext) Bool;
+extern "GL" fn glXSwapBuffers(*Display, XID) void;
+
+const GLX_RGBA: c_int = 4;
+const GLX_DOUBLEBUFFER: c_int = 5;
+const GLX_RED_SIZE: c_int = 8;
+const GLX_GREEN_SIZE: c_int = 9;
+const GLX_BLUE_SIZE: c_int = 10;
+const GLX_DEPTH_SIZE: c_int = 12;
+const CWColormap: c_ulong = 1 << 13;
+const CWEventMask: c_ulong = 1 << 11;
+const InputOutput: c_uint = 1;
+const AllocNone: c_int = 0;
+
 // Event masks / types / ZPixmap.
 const ExposureMask: c_long = 1 << 15;
 const KeyPressMask: c_long = 1 << 0;
@@ -225,12 +285,19 @@ pub const Window = struct {
     img_h: usize = 0,
     width: u32,
     height: u32,
+    /// Set when the window was created GL-capable and a context is current
+    /// (the GPU-present path). null = raster (XPutImage) window.
+    gl_ctx: GLXContext = null,
+    gl_vi: ?*XVisualInfo = null,
 
     pub const CreateOptions = struct {
         title: [:0]const u8 = "zooee",
         width: u32 = 800,
         height: u32 = 600,
         visible: bool = true,
+        /// Try to create a GLX-capable window + current context. Falls back
+        /// to a raster window if GLX is unavailable (old driver, no GLX).
+        gl: bool = false,
     };
 
     pub fn create(gpa: std.mem.Allocator, opts: CreateOptions) !*Window {
@@ -240,7 +307,37 @@ pub const Window = struct {
         const root = XRootWindow(display, screen);
         const white = XWhitePixel(display, screen);
 
-        const handle = XCreateSimpleWindow(display, root, 0, 0, opts.width, opts.height, 0, white, white);
+        // Try a GL-capable window first when requested; on any failure fall
+        // back to the simple (raster) window over the default visual.
+        var gl_ctx: GLXContext = null;
+        var gl_vi: ?*XVisualInfo = null;
+        var gl_visual: ?*Visual = null;
+        var gl_depth: c_uint = 0;
+        var handle: Window_ = 0;
+        if (opts.gl) {
+            var attrs = [_]c_int{ GLX_RGBA, GLX_DOUBLEBUFFER, GLX_RED_SIZE, 8, GLX_GREEN_SIZE, 8, GLX_BLUE_SIZE, 8, GLX_DEPTH_SIZE, 24, 0 };
+            if (glXChooseVisual(display, screen, &attrs)) |vi| {
+                const cmap = XCreateColormap(display, root, vi.visual, AllocNone);
+                var swa: XSetWindowAttributes = .{
+                    .colormap = cmap,
+                    .event_mask = ExposureMask | KeyPressMask | ButtonPressMask | ButtonReleaseMask | PointerMotionMask | StructureNotifyMask,
+                };
+                const gh = XCreateWindow(display, root, 0, 0, opts.width, opts.height, 0, vi.depth, InputOutput, vi.visual, CWColormap | CWEventMask, &swa);
+                const ctx = glXCreateContext(display, vi, null, 1);
+                if (ctx != null and glXMakeCurrent(display, gh, ctx) != 0) {
+                    handle = gh;
+                    gl_ctx = ctx;
+                    gl_vi = vi;
+                    gl_visual = vi.visual;
+                    gl_depth = @intCast(vi.depth);
+                } else {
+                    if (ctx != null) glXDestroyContext(display, ctx);
+                    _ = XDestroyWindow(display, gh);
+                    _ = XFree(vi);
+                }
+            }
+        }
+        if (handle == 0) handle = XCreateSimpleWindow(display, root, 0, 0, opts.width, opts.height, 0, white, white);
         _ = XStoreName(display, handle, opts.title.ptr); // legacy/fallback (Latin-1)
         // Modern UTF-8 title: _NET_WM_NAME = UTF8_STRING, so the WM shows
         // multibyte glyphs (e.g. the em-dash) correctly. PropModeReplace=0.
@@ -261,17 +358,30 @@ pub const Window = struct {
             .display = display,
             .handle = handle,
             .gc = gc,
-            .visual = XDefaultVisual(display, screen),
-            .depth = @intCast(XDefaultDepth(display, screen)),
+            .visual = if (gl_visual) |v| v else XDefaultVisual(display, screen),
+            .depth = if (gl_depth != 0) gl_depth else @intCast(XDefaultDepth(display, screen)),
             .wm_delete = wm_delete,
             .gpa = gpa,
             .width = opts.width,
             .height = opts.height,
+            .gl_ctx = gl_ctx,
+            .gl_vi = gl_vi,
         };
         return self;
     }
 
+    /// Present the GL default framebuffer (GPU-present path). No-op if this
+    /// is a raster window.
+    pub fn glSwap(self: *Window) void {
+        if (self.gl_ctx != null) glXSwapBuffers(self.display, self.handle);
+    }
+
     pub fn destroy(self: *Window) void {
+        if (self.gl_ctx) |ctx| {
+            _ = glXMakeCurrent(self.display, 0, null);
+            glXDestroyContext(self.display, ctx);
+            if (self.gl_vi) |vi| _ = XFree(vi);
+        }
         if (self.ximage) |img| {
             img.data = null; // our buffer; let Xlib free only the struct
             if (img.f.destroy_image) |di| _ = di(img);

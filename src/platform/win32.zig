@@ -142,6 +142,9 @@ pub const Window = struct {
         width: u32 = 800,
         height: u32 = 600,
         visible: bool = true,
+        /// Accepted for cross-platform parity; the Windows GPU path is
+        /// D3D11 (#12), not GL, so this is ignored here.
+        gl: bool = false,
     };
 
     pub fn create(gpa: std.mem.Allocator, opts: CreateOptions) !*Window {

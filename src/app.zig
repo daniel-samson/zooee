@@ -48,6 +48,13 @@ const session_mod = if (builtin.os.tag == .windows)
 else
     @import("platform/posix_tty.zig");
 
+/// GL backend (#11), Linux/GLX only — the GPU-present path for runWindow.
+/// Empty struct elsewhere so the file only compiles where it's valid.
+const gl_backend = if (builtin.os.tag == .linux)
+    @import("backends/gl.zig")
+else
+    struct {};
+
 /// Run a Model as a terminal app. Msg is the app's message type
 /// (any integer-backed enum or integer type).
 pub fn run(
@@ -139,8 +146,18 @@ pub fn runWindow(
     const gpa = init.arena.allocator();
     const io = init.io;
 
-    const window = try platform.Window.create(gpa, .{ .title = opts.title, .width = opts.width, .height = opts.height });
+    // GPU-present by default on platforms with a GL backend (#11 decision);
+    // ZOOEE_SOFTWARE forces the CPU raster path (deterministic CI, debugging).
+    const want_gl = builtin.os.tag == .linux and !init.environ_map.contains("ZOOEE_SOFTWARE");
+
+    const window = try platform.Window.create(gpa, .{ .title = opts.title, .width = opts.width, .height = opts.height, .gl = want_gl });
     defer window.destroy();
+
+    // GL window + current context succeeded → drive the GPU-present loop.
+    // Otherwise fall through to the CPU raster + OS blit path below.
+    if (comptime builtin.os.tag == .linux) {
+        if (window.gl_ctx != null) return runWindowGl(Model, Msg, model, window, init);
+    }
 
     var raster = raster_mod.RasterBackend.init(gpa);
     defer raster.deinit();
@@ -176,6 +193,61 @@ pub fn runWindow(
             layout_mod.render(b, result);
             try b.endFrame();
             platform.blit(window, raster.pixels, raster.width, raster.height);
+            dirty = false;
+        }
+
+        try io.sleep(.fromMilliseconds(16), .awake);
+    }
+}
+
+/// GPU-present loop (#11): the platform created a GL window and made its
+/// context current; GlBackend renders straight to the window's default
+/// framebuffer and the platform swaps buffers. Same view→layout→render and
+/// event dispatch as the raster loop — only the backend and present differ.
+/// Linux/GLX only; referenced solely behind a comptime os==.linux guard.
+fn runWindowGl(
+    comptime Model: type,
+    comptime Msg: type,
+    model: *Model,
+    window: anytype,
+    init: std.process.Init,
+) !void {
+    const platform = WindowPlatform;
+    const gpa = init.arena.allocator();
+    const io = init.io;
+
+    var glb = try gl_backend.GlBackend.initOnCurrent(gpa);
+    defer glb.deinit();
+    if (system_font.loadBytes(gpa, io)) |data| glb.setFont(data) catch {};
+    const b = glb.interface();
+
+    var frame_arena = std.heap.ArenaAllocator.init(gpa);
+    defer frame_arena.deinit();
+    var placements: []layout_mod.Placement = &.{};
+    var dirty = true;
+
+    loop: while (true) {
+        for (window.pumpEvents()) |ev| {
+            switch (dispatch(Model, Msg, model, ev, placements)) {
+                .none => {},
+                .redraw => dirty = true,
+                .quit => break :loop,
+            }
+        }
+
+        if (dirty) {
+            _ = frame_arena.reset(.retain_capacity);
+            const arena = frame_arena.allocator();
+            const px = platform.contentPixelSize(window);
+            const scale: f32 = @floatCast(px.scale);
+            const root = try model.view(arena, scale);
+            const viewport: geometry.Size = .{ .width = @floatFromInt(px.width), .height = @floatFromInt(px.height) };
+            const result = try layout_mod.layout(arena, b, root, viewport);
+            placements = result.placements;
+            try b.beginFrame(viewport);
+            layout_mod.render(b, result);
+            try b.endFrame();
+            window.glSwap();
             dirty = false;
         }
 

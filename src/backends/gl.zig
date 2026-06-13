@@ -1273,10 +1273,16 @@ const ScissorRect = struct { x0: i32, y0: i32, x1: i32, y1: i32 };
 
 pub const GlBackend = struct {
     gpa: std.mem.Allocator,
-    win: GlWindow,
+    /// Owned hidden window for the offscreen/golden path; null when the
+    /// platform owns the window + context (the runWindow GPU-present path).
+    win: ?GlWindow = null,
     rect: RectRenderer,
     exact: ExactRectRenderer,
     image: ImageRenderer,
+    /// When true, render straight to the window's default framebuffer
+    /// (fbo 0) instead of an offscreen FBO — the GPU-present path. The
+    /// pixel→NDC mapping is identical, so output is upright on screen.
+    default_fb: bool = false,
     fbo: GLuint = 0,
     target: GLuint = 0,
     width: u32 = 0,
@@ -1297,10 +1303,24 @@ pub const GlBackend = struct {
         };
     }
 
+    /// GL backend that renders to the already-current context's default
+    /// framebuffer — the platform (x11/macos) created the GL window and
+    /// made its context current. Used by runWindow for GPU presentation.
+    pub fn initOnCurrent(gpa: std.mem.Allocator) !GlBackend {
+        return .{
+            .gpa = gpa,
+            .win = null,
+            .rect = try RectRenderer.init(),
+            .exact = try ExactRectRenderer.init(),
+            .image = try ImageRenderer.init(),
+            .default_fb = true,
+        };
+    }
+
     pub fn deinit(self: *GlBackend) void {
         self.clips.deinit(self.gpa);
         self.glyphs.deinit(self.gpa);
-        self.win.destroy();
+        if (self.win) |*w| w.destroy();
     }
 
     pub fn setFont(self: *GlBackend, data: []const u8) !void {
@@ -1342,6 +1362,19 @@ pub const GlBackend = struct {
         const w: u32 = @intFromFloat(@max(1, @round(viewport.width)));
         const h: u32 = @intFromFloat(@max(1, @round(viewport.height)));
         const gl = self.rect.gl;
+        if (self.default_fb) {
+            // GPU-present path: draw straight to the window (fbo 0).
+            self.width = w;
+            self.height = h;
+            gl.bindFramebuffer(GL_FRAMEBUFFER, 0);
+            glViewport(0, 0, w, h);
+            glDisable(GL_SCISSOR_TEST);
+            glClearColor(1, 1, 1, 1); // match raster's white clear
+            glClear(GL_COLOR_BUFFER_BIT);
+            enableBlend();
+            self.clips.clearRetainingCapacity();
+            return;
+        }
         if (self.fbo == 0 or w != self.width or h != self.height) {
             if (self.fbo == 0) gl.genFramebuffers(1, @ptrCast(&self.fbo));
             gl.bindFramebuffer(GL_FRAMEBUFFER, self.fbo);
