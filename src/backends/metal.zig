@@ -12,6 +12,8 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const ttf = @import("../font/ttf.zig");
+const grast = @import("../font/raster.zig");
 
 comptime {
     if (builtin.os.tag != .macos) @compileError("metal.zig is macOS-only; gate imports on builtin.os.tag");
@@ -547,6 +549,217 @@ pub const MetalRoundedRectRenderer = struct {
         self.vw = @floatFromInt(w);
         self.vh = @floatFromInt(h);
         scene(self);
+        self.enc = null;
+        _ = msg(void, struct {}, enc, sel("endEncoding"), .{});
+        _ = msg(void, struct {}, cmdbuf, sel("commit"), .{});
+        _ = msg(void, struct {}, cmdbuf, sel("waitUntilCompleted"), .{});
+
+        const buf = try gpa.alloc(u8, @as(usize, w) * h * 4);
+        errdefer gpa.free(buf);
+        const region: MTLRegion = .{ .origin = .{ .x = 0, .y = 0, .z = 0 }, .size = .{ .width = w, .height = h, .depth = 1 } };
+        _ = msg(void, struct { [*]u8, u64, MTLRegion, u64 }, target, sel("getBytes:bytesPerRow:fromRegion:mipmapLevel:"), .{ buf.ptr, @as(u64, w) * 4, region, 0 });
+        return buf;
+    }
+};
+
+// --- slice 5: glyph atlas text ----------------------------------------------
+// Reuses the raster font rasterizer (font/raster.zig) for glyph alpha bitmaps,
+// shelf-packs ASCII 32..126 into one RGBA atlas texture (rgb=255, a=coverage),
+// and draws text as textured quads tinted by the color. Ported from the GL
+// GlyphRenderer (#11); same atlas approach.
+
+const atlas_w: u32 = 256;
+const first_cp: u21 = 32;
+const last_cp: u21 = 126;
+const glyph_count = last_cp - first_cp + 1;
+
+const GlyphEntry = struct {
+    u0: f32 = 0,
+    v0: f32 = 0,
+    u1: f32 = 0,
+    v1: f32 = 0,
+    w: f32 = 0,
+    h: f32 = 0,
+    x_off: f32 = 0,
+    y_off: f32 = 0,
+    advance: f32 = 0,
+};
+
+pub const MetalGlyphRenderer = struct {
+    ctx: MetalContext,
+    pipeline: id,
+    atlas_tex: id,
+    sampler: id,
+    entries: [glyph_count]GlyphEntry,
+    ascent: f32,
+    enc: id = null,
+    vw: f32 = 0,
+    vh: f32 = 0,
+
+    const shader =
+        \\#include <metal_stdlib>
+        \\using namespace metal;
+        \\struct VOut { float4 pos [[position]]; float2 uv; };
+        \\vertex VOut v_main(uint vid [[vertex_id]], const device float4* v [[buffer(0)]], constant float2& viewport [[buffer(1)]]) {
+        \\    float4 vert = v[vid];
+        \\    VOut o;
+        \\    o.pos = float4(vert.x / viewport.x * 2.0 - 1.0, 1.0 - vert.y / viewport.y * 2.0, 0, 1);
+        \\    o.uv = vert.zw;
+        \\    return o;
+        \\}
+        \\fragment float4 f_main(VOut in [[stage_in]], texture2d<float> atlas [[texture(0)]], sampler s [[sampler(0)]], constant float4& color [[buffer(0)]]) {
+        \\    float a = atlas.sample(s, in.uv).a;
+        \\    return float4(color.rgb, color.a * a);
+        \\}
+    ;
+
+    pub fn init(gpa: std.mem.Allocator, font: *const ttf.Font, size_px: f32) !MetalGlyphRenderer {
+        var ctx = try MetalContext.create();
+        errdefer ctx.destroy();
+        const pipeline = try compilePipeline(ctx.device, shader, MTLPixelFormatRGBA8Unorm, true);
+
+        // Rasterize glyphs, shelf-pack, build the atlas RGBA.
+        var entries: [glyph_count]GlyphEntry = undefined;
+        var bmps: [glyph_count]?grast.Bitmap = @splat(null);
+        defer for (&bmps) |*b| if (b.*) |*bb| bb.deinit(gpa);
+
+        const fscale = size_px / @as(f32, @floatFromInt(font.units_per_em));
+        var cx: u32 = 1;
+        var cy: u32 = 1;
+        var row_h: u32 = 0;
+        var atlas_h: u32 = 1;
+        for (0..glyph_count) |i| {
+            const cp: u21 = first_cp + @as(u21, @intCast(i));
+            const gi = font.glyphIndex(cp);
+            const adv = @as(f32, @floatFromInt(font.hMetrics(gi).advance)) * fscale;
+            entries[i] = .{ .advance = adv };
+            const outline = (font.outline(gpa, gi) catch null) orelse continue;
+            var o = outline;
+            defer o.deinit(gpa);
+            const bmp = grast.rasterize(gpa, font, o, size_px) catch continue;
+            bmps[i] = bmp;
+            if (cx + bmp.width + 1 > atlas_w) {
+                cx = 1;
+                cy += row_h + 1;
+                row_h = 0;
+            }
+            entries[i].u0 = @floatFromInt(cx);
+            entries[i].v0 = @floatFromInt(cy);
+            entries[i].w = @floatFromInt(bmp.width);
+            entries[i].h = @floatFromInt(bmp.height);
+            entries[i].x_off = @floatFromInt(bmp.x_off);
+            entries[i].y_off = @floatFromInt(bmp.y_off);
+            cx += @as(u32, @intCast(bmp.width)) + 1;
+            row_h = @max(row_h, @as(u32, @intCast(bmp.height)));
+            atlas_h = @max(atlas_h, cy + row_h + 1);
+        }
+
+        const atlas = try gpa.alloc(u8, atlas_w * atlas_h * 4);
+        defer gpa.free(atlas);
+        @memset(atlas, 0);
+        for (0..glyph_count) |i| {
+            const bmp = bmps[i] orelse continue;
+            const ax: usize = @intFromFloat(entries[i].u0);
+            const ay: usize = @intFromFloat(entries[i].v0);
+            var yy: usize = 0;
+            while (yy < bmp.height) : (yy += 1) {
+                var xx: usize = 0;
+                while (xx < bmp.width) : (xx += 1) {
+                    const a = bmp.alpha[yy * bmp.width + xx];
+                    const k = ((ay + yy) * atlas_w + (ax + xx)) * 4;
+                    atlas[k + 0] = 255;
+                    atlas[k + 1] = 255;
+                    atlas[k + 2] = 255;
+                    atlas[k + 3] = a;
+                }
+            }
+            const fw: f32 = @floatFromInt(atlas_w);
+            const fh: f32 = @floatFromInt(atlas_h);
+            entries[i].u1 = (entries[i].u0 + entries[i].w) / fw;
+            entries[i].v1 = (entries[i].v0 + entries[i].h) / fh;
+            entries[i].u0 /= fw;
+            entries[i].v0 /= fh;
+        }
+
+        const atlas_tex = try uploadTexture(ctx.device, atlas, atlas_w, atlas_h);
+        const sampler = makeSampler(ctx.device);
+        return .{
+            .ctx = ctx,
+            .pipeline = pipeline,
+            .atlas_tex = atlas_tex,
+            .sampler = sampler,
+            .entries = entries,
+            .ascent = @as(f32, @floatFromInt(font.ascent)) * fscale,
+        };
+    }
+
+    pub fn deinit(self: *MetalGlyphRenderer) void {
+        release(self.sampler);
+        release(self.atlas_tex);
+        release(self.pipeline);
+        self.ctx.destroy();
+    }
+
+    /// Draw `text` with top-left at (x,y) px (baseline = y + ascent), tinted
+    /// `color`. ASCII only for now.
+    pub fn drawText(self: *MetalGlyphRenderer, gpa: std.mem.Allocator, x: f32, y: f32, text: []const u8, color: [4]f32) !void {
+        var verts: std.ArrayList(f32) = .empty;
+        defer verts.deinit(gpa);
+        var pen = x;
+        const baseline = y + self.ascent;
+        for (text) |c| {
+            if (c < first_cp or c > last_cp) continue;
+            const e = self.entries[c - first_cp];
+            if (e.w > 0) {
+                const gx = @round(pen) + e.x_off;
+                const gy = @round(baseline) + e.y_off;
+                const x1 = gx + e.w;
+                const y1 = gy + e.h;
+                // 2 triangles: each vertex = pos.xy, uv.xy (a float4).
+                const quad = [_]f32{
+                    gx, gy, e.u0, e.v0,
+                    x1, gy, e.u1, e.v0,
+                    gx, y1, e.u0, e.v1,
+                    x1, gy, e.u1, e.v0,
+                    x1, y1, e.u1, e.v1,
+                    gx, y1, e.u0, e.v1,
+                };
+                try verts.appendSlice(gpa, &quad);
+            }
+            pen += e.advance;
+        }
+        if (verts.items.len == 0) return;
+        const vbuf = msg(id, struct { [*]const f32, u64, u64 }, self.ctx.device, sel("newBufferWithBytes:length:options:"), .{ verts.items.ptr, verts.items.len * 4, 0 });
+        defer release(vbuf);
+        var viewport = [2]f32{ self.vw, self.vh };
+        var c = color;
+        _ = msg(void, struct { id, u64, u64 }, self.enc, sel("setVertexBuffer:offset:atIndex:"), .{ vbuf, 0, 0 });
+        _ = msg(void, struct { *const [2]f32, u64, u64 }, self.enc, sel("setVertexBytes:length:atIndex:"), .{ &viewport, 8, 1 });
+        _ = msg(void, struct { id, u64 }, self.enc, sel("setFragmentTexture:atIndex:"), .{ self.atlas_tex, 0 });
+        _ = msg(void, struct { id, u64 }, self.enc, sel("setFragmentSamplerState:atIndex:"), .{ self.sampler, 0 });
+        _ = msg(void, struct { *const [4]f32, u64, u64 }, self.enc, sel("setFragmentBytes:length:atIndex:"), .{ &c, 16, 0 });
+        _ = msg(void, struct { u64, u64, u64 }, self.enc, sel("drawPrimitives:vertexStart:vertexCount:"), .{ 3, 0, @as(u64, verts.items.len / 4) });
+    }
+
+    /// Headless: render one text string into a w×h target and read back.
+    pub fn renderTextOffscreen(self: *MetalGlyphRenderer, gpa: std.mem.Allocator, w: u32, h: u32, clear: [4]f32, x: f32, y: f32, text: []const u8, color: [4]f32) ![]u8 {
+        const target = try makeTexture(self.ctx.device, w, h, MTLPixelFormatRGBA8Unorm);
+        defer release(target);
+
+        const rpd = msg(id, struct {}, cls("MTLRenderPassDescriptor"), sel("renderPassDescriptor"), .{});
+        const a0 = msg(id, struct { u64 }, msg(id, struct {}, rpd, sel("colorAttachments"), .{}), sel("objectAtIndexedSubscript:"), .{0});
+        _ = msg(void, struct { id }, a0, sel("setTexture:"), .{target});
+        _ = msg(void, struct { u64 }, a0, sel("setLoadAction:"), .{MTLLoadActionClear});
+        _ = msg(void, struct { u64 }, a0, sel("setStoreAction:"), .{MTLStoreActionStore});
+        _ = msg(void, struct { MTLClearColor }, a0, sel("setClearColor:"), .{.{ .red = clear[0], .green = clear[1], .blue = clear[2], .alpha = clear[3] }});
+
+        const cmdbuf = msg(id, struct {}, self.ctx.queue, sel("commandBuffer"), .{});
+        const enc = msg(id, struct { id }, cmdbuf, sel("renderCommandEncoderWithDescriptor:"), .{rpd});
+        _ = msg(void, struct { id }, enc, sel("setRenderPipelineState:"), .{self.pipeline});
+        self.enc = enc;
+        self.vw = @floatFromInt(w);
+        self.vh = @floatFromInt(h);
+        try self.drawText(gpa, x, y, text, color);
         self.enc = null;
         _ = msg(void, struct {}, enc, sel("endEncoding"), .{});
         _ = msg(void, struct {}, cmdbuf, sel("commit"), .{});
