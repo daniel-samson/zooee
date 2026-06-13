@@ -121,6 +121,7 @@ const GLX_RED_SIZE: c_int = 8;
 const GLX_GREEN_SIZE: c_int = 9;
 const GLX_BLUE_SIZE: c_int = 10;
 const GLX_DEPTH_SIZE: c_int = 12;
+const CWBorderPixel: c_ulong = 1 << 3;
 const CWColormap: c_ulong = 1 << 13;
 const CWEventMask: c_ulong = 1 << 11;
 const InputOutput: c_uint = 1;
@@ -147,8 +148,10 @@ pub const GlWindow = struct {
         const vi = glXChooseVisual(display, screen, &attrs) orelse return error.NoVisual;
 
         const cmap = XCreateColormap(display, root, vi.visual, AllocNone);
-        var swa: XSetWindowAttributes = .{ .colormap = cmap, .event_mask = ExposureMask };
-        const window = XCreateWindow(display, root, 0, 0, width, height, 0, vi.depth, InputOutput, vi.visual, CWColormap | CWEventMask, &swa);
+        // CWBorderPixel required for a non-default (GLX) visual, else
+        // BadMatch → Xlib exits the process. See x11.zig for the full note.
+        var swa: XSetWindowAttributes = .{ .border_pixel = 0, .colormap = cmap, .event_mask = ExposureMask };
+        const window = XCreateWindow(display, root, 0, 0, width, height, 0, vi.depth, InputOutput, vi.visual, CWBorderPixel | CWColormap | CWEventMask, &swa);
         _ = XStoreName(display, window, title.ptr);
         _ = XMapWindow(display, window);
 

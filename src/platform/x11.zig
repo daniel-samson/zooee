@@ -227,6 +227,7 @@ const GLX_RED_SIZE: c_int = 8;
 const GLX_GREEN_SIZE: c_int = 9;
 const GLX_BLUE_SIZE: c_int = 10;
 const GLX_DEPTH_SIZE: c_int = 12;
+const CWBorderPixel: c_ulong = 1 << 3;
 const CWColormap: c_ulong = 1 << 13;
 const CWEventMask: c_ulong = 1 << 11;
 const InputOutput: c_uint = 1;
@@ -318,11 +319,18 @@ pub const Window = struct {
             var attrs = [_]c_int{ GLX_RGBA, GLX_DOUBLEBUFFER, GLX_RED_SIZE, 8, GLX_GREEN_SIZE, 8, GLX_BLUE_SIZE, 8, GLX_DEPTH_SIZE, 24, 0 };
             if (glXChooseVisual(display, screen, &attrs)) |vi| {
                 const cmap = XCreateColormap(display, root, vi.visual, AllocNone);
+                // CWBorderPixel is REQUIRED when the window's visual/depth
+                // differs from the parent (the GLX visual vs the root): the
+                // default border_pixmap is CopyFromParent, invalid across
+                // depths → BadMatch, which Xlib's default handler turns into
+                // a process exit ("window opens blank, then closes"). Xvfb/
+                // llvmpipe is lax about it; real X servers are not.
                 var swa: XSetWindowAttributes = .{
+                    .border_pixel = 0,
                     .colormap = cmap,
                     .event_mask = ExposureMask | KeyPressMask | ButtonPressMask | ButtonReleaseMask | PointerMotionMask | StructureNotifyMask,
                 };
-                const gh = XCreateWindow(display, root, 0, 0, opts.width, opts.height, 0, vi.depth, InputOutput, vi.visual, CWColormap | CWEventMask, &swa);
+                const gh = XCreateWindow(display, root, 0, 0, opts.width, opts.height, 0, vi.depth, InputOutput, vi.visual, CWBorderPixel | CWColormap | CWEventMask, &swa);
                 const ctx = glXCreateContext(display, vi, null, 1);
                 if (ctx != null and glXMakeCurrent(display, gh, ctx) != 0) {
                     handle = gh;
