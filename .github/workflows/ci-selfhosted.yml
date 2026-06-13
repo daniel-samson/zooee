@@ -19,7 +19,7 @@ jobs:
           version: 0.16.0
       - name: Build and test
         run: |
-          zig build
+          zig build && zig build demos check
           zig build test
       - name: Environment smoke check
         run: |
@@ -41,7 +41,7 @@ jobs:
           version: 0.16.0
       - name: Build and test
         run: |
-          zig build
+          zig build; zig build demos check
           zig build test
       - name: Interactive session check
         run: |
@@ -55,6 +55,11 @@ jobs:
 
       - name: Visual golden test
         run: zig build visual-test
+
+      - name: D3D11 backend self-check (WARP)
+        run: |
+          & "zig-out\bin\zooee-d3d11-check.exe"
+          if ($LASTEXITCODE -ne 0) { throw "d3d11 self-check failed" }
 
       - name: E2E window visual test
         run: |

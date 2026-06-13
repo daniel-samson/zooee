@@ -153,13 +153,6 @@ pub fn main(init: std.process.Init) !void {
     };
     const glyph_ok = ink > 60 and right_ink == 0;
     try out.print("GL glyph text: ink_px={d} right_margin_ink={d} {s}\n", .{ ink, right_ink, if (glyph_ok) "PASS" else "FAIL" });
-    // Dump a PPM next to the binary for visual inspection.
-    {
-        var ppm: std.ArrayList(u8) = .empty;
-        var pw: std.Io.Writer.Allocating = .fromArrayList(gpa, &ppm);
-        try gl.writePpmRgba(&pw.writer, gpx, gw, gh);
-        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "gl_text.ppm", .data = pw.toArrayList().items });
-    }
     // Slice 6: GlBackend vtable. Render rect-based fixtures through the
     // GL Backend AND the raster backend; compare with tolerance (proves
     // the GL Backend matches the raster reference via the real interface).
@@ -208,16 +201,6 @@ pub fn main(init: std.process.Init) !void {
             const scene_ok = frac < if (is_text) @as(f32, 0.05) else 0.03;
             if (!scene_ok) backend_ok = false;
             try out.print("GL Backend vs raster [{s}]: bad_frac={d:.4} {s}\n", .{ name, frac, if (scene_ok) "PASS" else "FAIL" });
-        }
-        // Visual: GlBackend rendering the full layout_card (bg + rounded
-        // border + text) — the real UI through the GL Backend.
-        if (findScene("layout_card")) |scene| {
-            try zooee.fixtures.run(scene, glb.interface(), 8);
-            const card_px = try glb.readPixels();
-            var ppm: std.ArrayList(u8) = .empty;
-            var pw: std.Io.Writer.Allocating = .fromArrayList(gpa, &ppm);
-            try gl.writePpmRgba(&pw.writer, card_px, glb.width, glb.height);
-            try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "gl_card.ppm", .data = pw.toArrayList().items });
         }
     }
 

@@ -1,13 +1,18 @@
 //! Native GUI demo as an interactive Model (#4/#9/#10): the SAME
 //! model/view/update/onEvent contract the terminal demo uses, driven by
 //! zooee.app.runWindow — layout → raster → native blit, with mouse and
-//! keyboard wired through the shared event dispatch. macOS ships as
-//! Zooee Demo.app; Windows as a GUI-subsystem exe. Text uses the OS font.
+//! keyboard wired through the shared event dispatch. macOS ships as two
+//! .app bundles (Zooee GL / Zooee Raster); Windows as a GUI-subsystem exe.
+//! Text uses the OS font.
 
 const std = @import("std");
 const zooee = @import("zooee");
 const L = zooee.layout;
 const Color = zooee.Color;
+
+/// Renderer baked in at build time (build.zig supplies it): the GL/D3D app
+/// builds with this false (GPU-present), the raster app with it true.
+const force_software = @import("build_options").force_software;
 
 const items = [_][]const u8{ "Terminal backend", "Raster backend", "Native windowing", "Layout engine", "Text + input" };
 
@@ -116,5 +121,6 @@ const Demo = struct {
 
 pub fn main(init: std.process.Init) !void {
     var demo: Demo = .{};
-    try zooee.app.runWindow(Demo, Msg, &demo, init, .{ .title = "zooee - native window", .width = 520, .height = 320 });
+    const title: [:0]const u8 = if (force_software) "zooee - raster" else "zooee - GPU";
+    try zooee.app.runWindow(Demo, Msg, &demo, init, .{ .title = title, .width = 520, .height = 320, .force_software = force_software });
 }
