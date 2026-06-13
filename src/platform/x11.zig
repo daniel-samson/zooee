@@ -391,6 +391,15 @@ pub const Window = struct {
         _ = self;
     }
 
+    /// No-op: X11 has no modal resize loop — ConfigureNotify flows through
+    /// pumpEvents normally, so the loop redraws live without a callback.
+    /// (macOS needs the windowDidResize: delegate; keeps runWindowGl generic.)
+    pub fn setRedraw(self: *Window, ctx: ?*anyopaque, f: *const fn (?*anyopaque) void) void {
+        _ = self;
+        _ = ctx;
+        _ = f;
+    }
+
     pub fn destroy(self: *Window) void {
         if (self.gl_ctx) |ctx| {
             _ = glXMakeCurrent(self.display, 0, null);

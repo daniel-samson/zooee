@@ -260,6 +260,41 @@ fn runWindowGl(
     var placements: []layout_mod.Placement = &.{};
     var dirty = true;
 
+    // One-frame render+present, factored out so the platform can call it
+    // *during* a modal resize drag (macOS) — when our own loop is parked —
+    // and redraw live instead of stretching the stale frame. Best-effort:
+    // a redraw mid-drag swallows transient errors rather than crashing.
+    const Frame = struct {
+        model: *Model,
+        win: @TypeOf(window),
+        backend: @TypeOf(b),
+        arena: *std.heap.ArenaAllocator,
+        placements: *[]layout_mod.Placement,
+
+        fn draw(self: *@This()) void {
+            _ = self.arena.reset(.retain_capacity);
+            const a = self.arena.allocator();
+            self.win.glUpdate(); // resync the GL context with the window size (macOS resize)
+            const px = platform.contentPixelSize(self.win);
+            const scale: f32 = @floatCast(px.scale);
+            const root = self.model.view(a, scale) catch return;
+            const viewport: geometry.Size = .{ .width = @floatFromInt(px.width), .height = @floatFromInt(px.height) };
+            const result = layout_mod.layout(a, self.backend, root, viewport) catch return;
+            self.placements.* = result.placements;
+            self.backend.beginFrame(viewport) catch return;
+            layout_mod.render(self.backend, result);
+            self.backend.endFrame() catch return;
+            self.win.glSwap();
+        }
+    };
+    var frame: Frame = .{ .model = model, .win = window, .backend = b, .arena = &frame_arena, .placements = &placements };
+    window.setRedraw(&frame, struct {
+        fn call(ctx: ?*anyopaque) void {
+            const f: *Frame = @ptrCast(@alignCast(ctx));
+            f.draw();
+        }
+    }.call);
+
     loop: while (true) {
         for (window.pumpEvents()) |ev| {
             switch (dispatch(Model, Msg, model, ev, placements)) {
@@ -270,20 +305,21 @@ fn runWindowGl(
         }
 
         if (dirty) {
-            _ = frame_arena.reset(.retain_capacity);
-            const arena = frame_arena.allocator();
-            window.glUpdate(); // resync the GL context with the window size (macOS resize)
-            const px = platform.contentPixelSize(window);
-            const scale: f32 = @floatCast(px.scale);
-            const root = try model.view(arena, scale);
-            const viewport: geometry.Size = .{ .width = @floatFromInt(px.width), .height = @floatFromInt(px.height) };
-            const result = try layout_mod.layout(arena, b, root, viewport);
-            placements = result.placements;
-            try b.beginFrame(viewport);
-            layout_mod.render(b, result);
-            try b.endFrame();
-            // Capture before swap: read the back buffer we just drew.
+            // Headless capture hook: render once, read the GL back buffer,
+            // write a PPM, and exit (no present needed for the snapshot).
             if (capture_path) |path| {
+                _ = frame_arena.reset(.retain_capacity);
+                const arena = frame_arena.allocator();
+                window.glUpdate();
+                const px = platform.contentPixelSize(window);
+                const scale: f32 = @floatCast(px.scale);
+                const root = try model.view(arena, scale);
+                const viewport: geometry.Size = .{ .width = @floatFromInt(px.width), .height = @floatFromInt(px.height) };
+                const result = try layout_mod.layout(arena, b, root, viewport);
+                placements = result.placements;
+                try b.beginFrame(viewport);
+                layout_mod.render(b, result);
+                try b.endFrame();
                 const pixels = try glb.readPixels();
                 defer gpa.free(pixels);
                 var ppm: std.ArrayList(u8) = .empty;
@@ -292,7 +328,7 @@ fn runWindowGl(
                 try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = pw.toArrayList().items });
                 return;
             }
-            window.glSwap();
+            frame.draw();
             dirty = false;
         }
 
