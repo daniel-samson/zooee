@@ -17,6 +17,10 @@ Most UI frameworks lock you into one rendering target. Zooee separates *what* yo
 
 The same widget tree, layout, and event handling drive all of them. Build a dashboard once; ship it as a terminal tool, a native desktop app, and a web app — from one codebase, in binaries under 2MB.
 
+### Rendering: GPU-accelerated, with a software fallback
+
+Native windows render on the GPU by default (DirectX on Windows, OpenGL on Linux/macOS). When a usable GPU isn't available — missing or old drivers, remote-desktop sessions, virtual machines without 3D acceleration, or GPU device loss — zooee automatically falls back to a built-in CPU software renderer that draws into a framebuffer and blits it to the window. **It always renders something.** The software renderer is also the reference used to verify GPU output in tests, so both paths produce the same result. Today the framework ships the software path while the GPU backends are under construction.
+
 ## Goals
 
 - **Backend-agnostic core** — widgets, layout, and input handling are pure Zig with no rendering dependencies.
