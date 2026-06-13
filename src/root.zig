@@ -12,6 +12,7 @@ pub const backends = struct {
     pub const record = @import("backends/record.zig");
     pub const terminal = @import("backends/terminal.zig");
     pub const raster = @import("backends/raster.zig");
+    pub const gl = if (@import("builtin").os.tag == .linux) @import("backends/gl.zig") else struct {};
 };
 
 pub const Backend = backend.Backend;

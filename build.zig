@@ -50,6 +50,7 @@ pub fn build(b: *std.Build) void {
         // dynamically linked — no bytes in our binary.
         mod.link_libc = true;
         mod.linkSystemLibrary("X11", .{});
+        mod.linkSystemLibrary("GL", .{}); // GLX/OpenGL — the platform GPU API
     }
     // Test font for the font pipeline (#10): OFL Poppins, tests/goldens only.
     mod.addAnonymousImport("poppins", .{
@@ -233,6 +234,21 @@ pub fn build(b: *std.Build) void {
         const run_gui = b.step("run-gui", "Run the native GUI demo");
         const run_gui_cmd = b.addRunArtifact(gui_demo);
         run_gui.dependOn(&run_gui_cmd.step);
+    }
+
+    // GL context bring-up demo (#11 slice 1), Linux only — self-checking
+    // GLX clear+readback, runs headless under Xvfb/llvmpipe.
+    if (target.result.os.tag == .linux) {
+        const gl_demo = b.addExecutable(.{
+            .name = "zooee-gl-demo",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("examples/gl_demo.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "zooee", .module = mod }},
+            }),
+        });
+        b.installArtifact(gl_demo);
     }
 
     // Native window demo, Windows targets only — the e2e visual subject.
