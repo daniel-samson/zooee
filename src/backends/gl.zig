@@ -676,6 +676,105 @@ pub const LayerCompositor = struct {
     }
 };
 
+// Round-clip mask shaders (#117). The vertex carries a [0,1] corner; v_uv
+// samples the layer (bottom-up, no flip — matches LayerCompositor) while v_px
+// is the TOP-DOWN pixel position so the insideRounded test matches raster.
+const rclip_vert: [*:0]const u8 =
+    \\#version 120
+    \\attribute vec2 corner;
+    \\uniform vec2 viewport;
+    \\varying vec2 v_uv;
+    \\varying vec2 v_px;
+    \\void main() {
+    \\  v_uv = corner;
+    \\  v_px = vec2(corner.x * viewport.x, (1.0 - corner.y) * viewport.y);
+    \\  gl_Position = vec4(corner.x * 2.0 - 1.0, corner.y * 2.0 - 1.0, 0.0, 1.0);
+    \\}
+;
+const rclip_frag: [*:0]const u8 =
+    \\#version 120
+    \\uniform sampler2D tex;
+    \\uniform vec4 rect;   // x,y,w,h
+    \\uniform vec4 radius; // tl,tr,br,bl
+    \\varying vec2 v_uv;
+    \\varying vec2 v_px;
+    \\void main() {
+    \\  float fx = v_px.x, fy = v_px.y;
+    \\  float rx = rect.x, ry = rect.y, rw = rect.z, rh = rect.w;
+    \\  if (fx < rx || fx >= rx + rw || fy < ry || fy >= ry + rh) discard;
+    \\  float maxr = min(rw, rh) * 0.5;
+    \\  float cxm = rx + rw * 0.5, cym = ry + rh * 0.5;
+    \\  { float r = min(radius.x, maxr); if (r > 0.0) { float cx = rx + radius.x, cy = ry + radius.x; bool ix = (cx <= cxm) ? (fx < cx) : (fx > cx); bool iy = (cy <= cym) ? (fy < cy) : (fy > cy); if (ix && iy) { float dx = fx - cx, dy = fy - cy; if (dx*dx + dy*dy > r*r) discard; } } }
+    \\  { float r = min(radius.y, maxr); if (r > 0.0) { float cx = rx + rw - radius.y, cy = ry + radius.y; bool ix = (cx <= cxm) ? (fx < cx) : (fx > cx); bool iy = (cy <= cym) ? (fy < cy) : (fy > cy); if (ix && iy) { float dx = fx - cx, dy = fy - cy; if (dx*dx + dy*dy > r*r) discard; } } }
+    \\  { float r = min(radius.z, maxr); if (r > 0.0) { float cx = rx + rw - radius.z, cy = ry + rh - radius.z; bool ix = (cx <= cxm) ? (fx < cx) : (fx > cx); bool iy = (cy <= cym) ? (fy < cy) : (fy > cy); if (ix && iy) { float dx = fx - cx, dy = fy - cy; if (dx*dx + dy*dy > r*r) discard; } } }
+    \\  { float r = min(radius.w, maxr); if (r > 0.0) { float cx = rx + radius.w, cy = ry + rh - radius.w; bool ix = (cx <= cxm) ? (fx < cx) : (fx > cx); bool iy = (cy <= cym) ? (fy < cy) : (fy > cy); if (ix && iy) { float dx = fx - cx, dy = fy - cy; if (dx*dx + dy*dy > r*r) discard; } } }
+    \\  gl_FragColor = texture2D(tex, v_uv);
+    \\}
+;
+
+/// Composites a clip layer over its parent, masked to a rounded rect (#117):
+/// the fragment discards pixels outside insideRounded at the top-down pixel
+/// center, matching raster's hard-edged per-pixel rounded clip.
+pub const RoundClipCompositor = struct {
+    gl: Gl,
+    program: GLuint,
+    vao: GLuint,
+    vbo: GLuint,
+    corner_loc: GLuint,
+    u_viewport: GLint,
+    u_tex: GLint,
+    u_rect: GLint,
+    u_radius: GLint,
+    vw: f32 = 0,
+    vh: f32 = 0,
+
+    pub fn init() Error!RoundClipCompositor {
+        const gl = try Gl.load();
+        const vs = QuadRenderer.compile(gl, GL_VERTEX_SHADER, rclip_vert) orelse return error.NoContext;
+        const fs = QuadRenderer.compile(gl, GL_FRAGMENT_SHADER, rclip_frag) orelse return error.NoContext;
+        const prog = gl.createProgram();
+        gl.attachShader(prog, vs);
+        gl.attachShader(prog, fs);
+        gl.linkProgram(prog);
+        var ok: GLint = 0;
+        gl.getProgramiv(prog, GL_LINK_STATUS, &ok);
+        if (ok == 0) return error.NoContext;
+        var vao: GLuint = 0;
+        gl.genVertexArrays(1, @ptrCast(&vao));
+        var vbo: GLuint = 0;
+        gl.genBuffers(1, @ptrCast(&vbo));
+        return .{
+            .gl = gl,
+            .program = prog,
+            .vao = vao,
+            .vbo = vbo,
+            .corner_loc = @intCast(gl.getAttribLocation(prog, "corner")),
+            .u_viewport = gl.getUniformLocation(prog, "viewport"),
+            .u_tex = gl.getUniformLocation(prog, "tex"),
+            .u_rect = gl.getUniformLocation(prog, "rect"),
+            .u_radius = gl.getUniformLocation(prog, "radius"),
+        };
+    }
+
+    pub fn composite(self: *RoundClipCompositor, tex: GLuint, rect: geometry.Rect, radius: style.CornerRadius) void {
+        const gl = self.gl;
+        gl.useProgram(self.program);
+        gl.uniform2f(self.u_viewport, self.vw, self.vh);
+        gl.uniform4f(self.u_rect, rect.x, rect.y, rect.width, rect.height);
+        gl.uniform4f(self.u_radius, radius.top_left, radius.top_right, radius.bottom_right, radius.bottom_left);
+        gl.activeTexture(GL_TEXTURE0);
+        gl.bindTexture(GL_TEXTURE_2D, tex);
+        gl.uniform1i(self.u_tex, 0);
+        const verts = [_]f32{ 0, 0, 1, 0, 0, 1, 1, 1 };
+        gl.bindVertexArray(self.vao);
+        gl.bindBuffer(GL_ARRAY_BUFFER, self.vbo);
+        gl.bufferData(GL_ARRAY_BUFFER, @sizeOf(@TypeOf(verts)), &verts, GL_STATIC_DRAW);
+        gl.vertexAttribPointer(self.corner_loc, 2, GL_FLOAT, GL_FALSE, 0, @ptrFromInt(0));
+        gl.enableVertexAttribArray(self.corner_loc);
+        gl.drawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
+};
+
 /// Make a GlWindow context current and return it, for offscreen use.
 /// Renders `scene` into an FBO of size w×h and reads it back (top-down).
 pub fn renderRectsOffscreen(
@@ -1400,6 +1499,13 @@ const ScissorRect = struct { x0: i32, y0: i32, x1: i32, y1: i32 };
 /// the framebuffer it redirected from (composited back into on popLayer).
 const LayerState = struct { fbo: GLuint, tex: GLuint, parent_fbo: GLuint, opacity: f32 };
 
+/// A pushed rounded clip (#117): like a layer, composited back masked to the
+/// rounded rect on popClip.
+const RoundState = struct { fbo: GLuint, tex: GLuint, parent_fbo: GLuint, rect: geometry.Rect, radius: style.CornerRadius };
+
+/// Which stack a popClip unwinds: a plain scissor entry or a rounded-clip layer.
+const ClipOp = enum { scissor, rounded };
+
 pub const GlBackend = struct {
     gpa: std.mem.Allocator,
     /// Owned hidden window for the offscreen/golden path; null when the
@@ -1410,9 +1516,14 @@ pub const GlBackend = struct {
     image: ImageRenderer,
     grad: GradientRenderer,
     comp: LayerCompositor,
+    rclip: RoundClipCompositor,
     /// Active group-opacity layers (#121): each holds its offscreen FBO +
     /// texture and the framebuffer to composite back into on popLayer.
     layers: std.ArrayList(LayerState) = .empty,
+    /// Active rounded clips (#117) and a per-clip-op marker so popClip unwinds
+    /// the right stack.
+    rounds: std.ArrayList(RoundState) = .empty,
+    clip_ops: std.ArrayList(ClipOp) = .empty,
     /// The framebuffer currently bound for draws (frame FBO, 0, or a layer).
     bound_fbo: GLuint = 0,
     /// When true, render straight to the window's default framebuffer
@@ -1438,6 +1549,7 @@ pub const GlBackend = struct {
             .image = try ImageRenderer.init(),
             .grad = try GradientRenderer.init(),
             .comp = try LayerCompositor.init(),
+            .rclip = try RoundClipCompositor.init(),
         };
     }
 
@@ -1453,6 +1565,7 @@ pub const GlBackend = struct {
             .image = try ImageRenderer.init(),
             .grad = try GradientRenderer.init(),
             .comp = try LayerCompositor.init(),
+            .rclip = try RoundClipCompositor.init(),
             .default_fb = true,
         };
     }
@@ -1463,6 +1576,12 @@ pub const GlBackend = struct {
             self.comp.gl.deleteTextures(1, @ptrCast(&l.tex));
         }
         self.layers.deinit(self.gpa);
+        for (self.rounds.items) |r| {
+            self.comp.gl.deleteFramebuffers(1, @ptrCast(&r.fbo));
+            self.comp.gl.deleteTextures(1, @ptrCast(&r.tex));
+        }
+        self.rounds.deinit(self.gpa);
+        self.clip_ops.deinit(self.gpa);
         self.clips.deinit(self.gpa);
         var it = self.glyphs.valueIterator();
         while (it.next()) |g| g.deinit();
@@ -1494,6 +1613,7 @@ pub const GlBackend = struct {
         .draw_image = drawImage,
         .push_clip = pushClip,
         .pop_clip = popClip,
+        .push_clip_rounded = pushClipRounded,
         .push_layer = pushLayer,
         .pop_layer = popLayer,
         .create_texture = createTexture,
@@ -1523,6 +1643,7 @@ pub const GlBackend = struct {
             glClear(GL_COLOR_BUFFER_BIT);
             enableBlend();
             self.clips.clearRetainingCapacity();
+            self.clip_ops.clearRetainingCapacity();
             return;
         }
         if (self.fbo == 0 or w != self.width or h != self.height) {
@@ -1545,11 +1666,13 @@ pub const GlBackend = struct {
         glClear(GL_COLOR_BUFFER_BIT);
         enableBlend();
         self.clips.clearRetainingCapacity();
+        self.clip_ops.clearRetainingCapacity();
     }
 
     fn endFrame(ptr: *anyopaque) Backend.Error!void {
         const self = self_(ptr);
         std.debug.assert(self.layers.items.len == 0); // balanced push/popLayer
+        std.debug.assert(self.rounds.items.len == 0); // balanced rounded clips
         glFinish();
     }
 
@@ -1646,13 +1769,63 @@ pub const GlBackend = struct {
             .x1 = @intFromFloat(@round(rect.x + rect.width)),
             .y1 = @intFromFloat(@round(rect.y + rect.height)),
         }) catch {};
+        self.clip_ops.append(self.gpa, .scissor) catch {};
+        self.applyScissor();
+    }
+
+    /// Rounded clip (#117): redirect draws into an offscreen FBO (like
+    /// pushLayer); popClip composites it back masked to the rounded rect.
+    fn pushClipRounded(ptr: *anyopaque, rect: geometry.Rect, radius: style.CornerRadius) void {
+        const self = self_(ptr);
+        if (radius.isNone()) return pushClip(ptr, rect);
+        const gl = self.comp.gl;
+        var fbo: GLuint = 0;
+        var tex: GLuint = 0;
+        gl.genFramebuffers(1, @ptrCast(&fbo));
+        gl.genTextures(1, @ptrCast(&tex));
+        gl.bindTexture(GL_TEXTURE_2D, tex);
+        gl.texImage2D(GL_TEXTURE_2D, 0, GL_RGBA, @intCast(self.width), @intCast(self.height), 0, GL_RGBA, GL_UNSIGNED_BYTE, null);
+        gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        gl.bindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl.framebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+        self.rounds.append(self.gpa, .{ .fbo = fbo, .tex = tex, .parent_fbo = self.bound_fbo, .rect = rect, .radius = radius }) catch {
+            gl.deleteFramebuffers(1, @ptrCast(&fbo));
+            gl.deleteTextures(1, @ptrCast(&tex));
+            return;
+        };
+        self.clip_ops.append(self.gpa, .rounded) catch {};
+        self.bound_fbo = fbo;
+        glViewport(0, 0, self.width, self.height);
+        glClearColor(0, 0, 0, 0); // transparent layer
+        glClear(GL_COLOR_BUFFER_BIT);
+        enableBlend();
         self.applyScissor();
     }
 
     fn popClip(ptr: *anyopaque) void {
         const self = self_(ptr);
-        if (self.clips.items.len > 0) _ = self.clips.pop();
-        self.applyScissor();
+        const op = self.clip_ops.pop() orelse .scissor;
+        switch (op) {
+            .scissor => {
+                if (self.clips.items.len > 0) _ = self.clips.pop();
+                self.applyScissor();
+            },
+            .rounded => {
+                const gl = self.comp.gl;
+                const r = self.rounds.pop() orelse return;
+                gl.bindFramebuffer(GL_FRAMEBUFFER, r.parent_fbo);
+                self.bound_fbo = r.parent_fbo;
+                glViewport(0, 0, self.width, self.height);
+                self.applyScissor();
+                enableBlend();
+                self.rclip.vw = @floatFromInt(self.width);
+                self.rclip.vh = @floatFromInt(self.height);
+                self.rclip.composite(r.tex, r.rect, r.radius);
+                gl.deleteFramebuffers(1, @ptrCast(&r.fbo));
+                gl.deleteTextures(1, @ptrCast(&r.tex));
+            },
+        }
     }
 
     /// Redirect draws into a fresh transparent offscreen FBO (#121). The clip
