@@ -384,6 +384,13 @@ pub const Window = struct {
         if (self.gl_ctx != null) glXSwapBuffers(self.display, self.handle);
     }
 
+    /// No-op: GLX tracks the X drawable's size automatically on resize.
+    /// (macOS needs `[NSOpenGLContext update]`; this keeps runWindowGl
+    /// platform-agnostic.)
+    pub fn glUpdate(self: *Window) void {
+        _ = self;
+    }
+
     pub fn destroy(self: *Window) void {
         if (self.gl_ctx) |ctx| {
             _ = glXMakeCurrent(self.display, 0, null);

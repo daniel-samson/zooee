@@ -42,7 +42,7 @@ fn ok(hr: HRESULT) bool {
     return hr >= 0;
 }
 
-pub const Error = error{ NoDevice, NoBackBuffer, NoRtv, ReadbackFailed, ShaderFailed };
+pub const Error = error{ NoDevice, NoBackBuffer, NoRtv, ReadbackFailed, ShaderFailed, ResizeFailed };
 
 // --- DXGI / D3D11 structs ---------------------------------------------------
 
@@ -339,6 +339,8 @@ const ISwapChain = extern struct {
         _pad0: [8]*const anyopaque, // IUnknown(3)+IDXGIObject(4)+GetDevice(1)
         Present: *const fn (*ISwapChain, UINT, UINT) callconv(WINAPI) HRESULT, // 8
         GetBuffer: *const fn (*ISwapChain, UINT, *const GUID, *?*ITexture2D) callconv(WINAPI) HRESULT, // 9
+        _pad1: [3]*const anyopaque, // SetFullscreenState(10)+GetFullscreenState(11)+GetDesc(12)
+        ResizeBuffers: *const fn (*ISwapChain, UINT, UINT, UINT, UINT, UINT) callconv(WINAPI) HRESULT, // 13
     };
 };
 
@@ -402,6 +404,21 @@ pub const D3dSwapchain = struct {
 
     pub fn present(self: *D3dSwapchain) void {
         _ = self.swapchain.vtbl.Present(self.swapchain, 0, 0);
+    }
+
+    /// Resize the swapchain's back buffer to match the window's client area.
+    /// Required on WM_SIZE: otherwise CopyResource into a stale-size back
+    /// buffer is a no-op and Present stretches the old frame. The caller must
+    /// hold no outstanding back-buffer reference (presentTo releases its own
+    /// each frame, so this is safe between frames). No-op if unchanged.
+    pub fn resize(self: *D3dSwapchain, width: u32, height: u32) Error!void {
+        if (width == 0 or height == 0) return; // minimized — keep current
+        if (width == self.width and height == self.height) return;
+        // 0 buffer count / DXGI_FORMAT_UNKNOWN(0) = preserve existing.
+        if (!ok(self.swapchain.vtbl.ResizeBuffers(self.swapchain, 0, width, height, 0, 0)))
+            return error.ResizeFailed;
+        self.width = width;
+        self.height = height;
     }
 };
 
