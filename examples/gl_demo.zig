@@ -144,12 +144,17 @@ pub fn main(init: std.process.Init) !void {
             std.process.exit(1);
         };
         defer glb.deinit();
-        for ([_][]const u8{ "overlap", "nested_clip" }) |name| {
+        try glb.setFont(zooee.test_font_ttf);
+        // hello_text proves GL TEXT through the Backend matches raster
+        // (both use the same Poppins rasterizer → near-exact). overlap/
+        // nested_clip are pixel-exact (hard rects + scissor).
+        for ([_][]const u8{ "overlap", "nested_clip", "hello_text" }) |name| {
             const scene = findScene(name) orelse continue;
             try zooee.fixtures.run(scene, glb.interface(), 8);
             const glpx = try glb.readPixels();
             var ras = zooee.backends.raster.RasterBackend.init(gpa);
             defer ras.deinit();
+            try ras.setFont(zooee.test_font_ttf);
             try zooee.fixtures.run(scene, ras.interface(), 8);
             // Compare (both top-down RGBA, same dims).
             var bad: usize = 0;
@@ -165,9 +170,20 @@ pub fn main(init: std.process.Init) !void {
                 if (md > 32) bad += 1;
             }
             const frac = @as(f32, @floatFromInt(bad)) / @as(f32, @floatFromInt(n));
-            const scene_ok = frac < 0.03;
+            // Text edges can sample 1px differently; allow a small frac.
+            const scene_ok = frac < if (std.mem.eql(u8, name, "hello_text")) @as(f32, 0.05) else 0.03;
             if (!scene_ok) backend_ok = false;
             try out.print("GL Backend vs raster [{s}]: bad_frac={d:.4} {s}\n", .{ name, frac, if (scene_ok) "PASS" else "FAIL" });
+        }
+        // Visual: GlBackend rendering the full layout_card (bg + rounded
+        // border + text) — the real UI through the GL Backend.
+        if (findScene("layout_card")) |scene| {
+            try zooee.fixtures.run(scene, glb.interface(), 8);
+            const card_px = try glb.readPixels();
+            var ppm: std.ArrayList(u8) = .empty;
+            var pw: std.Io.Writer.Allocating = .fromArrayList(gpa, &ppm);
+            try gl.writePpmRgba(&pw.writer, card_px, glb.width, glb.height);
+            try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "gl_card.ppm", .data = pw.toArrayList().items });
         }
     }
 
