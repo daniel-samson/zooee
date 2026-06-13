@@ -59,6 +59,8 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .windows) {
         mod.linkSystemLibrary("d3d11", .{}); // the Windows GPU backend (#12)
         mod.linkSystemLibrary("dxgi", .{});
+        // D3DCompile (d3dcompiler_47.dll) is loaded at runtime via
+        // LoadLibrary — no import lib needed (none ships with Zig).
     }
     // Test font for the font pipeline (#10): OFL Poppins, tests/goldens only.
     mod.addAnonymousImport("poppins", .{
