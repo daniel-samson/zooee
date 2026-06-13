@@ -503,6 +503,96 @@ pub const RectRenderer = struct {
     }
 };
 
+// Two-stop axis-aligned linear gradient fill (#118). A `v_px` varying carries
+// the top-down pixel position (gl_FragCoord is bottom-up in GL), so the
+// fragment's `t` matches raster's Gradient.colorAt exactly.
+const grad_vert: [*:0]const u8 =
+    \\#version 120
+    \\attribute vec2 pos;
+    \\uniform vec2 viewport;
+    \\varying vec2 v_px;
+    \\void main() {
+    \\  v_px = pos;
+    \\  vec2 ndc = vec2(pos.x / viewport.x * 2.0 - 1.0, 1.0 - pos.y / viewport.y * 2.0);
+    \\  gl_Position = vec4(ndc, 0.0, 1.0);
+    \\}
+;
+const grad_frag: [*:0]const u8 =
+    \\#version 120
+    \\uniform vec4 rect;   // x,y,w,h
+    \\uniform float axis;  // 0 = horizontal, 1 = vertical
+    \\uniform vec4 c0;
+    \\uniform vec4 c1;
+    \\varying vec2 v_px;
+    \\void main() {
+    \\  float t = (axis < 0.5) ? (v_px.x - rect.x) / rect.z : (v_px.y - rect.y) / rect.w;
+    \\  t = clamp(t, 0.0, 1.0);
+    \\  gl_FragColor = mix(c0, c1, t);
+    \\}
+;
+
+pub const GradientRenderer = struct {
+    gl: Gl,
+    program: GLuint,
+    vao: GLuint,
+    vbo: GLuint,
+    pos_loc: GLuint,
+    u_viewport: GLint,
+    u_rect: GLint,
+    u_axis: GLint,
+    u_c0: GLint,
+    u_c1: GLint,
+    vw: f32 = 0,
+    vh: f32 = 0,
+
+    pub fn init() Error!GradientRenderer {
+        const gl = try Gl.load();
+        const vs = QuadRenderer.compile(gl, GL_VERTEX_SHADER, grad_vert) orelse return error.NoContext;
+        const fs = QuadRenderer.compile(gl, GL_FRAGMENT_SHADER, grad_frag) orelse return error.NoContext;
+        const prog = gl.createProgram();
+        gl.attachShader(prog, vs);
+        gl.attachShader(prog, fs);
+        gl.linkProgram(prog);
+        var ok: GLint = 0;
+        gl.getProgramiv(prog, GL_LINK_STATUS, &ok);
+        if (ok == 0) return error.NoContext;
+        var vao: GLuint = 0;
+        gl.genVertexArrays(1, @ptrCast(&vao));
+        var vbo: GLuint = 0;
+        gl.genBuffers(1, @ptrCast(&vbo));
+        return .{
+            .gl = gl,
+            .program = prog,
+            .vao = vao,
+            .vbo = vbo,
+            .pos_loc = @intCast(gl.getAttribLocation(prog, "pos")),
+            .u_viewport = gl.getUniformLocation(prog, "viewport"),
+            .u_rect = gl.getUniformLocation(prog, "rect"),
+            .u_axis = gl.getUniformLocation(prog, "axis"),
+            .u_c0 = gl.getUniformLocation(prog, "c0"),
+            .u_c1 = gl.getUniformLocation(prog, "c1"),
+        };
+    }
+
+    /// Fill a pixel-space rect with a two-stop linear gradient (axis 0=h, 1=v).
+    pub fn fill(self: *GradientRenderer, x: f32, y: f32, w: f32, h: f32, axis: f32, c0: [4]f32, c1: [4]f32) void {
+        const gl = self.gl;
+        gl.useProgram(self.program);
+        gl.uniform2f(self.u_viewport, self.vw, self.vh);
+        gl.uniform4f(self.u_rect, x, y, w, h);
+        gl.uniform1f(self.u_axis, axis);
+        gl.uniform4f(self.u_c0, c0[0], c0[1], c0[2], c0[3]);
+        gl.uniform4f(self.u_c1, c1[0], c1[1], c1[2], c1[3]);
+        const verts = [_]f32{ x, y, x + w, y, x, y + h, x + w, y + h };
+        gl.bindVertexArray(self.vao);
+        gl.bindBuffer(GL_ARRAY_BUFFER, self.vbo);
+        gl.bufferData(GL_ARRAY_BUFFER, @sizeOf(@TypeOf(verts)), &verts, GL_STATIC_DRAW);
+        gl.vertexAttribPointer(self.pos_loc, 2, GL_FLOAT, GL_FALSE, 0, @ptrFromInt(0));
+        gl.enableVertexAttribArray(self.pos_loc);
+        gl.drawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
+};
+
 /// Make a GlWindow context current and return it, for offscreen use.
 /// Renders `scene` into an FBO of size w×h and reads it back (top-down).
 pub fn renderRectsOffscreen(
@@ -1231,6 +1321,7 @@ pub const GlBackend = struct {
     rect: RectRenderer,
     exact: ExactRectRenderer,
     image: ImageRenderer,
+    grad: GradientRenderer,
     /// When true, render straight to the window's default framebuffer
     /// (fbo 0) instead of an offscreen FBO — the GPU-present path. The
     /// pixel→NDC mapping is identical, so output is upright on screen.
@@ -1252,6 +1343,7 @@ pub const GlBackend = struct {
             .rect = try RectRenderer.init(),
             .exact = try ExactRectRenderer.init(),
             .image = try ImageRenderer.init(),
+            .grad = try GradientRenderer.init(),
         };
     }
 
@@ -1265,6 +1357,7 @@ pub const GlBackend = struct {
             .rect = try RectRenderer.init(),
             .exact = try ExactRectRenderer.init(),
             .image = try ImageRenderer.init(),
+            .grad = try GradientRenderer.init(),
             .default_fb = true,
         };
     }
@@ -1368,6 +1461,13 @@ pub const GlBackend = struct {
         const self = self_(ptr);
         const w: f32 = @floatFromInt(self.width);
         const h: f32 = @floatFromInt(self.height);
+        if (rs.gradient) |g| {
+            enableBlend();
+            self.grad.vw = w;
+            self.grad.vh = h;
+            self.grad.fill(rect.x, rect.y, rect.width, rect.height, if (g.axis == .vertical) 1 else 0, col(g.from), col(g.to));
+            return;
+        }
         if (rs.corner_radius.isNone() and rs.border.isNone()) {
             // Solid fill, hard edges (matches raster).
             if (rs.background) |bg| {
