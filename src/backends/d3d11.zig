@@ -976,6 +976,142 @@ pub const D3dShadowRenderer = struct {
     }
 };
 
+// === Filled path (#120) =====================================================
+// Mirrors the Metal/GL path renderers: a quad over the polygon bbox whose PS
+// runs the same division-free even-odd test as geometry.pointInPolygon, from
+// SV_Position (top-down). HLSL cbuffer arrays stride each element to 16 bytes,
+// so points are packed two-per-float4 (pts[32]); point k = even ? .xy : .zw.
+
+const path_hlsl =
+    \\cbuffer CB : register(b0) { float2 viewport; float2 pad; float4 color; float4 meta; float4 pts[32]; };
+    \\struct VSIn  { float2 pos : POSITION; };
+    \\struct VSOut { float4 pos : SV_POSITION; };
+    \\VSOut VSMain(VSIn i) {
+    \\  VSOut o;
+    \\  o.pos = float4(i.pos.x / viewport.x * 2.0 - 1.0, 1.0 - i.pos.y / viewport.y * 2.0, 0, 1);
+    \\  return o;
+    \\}
+    \\float2 pt(int k) { float4 v = pts[k/2]; return (k % 2 == 0) ? v.xy : v.zw; }
+    \\float4 PSMain(VSOut i) : SV_TARGET {
+    \\  float px = i.pos.x, py = i.pos.y;
+    \\  bool inside = false;
+    \\  int n = (int)meta.x;
+    \\  int j = n - 1;
+    \\  for (int k = 0; k < 64; k++) {
+    \\    if (k >= n) break;
+    \\    float2 b = pt(k); float2 a = pt(j);
+    \\    if ((b.y > py) != (a.y > py)) {
+    \\      float lhs = (a.x - b.x) * (py - b.y);
+    \\      float rhs = (px - b.x) * (a.y - b.y);
+    \\      bool left = (a.y > b.y) ? (rhs < lhs) : (rhs > lhs);
+    \\      if (left) inside = !inside;
+    \\    }
+    \\    j = k;
+    \\  }
+    \\  if (!inside) discard;
+    \\  return color;
+    \\}
+;
+const PathCB = extern struct { vw: f32, vh: f32, pad0: f32 = 0, pad1: f32 = 0, color: [4]f32, meta: [4]f32, pts: [32][4]f32 };
+
+pub const D3dPathRenderer = struct {
+    device: *IDevice,
+    context: *IContext,
+    vs: *IVertexShader,
+    ps: *IPixelShader,
+    layout: *IInputLayout,
+    raster: *IRasterizerState,
+    blend: *IBlendState,
+
+    pub fn init(device: *IDevice, context: *IContext, scissor: bool) Error!D3dPathRenderer {
+        const d3d_compile = loadD3DCompile() orelse return error.ShaderFailed;
+        const vs_blob = compileSrc(d3d_compile, path_hlsl, "VSMain", "vs_4_0") orelse return error.ShaderFailed;
+        defer release(vs_blob);
+        const ps_blob = compileSrc(d3d_compile, path_hlsl, "PSMain", "ps_4_0") orelse return error.ShaderFailed;
+        defer release(ps_blob);
+        const vs_ptr = vs_blob.vtbl.GetBufferPointer(vs_blob).?;
+        const vs_len = vs_blob.vtbl.GetBufferSize(vs_blob);
+        var vs: ?*IVertexShader = null;
+        if (!ok(device.vtbl.CreateVertexShader(device, vs_ptr, vs_len, null, &vs)) or vs == null) return error.ShaderFailed;
+        var ps: ?*IPixelShader = null;
+        if (!ok(device.vtbl.CreatePixelShader(device, ps_blob.vtbl.GetBufferPointer(ps_blob).?, ps_blob.vtbl.GetBufferSize(ps_blob), null, &ps)) or ps == null) return error.ShaderFailed;
+        var elems = [_]D3D11_INPUT_ELEMENT_DESC{
+            .{ .semantic_name = "POSITION", .format = DXGI_FORMAT_R32G32_FLOAT, .aligned_byte_offset = 0 },
+        };
+        var layout: ?*IInputLayout = null;
+        if (!ok(device.vtbl.CreateInputLayout(device, &elems, 1, vs_ptr, vs_len, &layout)) or layout == null) return error.ShaderFailed;
+        var rdesc: D3D11_RASTERIZER_DESC = .{ .scissor_enable = @intFromBool(scissor) };
+        var raster: ?*IRasterizerState = null;
+        if (!ok(device.vtbl.CreateRasterizerState(device, &rdesc, &raster)) or raster == null) return error.ShaderFailed;
+        const blend = try srcOverBlend(device);
+        return .{ .device = device, .context = context, .vs = vs.?, .ps = ps.?, .layout = layout.?, .raster = raster.?, .blend = blend };
+    }
+
+    pub fn deinit(self: *D3dPathRenderer) void {
+        release(self.blend);
+        release(self.raster);
+        release(self.layout);
+        release(self.ps);
+        release(self.vs);
+    }
+
+    pub fn fill(self: *D3dPathRenderer, rtv: *IRtv, vw: f32, vh: f32, points: []const geometry.Point, color: [4]f32) Error!void {
+        if (points.len < 3) return;
+        const dev = self.device;
+        const ctx = self.context;
+        const n = @min(points.len, 64);
+        var minx = points[0].x;
+        var miny = points[0].y;
+        var maxx = points[0].x;
+        var maxy = points[0].y;
+        var cbv: PathCB = .{ .vw = vw, .vh = vh, .color = color, .meta = .{ @floatFromInt(n), 0, 0, 0 }, .pts = std.mem.zeroes([32][4]f32) };
+        for (0..n) |k| {
+            const p = points[k];
+            if (k % 2 == 0) {
+                cbv.pts[k / 2][0] = p.x;
+                cbv.pts[k / 2][1] = p.y;
+            } else {
+                cbv.pts[k / 2][2] = p.x;
+                cbv.pts[k / 2][3] = p.y;
+            }
+            minx = @min(minx, p.x);
+            miny = @min(miny, p.y);
+            maxx = @max(maxx, p.x);
+            maxy = @max(maxy, p.y);
+        }
+        const verts = [_]f32{ minx, miny, maxx, miny, minx, maxy, maxx, maxy };
+        var vb_data: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = &verts };
+        var vb_desc: D3D11_BUFFER_DESC = .{ .byte_width = @sizeOf(@TypeOf(verts)), .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_VERTEX_BUFFER };
+        var vb: ?*IBuffer = null;
+        if (!ok(dev.vtbl.CreateBuffer(dev, &vb_desc, &vb_data, &vb)) or vb == null) return error.ShaderFailed;
+        defer release(vb.?);
+        var cb_data: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = &cbv };
+        var cb_desc: D3D11_BUFFER_DESC = .{ .byte_width = @sizeOf(PathCB), .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_CONSTANT_BUFFER };
+        var cb: ?*IBuffer = null;
+        if (!ok(dev.vtbl.CreateBuffer(dev, &cb_desc, &cb_data, &cb)) or cb == null) return error.ShaderFailed;
+        defer release(cb.?);
+
+        var vp: D3D11_VIEWPORT = .{ .width = vw, .height = vh };
+        ctx.vtbl.RSSetViewports(ctx, 1, &vp);
+        ctx.vtbl.RSSetState(ctx, self.raster);
+        ctx.vtbl.OMSetBlendState(ctx, self.blend, null, 0xffffffff);
+        var rtv_slot: ?*IRtv = rtv;
+        ctx.vtbl.OMSetRenderTargets(ctx, 1, &rtv_slot, null);
+        ctx.vtbl.IASetInputLayout(ctx, self.layout);
+        var vb_slot: ?*IBuffer = vb.?;
+        const stride: UINT = 8;
+        const offset: UINT = 0;
+        ctx.vtbl.IASetVertexBuffers(ctx, 0, 1, &vb_slot, &stride, &offset);
+        ctx.vtbl.IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        ctx.vtbl.VSSetShader(ctx, self.vs, null, 0);
+        var cb_slot: ?*IBuffer = cb.?;
+        ctx.vtbl.VSSetConstantBuffers(ctx, 0, 1, &cb_slot);
+        ctx.vtbl.PSSetConstantBuffers(ctx, 0, 1, &cb_slot); // color/meta/pts read by the PS — bind to PS too
+        ctx.vtbl.PSSetShader(ctx, self.ps, null, 0);
+        ctx.vtbl.Draw(ctx, 4, 0);
+    }
+};
+
 // === Slice 4: SDF rounded rects + border ====================================
 // Ports gl.zig's RoundedRectRenderer: a signed-distance pixel shader gives
 // anti-aliased rounded corners + a uniform border in one draw, matching
@@ -1940,6 +2076,7 @@ pub const D3dBackend = struct {
     image: D3dImageRenderer,
     grad: D3dGradientRenderer,
     shadow: D3dShadowRenderer,
+    path: D3dPathRenderer,
     comp: D3dLayerCompositor,
     rclip: D3dRoundClipCompositor,
     font: ?ttf.Font = null,
@@ -1977,6 +2114,7 @@ pub const D3dBackend = struct {
             .image = try D3dImageRenderer.init(off.device, off.context),
             .grad = try D3dGradientRenderer.init(off.device, off.context, true),
             .shadow = try D3dShadowRenderer.init(off.device, off.context, true),
+            .path = try D3dPathRenderer.init(off.device, off.context, true),
             .comp = try D3dLayerCompositor.init(off.device, off.context),
             .rclip = try D3dRoundClipCompositor.init(off.device, off.context),
         };
@@ -2042,6 +2180,7 @@ pub const D3dBackend = struct {
         self.comp.deinit();
         self.rclip.deinit();
         self.shadow.deinit();
+        self.path.deinit();
         self.image.deinit();
         self.grad.deinit();
         self.exact.deinit();
@@ -2068,6 +2207,7 @@ pub const D3dBackend = struct {
         .draw_rect = drawRect,
         .draw_text = drawText,
         .draw_image = drawImage,
+        .fill_path = fillPath,
         .push_clip = pushClip,
         .pop_clip = popClip,
         .push_clip_rounded = pushClipRounded,
@@ -2157,6 +2297,13 @@ pub const D3dBackend = struct {
         const h: f32 = @floatFromInt(self.off.height);
         const srv: *ISrv = @ptrCast(@alignCast(texture));
         self.image.draw(self.target(), w, h, rect, srv) catch {};
+    }
+
+    fn fillPath(ptr: *anyopaque, points: []const geometry.Point, color: style.Color) void {
+        const self = self_(ptr);
+        const w: f32 = @floatFromInt(self.off.width);
+        const h: f32 = @floatFromInt(self.off.height);
+        self.path.fill(self.target(), w, h, points, col(color)) catch {};
     }
 
     fn applyScissor(self: *D3dBackend) void {
