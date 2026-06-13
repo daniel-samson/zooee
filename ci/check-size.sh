@@ -19,7 +19,7 @@ echo "| binary | bytes | limit | status |" >> "${GITHUB_STEP_SUMMARY:-/dev/null}
 echo "|---|---|---|---|" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
 rm -rf zig-out
-zig build -Doptimize=ReleaseSmall
+zig build demos -Doptimize=ReleaseSmall # product binaries live under `demos`
 
 for name in $GATED; do
   bin=""

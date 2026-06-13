@@ -1,14 +1,16 @@
 const std = @import("std");
 
-// Build layout (grouped into top-level steps; see `zig build --help`):
-//   default (`zig build`) — the terminal app + tools + demos + gpu checks
-//   run        — run the terminal app
+// Build layout. `zig build` builds only the library; everything else lives
+// under an explicit step (see `zig build --help`):
+//   default (`zig build`) — libzooee static library
 //   test       — unit tests
-//   tools      — visual-diff / visual-test helpers (#13)
-//   visual-test— render fixtures and compare against PPM goldens
-//   demos      — native GUI window demos (macOS → .app bundles)
-//   run-gui    — run the GUI demo
-//   gpu-check  — headless GPU backend self-checks (GL #11 / D3D11 #12)
+//   check      — automated GPU backend self-checks (GL #11 / D3D11 #12) +
+//                the visual-diff helper. CI builds this, then runs the
+//                self-check binaries.
+//   visual-test— render fixtures and compare against PPM goldens (#13)
+//   demos      — the runnable demo apps: terminal + native GUI window
+//                (macOS → GL/Raster .app bundles)
+//   run / run-gui — run the terminal / GUI demo
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -38,47 +40,39 @@ pub fn build(b: *std.Build) void {
     // OFL Poppins for the font pipeline (#10): tests/goldens only.
     mod.addAnonymousImport("poppins", .{ .root_source_file = b.path("testdata/fonts/Poppins-Regular.ttf") });
 
-    // --- app: the terminal binary ------------------------------------------
-    const exe = b.addExecutable(.{
-        .name = "zooee",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "zooee", .module = mod }},
-        }),
-    });
-    b.installArtifact(exe);
-
-    const run_step = b.step("run", "Run the terminal app");
-    const run_cmd = b.addRunArtifact(exe);
-    run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
-    run_step.dependOn(&run_cmd.step);
+    // --- default: the library ----------------------------------------------
+    const lib = b.addLibrary(.{ .name = "zooee", .linkage = .static, .root_module = mod });
+    b.installArtifact(lib);
 
     // --- test --------------------------------------------------------------
     const test_step = b.step("test", "Run unit tests");
-    const mod_tests = b.addTest(.{ .root_module = mod });
-    const exe_tests = b.addTest(.{ .root_module = exe.root_module });
-    test_step.dependOn(&b.addRunArtifact(mod_tests).step);
-    test_step.dependOn(&b.addRunArtifact(exe_tests).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mod })).step);
 
-    // --- tools (#13) -------------------------------------------------------
-    const tools_step = b.step("tools", "Build the visual-diff / visual-test helpers");
+    // --- check: automated GPU backend self-checks --------------------------
+    // These are CI tests, not demos: they self-check (assert bad_frac vs the
+    // raster reference) and exit. CI builds `check`, then runs the binaries.
+    const check_step = b.step("check", "Build the automated GPU backend self-checks");
+    // visual-diff: image comparison helper used by the e2e capture check.
+    check_step.dependOn(&b.addInstallArtifact(addExe(b, target, optimize, null, "visual-diff", "tools/visual_diff.zig"), .{}).step);
+    if (os == .linux or os == .macos) {
+        check_step.dependOn(&b.addInstallArtifact(addExe(b, target, optimize, mod, "zooee-gl-check", "examples/gl_demo.zig"), .{}).step);
+    }
+    if (os == .windows) {
+        check_step.dependOn(&b.addInstallArtifact(addExe(b, target, optimize, mod, "zooee-d3d11-check", "examples/d3d11_demo.zig"), .{}).step);
+    }
 
-    const visual_diff = addExe(b, target, optimize, null, "visual-diff", "tools/visual_diff.zig");
-    b.installArtifact(visual_diff); // CI's e2e capture check uses it
-    tools_step.dependOn(&b.addInstallArtifact(visual_diff, .{}).step);
-
+    // visual-test: render fixtures through raster and compare to goldens.
     const visual_test = addExe(b, target, optimize, mod, "visual-test", "tools/visual_test.zig");
-    tools_step.dependOn(&b.addInstallArtifact(visual_test, .{}).step);
     const run_visual_test = b.addRunArtifact(visual_test);
     run_visual_test.addArg(b.pathFromRoot("testdata/visual"));
     if (b.args) |args| run_visual_test.addArgs(args); // forward --update
     b.step("visual-test", "Render scene fixtures and compare against PPM goldens").dependOn(&run_visual_test.step);
 
-    // --- demos: native GUI window apps -------------------------------------
-    const demos_step = b.step("demos", "Build the native GUI window demos (macOS → .app bundles)");
+    // --- demos: the runnable apps ------------------------------------------
+    const demos_step = b.step("demos", "Build the runnable demo apps");
+    // Terminal demo.
+    demos_step.dependOn(&b.addInstallArtifact(addExe(b, target, optimize, mod, "zooee", "src/main.zig"), .{}).step);
+    // Native GUI window demo(s).
     switch (os) {
         .macos => {
             // Two .apps so each renderer can be launched and compared: the
@@ -101,25 +95,14 @@ pub fn build(b: *std.Build) void {
         },
         else => {},
     }
-    b.getInstallStep().dependOn(demos_step); // build demos on plain `zig build`
 
-    // run-gui: the GL/GPU GUI demo (the comparison subject).
+    // run / run-gui: convenience runners.
+    const run = b.addRunArtifact(addExe(b, target, optimize, mod, "zooee-run", "src/main.zig"));
+    if (b.args) |args| run.addArgs(args);
+    b.step("run", "Run the terminal demo").dependOn(&run.step);
     if (os == .macos or os == .windows or os == .linux) {
-        const run_gui = b.step("run-gui", "Run the native GUI demo (GPU path)");
-        run_gui.dependOn(&b.addRunArtifact(guiDemo(b, mod, target, optimize, "zooee-gui-run", false)).step);
-    }
-
-    // --- gpu-check: headless GPU backend self-checks -----------------------
-    const gpu_step = b.step("gpu-check", "Build the headless GPU backend self-checks");
-    if (os == .linux or os == .macos) {
-        const gl_demo = addExe(b, target, optimize, mod, "zooee-gl-demo", "examples/gl_demo.zig");
-        b.installArtifact(gl_demo); // CI runs it under Xvfb (Linux) / direct (macOS)
-        gpu_step.dependOn(&b.addInstallArtifact(gl_demo, .{}).step);
-    }
-    if (os == .windows) {
-        const d3d11_demo = addExe(b, target, optimize, mod, "zooee-d3d11-demo", "examples/d3d11_demo.zig");
-        b.installArtifact(d3d11_demo);
-        gpu_step.dependOn(&b.addInstallArtifact(d3d11_demo, .{}).step);
+        b.step("run-gui", "Run the native GUI demo (GPU path)")
+            .dependOn(&b.addRunArtifact(guiDemo(b, mod, target, optimize, "zooee-gui-run", false)).step);
     }
 }
 

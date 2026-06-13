@@ -27,8 +27,8 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libx11-dev libgl-dev libgl1-mesa-dri xvfb
 
-      - name: Build
-        run: zig build
+      - name: Build (library + demos + checks)
+        run: zig build && zig build demos check
 
       - name: Test
         run: zig build test
@@ -36,9 +36,9 @@ jobs:
       - name: Visual golden test
         run: zig build visual-test
 
-      - name: GL context test (Linux, software GL)
+      - name: GL backend self-check (Linux, software GL)
         if: runner.os == 'Linux'
-        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a ./zig-out/bin/zooee-gl-demo
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a ./zig-out/bin/zooee-gl-check
 
       - name: Binary size gate
         shell: bash
