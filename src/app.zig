@@ -272,6 +272,7 @@ fn runWindowGl(
         if (dirty) {
             _ = frame_arena.reset(.retain_capacity);
             const arena = frame_arena.allocator();
+            window.glUpdate(); // resync the GL context with the window size (macOS resize)
             const px = platform.contentPixelSize(window);
             const scale: f32 = @floatCast(px.scale);
             const root = try model.view(arena, scale);
@@ -341,6 +342,10 @@ fn runWindowD3d(
             _ = frame_arena.reset(.retain_capacity);
             const arena = frame_arena.allocator();
             const px = platform.contentPixelSize(window);
+            // Keep the swapchain back buffer matched to the window, else the
+            // size-mismatched CopyResource no-ops and Present stretches the
+            // stale frame (and clicks miss the now-misplaced controls).
+            swapchain.resize(@intCast(px.width), @intCast(px.height)) catch {};
             const scale: f32 = @floatCast(px.scale);
             const root = try model.view(arena, scale);
             const viewport: geometry.Size = .{ .width = @floatFromInt(px.width), .height = @floatFromInt(px.height) };

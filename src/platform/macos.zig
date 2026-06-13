@@ -183,6 +183,16 @@ pub const Window = struct {
         if (self.gl_ctx != null) _ = msg(void, struct {}, self.gl_ctx, sel("flushBuffer"), .{});
     }
 
+    /// Resync the NSOpenGLContext with its view's current size. An
+    /// NSOpenGLContext caches its drawable dimensions; without `-update`
+    /// after the view resizes, the back buffer stays the old size and the
+    /// frame is stretched (and on fullscreen the content lands off-screen).
+    /// Cheap and idempotent — call once per frame before rendering. No-op
+    /// for raster windows. (GLX tracks the X drawable, so x11 needs none.)
+    pub fn glUpdate(self: *Window) void {
+        if (self.gl_ctx != null) _ = msg(void, struct {}, self.gl_ctx, sel("update"), .{});
+    }
+
     /// Drain pending AppKit events; non-blocking (#5 drivable loop).
     pub fn pumpEvents(self: *Window) []const Event {
         self.queue.clearRetainingCapacity();
