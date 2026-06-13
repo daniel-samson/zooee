@@ -221,6 +221,42 @@ pub fn runWindow(
     var placements: []layout_mod.Placement = &.{};
     var dirty = true;
 
+    // One-frame render+blit, callable during a modal resize drag (macOS) so
+    // the CPU framebuffer is re-rendered at the new size instead of the OS
+    // stretching the stale blit. Same shape as the GL/Metal loops.
+    const Frame = struct {
+        model: *Model,
+        win: @TypeOf(window),
+        backend: @TypeOf(b),
+        raster: *raster_mod.RasterBackend,
+        arena: *std.heap.ArenaAllocator,
+        placements: *[]layout_mod.Placement,
+
+        fn draw(self: *@This()) void {
+            _ = self.arena.reset(.retain_capacity);
+            const a = self.arena.allocator();
+            const px = platform.contentPixelSize(self.win);
+            const scale: f32 = @floatCast(px.scale);
+            self.raster.char_width = 8 * scale;
+            self.raster.line_height = 16 * scale;
+            const root = self.model.view(a, scale) catch return;
+            const viewport: geometry.Size = .{ .width = @floatFromInt(px.width), .height = @floatFromInt(px.height) };
+            const result = layout_mod.layout(a, self.backend, root, viewport) catch return;
+            self.placements.* = result.placements;
+            self.backend.beginFrame(viewport) catch return;
+            layout_mod.render(self.backend, result);
+            self.backend.endFrame() catch return;
+            platform.blit(self.win, self.raster.pixels, self.raster.width, self.raster.height);
+        }
+    };
+    var frame: Frame = .{ .model = model, .win = window, .backend = b, .raster = &raster, .arena = &frame_arena, .placements = &placements };
+    window.setRedraw(&frame, struct {
+        fn call(p: ?*anyopaque) void {
+            const f: *Frame = @ptrCast(@alignCast(p));
+            f.draw();
+        }
+    }.call);
+
     loop: while (true) {
         for (window.pumpEvents()) |ev| {
             switch (dispatch(Model, Msg, model, ev, placements)) {
@@ -231,20 +267,7 @@ pub fn runWindow(
         }
 
         if (dirty) {
-            _ = frame_arena.reset(.retain_capacity);
-            const arena = frame_arena.allocator();
-            const px = platform.contentPixelSize(window);
-            const scale: f32 = @floatCast(px.scale);
-            raster.char_width = 8 * scale;
-            raster.line_height = 16 * scale;
-            const root = try model.view(arena, scale);
-            const viewport: geometry.Size = .{ .width = @floatFromInt(px.width), .height = @floatFromInt(px.height) };
-            const result = try layout_mod.layout(arena, b, root, viewport);
-            placements = result.placements;
-            try b.beginFrame(viewport);
-            layout_mod.render(b, result);
-            try b.endFrame();
-            platform.blit(window, raster.pixels, raster.width, raster.height);
+            frame.draw();
             dirty = false;
         }
 
