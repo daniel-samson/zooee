@@ -74,6 +74,14 @@ pub const Element = struct {
     text: ?[]const u8 = null,
     text_style: style.TextStyle = .{},
 
+    // Effects (#117/#121): wrap this element's subtree when set.
+    /// Group opacity 0..1: the subtree renders into an isolated layer
+    /// composited back at this alpha (#121).
+    opacity: ?f32 = null,
+    /// Clip this element's subtree to a rounded rect with these per-corner
+    /// radii (#117); the element's border-box is the clip rect.
+    clip_radius: ?style.CornerRadius = null,
+
     // Interaction messages (#4): dispatched by the app loop when the
     // pointer hits this element. Values are app-defined (enum ints).
     on_click: ?u32 = null,
@@ -110,19 +118,38 @@ pub fn layout(
     return .{ .placements = try placements.toOwnedSlice(gpa) };
 }
 
-/// Draw a layout result through the backend (rects then text, per
-/// element, in tree order — the ordered command stream from #2).
+/// Draw a layout result through the backend, in tree order (the ordered
+/// command stream from #2). Placements are pre-order DFS (see `place`), so we
+/// recurse the tree consuming them sequentially — that lets per-element
+/// effects (opacity #121, rounded clip #117) wrap a whole subtree with
+/// balanced push/pop.
 pub fn render(b: Backend, result: LayoutResult) void {
-    for (result.placements) |p| {
-        const el = p.element;
-        if (el.rect_style.background != null or !el.rect_style.border.isNone()) {
-            b.drawRect(p.rect, el.rect_style);
-        }
-        if (el.text) |t| {
-            const inner = contentBox(el, p.rect);
-            b.drawText(inner.origin(), t, el.text_style);
-        }
+    var i: usize = 0;
+    if (result.placements.len > 0) renderNode(b, result.placements, &i);
+}
+
+fn renderNode(b: Backend, placements: []const Placement, i: *usize) void {
+    const p = placements[i.*];
+    i.* += 1;
+    const el = p.element;
+
+    const layered = el.opacity != null;
+    const clipped = el.clip_radius != null;
+    if (layered) b.pushLayer(el.opacity.?) catch {};
+    if (clipped) b.pushClipRounded(p.rect, el.clip_radius.?);
+
+    const rs = el.rect_style;
+    if (rs.background != null or rs.gradient != null or !rs.border.isNone()) {
+        b.drawRect(p.rect, rs);
     }
+    if (el.text) |t| {
+        const inner = contentBox(el, p.rect);
+        b.drawText(inner.origin(), t, el.text_style);
+    }
+    for (el.children) |_| renderNode(b, placements, i);
+
+    if (clipped) b.popClip();
+    if (layered) b.popLayer();
 }
 
 /// The content box: border-box minus border widths and padding.
