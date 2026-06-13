@@ -139,6 +139,17 @@ pub fn drawGroupOpacity(b: Backend, s: f32) !void {
     b.popLayer();
 }
 
+/// Rounded-rect clipping (#117): a solid fill clipped to a rounded rect, so
+/// the four corners are cut. Not in `all` (cross-harness goldens); the GPU
+/// checks build a local Scene and compare the clipped result vs raster.
+pub fn drawRoundedClip(b: Backend, s: f32) !void {
+    b.pushClipRounded(.{ .x = 1 * s, .y = 1 * s, .width = 8 * s, .height = 8 * s }, .all(3 * s));
+    b.drawRect(.{ .x = 1 * s, .y = 1 * s, .width = 8 * s, .height = 8 * s }, .{
+        .background = Color.rgb(40, 120, 220),
+    });
+    b.popClip();
+}
+
 /// Built via the layout engine (#3) rather than hand-placed draws: a
 /// padded column holding a bordered text card and a row of two flex-grow
 /// fills. Exercises box model, gap, text measurement, and remainder
