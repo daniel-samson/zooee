@@ -971,11 +971,85 @@ pub const MetalLayerCompositor = struct {
     }
 };
 
+// Round-clip uniform. vp = {vw,vh,0,0}; radius = {tl,tr,br,bl}.
+const RClipUniform = extern struct { rect: [4]f32, vp: [4]f32, radius: [4]f32 };
+
+/// Composites a clip layer over its parent, masked to a rounded rect (#117):
+/// the fragment discards pixels outside `insideRounded(rect, radius)` at the
+/// pixel center, so the corners keep the backdrop — hard-edged, matching
+/// raster's per-pixel rounded clip exactly.
+pub const MetalRoundClipCompositor = struct {
+    device: id,
+    queue: id,
+    pipeline: id,
+    sampler: id,
+    enc: id = null,
+    vw: f32 = 0,
+    vh: f32 = 0,
+
+    const shader =
+        \\#include <metal_stdlib>
+        \\using namespace metal;
+        \\struct RClipU { float4 rect; float4 vp; float4 radius; };
+        \\struct VOut { float4 pos [[position]]; float2 uv; };
+        \\vertex VOut v_main(uint vid [[vertex_id]], constant RClipU& u [[buffer(0)]]) {
+        \\    float2 corner[4] = { float2(0,0), float2(1,0), float2(0,1), float2(1,1) };
+        \\    float2 c = corner[vid];
+        \\    float2 px = c * u.vp.xy;
+        \\    VOut o; o.pos = float4(px.x / u.vp.x * 2.0 - 1.0, 1.0 - px.y / u.vp.y * 2.0, 0, 1); o.uv = c; return o;
+        \\}
+        \\fragment float4 f_main(VOut in [[stage_in]], constant RClipU& u [[buffer(0)]], texture2d<float> tex [[texture(0)]], sampler s [[sampler(0)]]) {
+        \\    float fx = in.pos.x, fy = in.pos.y;
+        \\    float rx = u.rect.x, ry = u.rect.y, rw = u.rect.z, rh = u.rect.w;
+        \\    if (fx < rx || fx >= rx + rw || fy < ry || fy >= ry + rh) discard_fragment();
+        \\    float maxr = min(rw, rh) * 0.5;
+        \\    float cxm = rx + rw * 0.5, cym = ry + rh * 0.5;
+        \\    float4 rad = u.radius; // tl, tr, br, bl
+        \\    { float r = min(rad.x, maxr); if (r > 0.0) { float cx = rx + rad.x, cy = ry + rad.x; bool ix = (cx <= cxm) ? (fx < cx) : (fx > cx); bool iy = (cy <= cym) ? (fy < cy) : (fy > cy); if (ix && iy) { float dx = fx - cx, dy = fy - cy; if (dx*dx + dy*dy > r*r) discard_fragment(); } } }
+        \\    { float r = min(rad.y, maxr); if (r > 0.0) { float cx = rx + rw - rad.y, cy = ry + rad.y; bool ix = (cx <= cxm) ? (fx < cx) : (fx > cx); bool iy = (cy <= cym) ? (fy < cy) : (fy > cy); if (ix && iy) { float dx = fx - cx, dy = fy - cy; if (dx*dx + dy*dy > r*r) discard_fragment(); } } }
+        \\    { float r = min(rad.z, maxr); if (r > 0.0) { float cx = rx + rw - rad.z, cy = ry + rh - rad.z; bool ix = (cx <= cxm) ? (fx < cx) : (fx > cx); bool iy = (cy <= cym) ? (fy < cy) : (fy > cy); if (ix && iy) { float dx = fx - cx, dy = fy - cy; if (dx*dx + dy*dy > r*r) discard_fragment(); } } }
+        \\    { float r = min(rad.w, maxr); if (r > 0.0) { float cx = rx + rad.w, cy = ry + rh - rad.w; bool ix = (cx <= cxm) ? (fx < cx) : (fx > cx); bool iy = (cy <= cym) ? (fy < cy) : (fy > cy); if (ix && iy) { float dx = fx - cx, dy = fy - cy; if (dx*dx + dy*dy > r*r) discard_fragment(); } } }
+        \\    return tex.sample(s, in.uv);
+        \\}
+    ;
+
+    pub fn init(device: id, queue: id) Error!MetalRoundClipCompositor {
+        const pipeline = try compilePipeline(device, shader, MTLPixelFormatRGBA8Unorm, true);
+        const sampler = makeSampler(device);
+        return .{ .device = device, .queue = queue, .pipeline = pipeline, .sampler = sampler };
+    }
+
+    pub fn deinit(self: *MetalRoundClipCompositor) void {
+        release(self.sampler);
+        release(self.pipeline);
+    }
+
+    pub fn composite(self: *MetalRoundClipCompositor, tex: id, rect: geometry.Rect, radius: style.CornerRadius) void {
+        var u: RClipUniform = .{
+            .rect = .{ rect.x, rect.y, rect.width, rect.height },
+            .vp = .{ self.vw, self.vh, 0, 0 },
+            .radius = .{ radius.top_left, radius.top_right, radius.bottom_right, radius.bottom_left },
+        };
+        _ = msg(void, struct { *const RClipUniform, u64, u64 }, self.enc, sel("setVertexBytes:length:atIndex:"), .{ &u, @as(u64, @sizeOf(RClipUniform)), 0 });
+        _ = msg(void, struct { *const RClipUniform, u64, u64 }, self.enc, sel("setFragmentBytes:length:atIndex:"), .{ &u, @as(u64, @sizeOf(RClipUniform)), 0 });
+        _ = msg(void, struct { id, u64 }, self.enc, sel("setFragmentTexture:atIndex:"), .{ tex, 0 });
+        _ = msg(void, struct { id, u64 }, self.enc, sel("setFragmentSamplerState:atIndex:"), .{ self.sampler, 0 });
+        _ = msg(void, struct { u64, u64, u64 }, self.enc, sel("drawPrimitives:vertexStart:vertexCount:"), .{ MTLPrimitiveTypeTriangleStrip, 0, 4 });
+    }
+};
+
 const ScissorRect = struct { x0: i32, y0: i32, x1: i32, y1: i32 };
 
 /// A pushed group-opacity layer (#121): the target it redirected from, the
 /// offscreen texture draws accumulate into, and the composite opacity.
 const LayerState = struct { parent: id, layer: id, opacity: f32 };
+
+/// A pushed rounded clip (#117): like a layer, composited back masked to the
+/// rounded rect on popClip.
+const RoundClip = struct { parent: id, layer: id, rect: geometry.Rect, radius: style.CornerRadius };
+
+/// Which stack a popClip unwinds: a plain scissor entry or a rounded-clip layer.
+const ClipOp = enum { scissor, rounded };
 const MTLScissorRect = extern struct { x: u64, y: u64, width: u64, height: u64 };
 
 /// The D3D11/GL-equivalent Metal Backend: implements the draw-primitive
@@ -993,12 +1067,17 @@ pub const MetalBackend = struct {
     image: MetalImageRenderer,
     grad: MetalGradientRenderer,
     comp: MetalLayerCompositor,
+    rclip: MetalRoundClipCompositor,
     glyphs: std.AutoHashMapUnmanaged(u16, MetalGlyphRenderer) = .empty,
     clips: std.ArrayList(ScissorRect) = .empty,
     /// Active group-opacity layers (#121) and the offscreen textures awaiting
     /// release once the frame's command buffer completes.
     layers: std.ArrayList(LayerState) = .empty,
     pending_tex: std.ArrayList(id) = .empty,
+    /// Active rounded clips (#117) and a per-clip-op marker so popClip unwinds
+    /// the right stack (scissor vs rounded layer).
+    rounds: std.ArrayList(RoundClip) = .empty,
+    clip_ops: std.ArrayList(ClipOp) = .empty,
     font: ?ttf.Font = null,
     enc: id = null,
     cmdbuf: id = null,
@@ -1045,6 +1124,7 @@ pub const MetalBackend = struct {
             .image = try MetalImageRenderer.init(ctx.device, ctx.queue),
             .grad = try MetalGradientRenderer.init(ctx.device, ctx.queue),
             .comp = try MetalLayerCompositor.init(ctx.device, ctx.queue),
+            .rclip = try MetalRoundClipCompositor.init(ctx.device, ctx.queue),
         };
     }
 
@@ -1057,11 +1137,15 @@ pub const MetalBackend = struct {
         self.layers.deinit(self.gpa);
         for (self.pending_tex.items) |t| release(t);
         self.pending_tex.deinit(self.gpa);
+        for (self.rounds.items) |r| release(r.layer);
+        self.rounds.deinit(self.gpa);
+        self.clip_ops.deinit(self.gpa);
         self.image.deinit();
         self.exact.deinit();
         self.rect.deinit();
         self.grad.deinit();
         self.comp.deinit();
+        self.rclip.deinit();
         if (self.present_sampler != null) release(self.present_sampler);
         if (self.present_pipeline != null) release(self.present_pipeline);
         if (self.target != null) release(self.target);
@@ -1123,6 +1207,7 @@ pub const MetalBackend = struct {
         .draw_image = drawImage,
         .push_clip = pushClip,
         .pop_clip = popClip,
+        .push_clip_rounded = pushClipRounded,
         .push_layer = pushLayer,
         .pop_layer = popLayer,
         .create_texture = createTexture,
@@ -1151,6 +1236,9 @@ pub const MetalBackend = struct {
         self.comp.enc = enc;
         self.comp.vw = w;
         self.comp.vh = h;
+        self.rclip.enc = enc;
+        self.rclip.vw = w;
+        self.rclip.vh = h;
     }
 
     /// Start a fresh render pass targeting `tex` on the frame's command buffer,
@@ -1191,12 +1279,14 @@ pub const MetalBackend = struct {
         self.enc = enc;
         self.setViewportOnRenderers(enc, @floatFromInt(w), @floatFromInt(h));
         self.clips.clearRetainingCapacity();
+        self.clip_ops.clearRetainingCapacity();
         self.applyScissor();
     }
 
     fn endFrame(ptr: *anyopaque) Backend.Error!void {
         const self = self_(ptr);
         std.debug.assert(self.layers.items.len == 0); // balanced push/popLayer
+        std.debug.assert(self.rounds.items.len == 0); // balanced rounded clips
         _ = msg(void, struct {}, self.enc, sel("endEncoding"), .{});
         // Upload any glyphs packed this frame — after endEncoding, before
         // commit (the atlas only appends, so the encoded quads read the final
@@ -1278,13 +1368,44 @@ pub const MetalBackend = struct {
             .x1 = @intFromFloat(@round(rect.x + rect.width)),
             .y1 = @intFromFloat(@round(rect.y + rect.height)),
         }) catch {};
+        self.clip_ops.append(self.gpa, .scissor) catch {};
         self.applyScissor();
+    }
+
+    /// Rounded clip (#117): redirect draws into an offscreen layer (like
+    /// pushLayer); popClip composites it back masked to the rounded rect.
+    fn pushClipRounded(ptr: *anyopaque, rect: geometry.Rect, radius: style.CornerRadius) void {
+        const self = self_(ptr);
+        if (radius.isNone()) return pushClip(ptr, rect);
+        const layer_tex = makeTexture(self.ctx.device, self.width, self.height, MTLPixelFormatRGBA8Unorm) catch return;
+        self.rounds.append(self.gpa, .{ .parent = self.target, .layer = layer_tex, .rect = rect, .radius = radius }) catch {
+            release(layer_tex);
+            return;
+        };
+        self.clip_ops.append(self.gpa, .rounded) catch {};
+        _ = msg(void, struct {}, self.enc, sel("endEncoding"), .{});
+        self.target = layer_tex;
+        self.beginPass(layer_tex, true);
     }
 
     fn popClip(ptr: *anyopaque) void {
         const self = self_(ptr);
-        if (self.clips.items.len > 0) _ = self.clips.pop();
-        self.applyScissor();
+        const op = self.clip_ops.pop() orelse .scissor;
+        switch (op) {
+            .scissor => {
+                if (self.clips.items.len > 0) _ = self.clips.pop();
+                self.applyScissor();
+            },
+            .rounded => {
+                const rc = self.rounds.pop() orelse return;
+                _ = msg(void, struct {}, self.enc, sel("endEncoding"), .{});
+                self.target = rc.parent;
+                self.beginPass(rc.parent, false); // load the backdrop
+                _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{self.rclip.pipeline});
+                self.rclip.composite(rc.layer, rc.rect, rc.radius);
+                self.pending_tex.append(self.gpa, rc.layer) catch release(rc.layer);
+            },
+        }
     }
 
     /// Redirect draws into a fresh transparent offscreen texture (#121). Ends

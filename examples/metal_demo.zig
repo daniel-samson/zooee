@@ -174,6 +174,10 @@ pub fn main(init: std.process.Init) !void {
         // match raster's straight-alpha popLayer (hard-edged regions, 0.03).
         const group_opacity_scene: zooee.fixtures.Scene = .{ .name = "group_opacity", .width = 10, .height = 8, .draw = zooee.fixtures.drawGroupOpacity };
         if (!(try compareScene(gpa, out, &mb, group_opacity_scene, false))) backend_ok = false;
+        // Rounded clip (#117): content masked to a rounded rect must match
+        // raster's hard-edged per-pixel clip (corners cut, 0.03).
+        const rounded_clip_scene: zooee.fixtures.Scene = .{ .name = "rounded_clip", .width = 10, .height = 10, .draw = zooee.fixtures.drawRoundedClip };
+        if (!(try compareScene(gpa, out, &mb, rounded_clip_scene, false))) backend_ok = false;
     }
 
     try out.flush();
