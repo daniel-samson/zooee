@@ -128,6 +128,9 @@ pub const Window = struct {
         title: [:0]const u8 = "zooee",
         width: u32 = 800,
         height: u32 = 600,
+        /// Accepted for cross-platform parity. macOS GL (CGL) is a #11
+        /// follow-up; ignored for now (renders via raster + CoreGraphics).
+        gl: bool = false,
     };
 
     pub fn create(gpa: std.mem.Allocator, opts: CreateOptions) !*Window {

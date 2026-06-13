@@ -28,6 +28,17 @@ pub const candidates: []const []const u8 = switch (builtin.os.tag) {
     else => &.{},
 };
 
+/// Read the first existing candidate font file's bytes (caller owns).
+/// Returns null if none are readable. Does not validate the TTF — the
+/// caller's setFont does that.
+pub fn loadBytes(gpa: std.mem.Allocator, io: std.Io) ?[]const u8 {
+    for (candidates) |path| {
+        const data = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(32 * 1024 * 1024)) catch continue;
+        return data;
+    }
+    return null;
+}
+
 /// Load the first parseable candidate into the raster backend. Returns
 /// true on success; false leaves the backend on placeholder glyphs.
 pub fn loadInto(gpa: std.mem.Allocator, io: std.Io, r: *raster.RasterBackend) bool {
