@@ -133,8 +133,53 @@ pub fn main(init: std.process.Init) !void {
         try gl.writePpmRgba(&pw.writer, gpx, gw, gh);
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "gl_text.ppm", .data = pw.toArrayList().items });
     }
+    // Slice 6: GlBackend vtable. Render rect-based fixtures through the
+    // GL Backend AND the raster backend; compare with tolerance (proves
+    // the GL Backend matches the raster reference via the real interface).
+    var backend_ok = true;
+    {
+        var glb = gl.GlBackend.initOffscreen(gpa) catch |err| {
+            try out.print("GL-BACKEND-INIT-FAILED: {t}\n", .{err});
+            try out.flush();
+            std.process.exit(1);
+        };
+        defer glb.deinit();
+        for ([_][]const u8{ "overlap", "nested_clip" }) |name| {
+            const scene = findScene(name) orelse continue;
+            try zooee.fixtures.run(scene, glb.interface(), 8);
+            const glpx = try glb.readPixels();
+            var ras = zooee.backends.raster.RasterBackend.init(gpa);
+            defer ras.deinit();
+            try zooee.fixtures.run(scene, ras.interface(), 8);
+            // Compare (both top-down RGBA, same dims).
+            var bad: usize = 0;
+            const n = @min(glpx.len, ras.pixels.len) / 4;
+            for (0..n) |p| {
+                var md: u8 = 0;
+                for (0..3) |ch| {
+                    const a = glpx[p * 4 + ch];
+                    const bch = ras.pixels[p * 4 + ch];
+                    const d = if (a > bch) a - bch else bch - a;
+                    if (d > md) md = d;
+                }
+                if (md > 32) bad += 1;
+            }
+            const frac = @as(f32, @floatFromInt(bad)) / @as(f32, @floatFromInt(n));
+            const scene_ok = frac < 0.03;
+            if (!scene_ok) backend_ok = false;
+            try out.print("GL Backend vs raster [{s}]: bad_frac={d:.4} {s}\n", .{ name, frac, if (scene_ok) "PASS" else "FAIL" });
+        }
+    }
+
     try out.flush();
-    if (!ok or !quad_ok or !rect_ok or !round_ok or !glyph_ok) std.process.exit(1);
+    if (!ok or !quad_ok or !rect_ok or !round_ok or !glyph_ok or !backend_ok) std.process.exit(1);
+}
+
+fn findScene(name: []const u8) ?@import("zooee").fixtures.Scene {
+    for (@import("zooee").fixtures.all) |s| {
+        if (std.mem.eql(u8, s.name, name)) return s;
+    }
+    return null;
 }
 
 fn rectScene(rr: *gl.RectRenderer) void {
