@@ -1,136 +1,120 @@
-//! Native GUI demo (macOS .app / Windows exe): the layout engine drives
-//! the CPU raster backend and the framebuffer blits into the native
-//! window — CoreGraphics on macOS, GDI on Windows (GPU backends replace
-//! the blit in #11/#12). Re-renders on resize. Text is placeholder
-//! glyph blocks until the TTF rasterizer lands (#10).
+//! Native GUI demo as an interactive Model (#4/#9/#10): the SAME
+//! model/view/update/onEvent contract the terminal demo uses, driven by
+//! zooee.app.runWindow — layout → raster → native blit, with mouse and
+//! keyboard wired through the shared event dispatch. macOS ships as
+//! Zooee Demo.app; Windows as a GUI-subsystem exe. Text uses the OS font.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const zooee = @import("zooee");
 const L = zooee.layout;
 const Color = zooee.Color;
 
-const items = [_][]const u8{ "Terminal backend", "Raster backend", "Native windowing", "Layout engine", "Text rendering" };
-const checked = [items.len]bool{ true, true, true, true, true };
+const items = [_][]const u8{ "Terminal backend", "Raster backend", "Native windowing", "Layout engine", "Text + input" };
 
-/// OS font candidates (#10 policy: runtime apps use the system's fonts;
-/// the vendored OFL font is tests-only). First parseable TTF wins.
-const font_candidates: []const []const u8 = switch (builtin.os.tag) {
-    .macos => &.{
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-        "/System/Library/Fonts/Supplemental/Verdana.ttf",
-    },
-    .windows => &.{
-        "C:\\Windows\\Fonts\\segoeui.ttf",
-        "C:\\Windows\\Fonts\\arial.ttf",
-    },
-    else => &.{},
+const Msg = enum(u32) {
+    _,
+    fn click(i: usize) u32 {
+        return @intCast(i);
+    }
+    fn hover(i: usize) u32 {
+        return @intCast(i | 0x100);
+    }
 };
 
-fn loadSystemFont(gpa: std.mem.Allocator, io: std.Io, raster: *zooee.backends.raster.RasterBackend) void {
-    for (font_candidates) |path| {
-        const data = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(32 * 1024 * 1024)) catch continue;
-        raster.setFont(data) catch {
-            gpa.free(data);
-            continue;
-        };
-        return;
-    }
-    // No parseable font: placeholder blocks (still functional).
-}
+const Demo = struct {
+    selected: usize = 0,
+    checked: [items.len]bool = .{ true, true, true, true, true },
 
-fn buildView(arena: std.mem.Allocator, scale: f32) !*const L.Element {
-    const rows = try arena.alloc(L.Element, items.len);
-    const row_ptrs = try arena.alloc(*const L.Element, items.len);
-    for (items, 0..) |item, i| {
-        const mark: []const u8 = if (checked[i]) "[x] " else "[ ] ";
-        rows[i] = .{
-            .text = try std.fmt.allocPrint(arena, "{s}{s}", .{ mark, item }),
-            .text_style = if (i == 2)
-                .{ .color = .{ .r = 0, .g = 120, .b = 255 }, .size = 15 * scale }
-            else
-                .{ .color = Color.rgb(40, 40, 40), .size = 15 * scale },
-            .margin = .{ .bottom = 6 * scale },
-        };
-        row_ptrs[i] = &rows[i];
-    }
-
-    const title = try arena.create(L.Element);
-    title.* = .{
-        .text = "zooee native GUI — raster backend",
-        .text_style = .{ .color = Color.black, .bold = true, .size = 22 * scale },
-        .margin = .{ .bottom = 10 * scale },
-    };
-    const list = try arena.create(L.Element);
-    list.* = .{
-        .direction = .column,
-        .padding = .all(14 * scale),
-        .rect_style = .{
-            .background = Color.white,
-            .border = .all(2 * scale, Color.rgb(0, 120, 255)),
-            .corner_radius = .all(10 * scale),
-        },
-        .children = row_ptrs,
-    };
-    const root = try arena.create(L.Element);
-    root.* = .{
-        .direction = .column,
-        .padding = .all(16 * scale),
-        .rect_style = .{ .background = Color.rgb(238, 240, 245) },
-        .children = try arena.dupe(*const L.Element, &.{ title, list }),
-    };
-    return root;
-}
-
-pub fn main(init: std.process.Init) !void {
-    const gpa = init.arena.allocator();
-    const io = init.io;
-
-    const platform = switch (builtin.os.tag) {
-        .macos => zooee.platform.macos,
-        .windows => zooee.platform.win32,
-        else => @compileError("gui demo: unsupported OS (X11 is #9 follow-up)"),
-    };
-
-    const w = try platform.Window.create(gpa, .{ .title = "zooee — native window" });
-    defer w.destroy();
-
-    var raster = zooee.backends.raster.RasterBackend.init(gpa);
-    defer raster.deinit();
-    loadSystemFont(gpa, io, &raster);
-    var frame_arena = std.heap.ArenaAllocator.init(gpa);
-    defer frame_arena.deinit();
-
-    var dirty = true;
-    outer: while (true) {
-        for (w.pumpEvents()) |ev| switch (ev) {
-            .close_requested => break :outer,
-            .resized => dirty = true,
-        };
-
-        if (dirty) {
-            _ = frame_arena.reset(.retain_capacity);
-            const arena = frame_arena.allocator();
-            const px = platform.contentPixelSize(w);
-            const scale: f32 = @floatCast(px.scale);
-
-            // Scale the placeholder glyph metrics with the display.
-            raster.char_width = 8 * scale;
-            raster.line_height = 16 * scale;
-            const b = raster.interface();
-            const root = try buildView(arena, scale);
-            const viewport: zooee.Size = .{
-                .width = @floatFromInt(px.width),
-                .height = @floatFromInt(px.height),
+    pub fn view(self: *Demo, arena: std.mem.Allocator, scale: f32) !*const L.Element {
+        const rows = try arena.alloc(L.Element, items.len);
+        const row_ptrs = try arena.alloc(*const L.Element, items.len);
+        for (items, 0..) |item, i| {
+            const mark: []const u8 = if (self.checked[i]) "[x]  " else "[ ]  ";
+            rows[i] = .{
+                .text = try std.fmt.allocPrint(arena, "{s}{s}", .{ mark, item }),
+                .text_style = if (self.selected == i)
+                    .{ .color = .{ .r = 0, .g = 120, .b = 255 }, .size = 16 * scale }
+                else
+                    .{ .color = Color.rgb(40, 40, 40), .size = 16 * scale },
+                .margin = .{ .bottom = 6 * scale },
+                .padding = .symmetric(6 * scale, 3 * scale),
+                .rect_style = if (self.selected == i)
+                    .{ .background = Color.rgb(232, 240, 254), .corner_radius = .all(6 * scale) }
+                else
+                    .{},
+                .on_click = Msg.click(i),
+                .on_hover = Msg.hover(i),
             };
-            const result = try L.layout(arena, b, root, viewport);
-            try b.beginFrame(viewport);
-            L.render(b, result);
-            try b.endFrame();
-            platform.blit(w, raster.pixels, raster.width, raster.height);
-            dirty = false;
+            row_ptrs[i] = &rows[i];
         }
 
-        try io.sleep(.fromMilliseconds(16), .awake);
+        const title = try arena.create(L.Element);
+        title.* = .{
+            .text = "zooee — click or hover a row",
+            .text_style = .{ .color = Color.black, .bold = true, .size = 22 * scale },
+            .margin = .{ .bottom = 12 * scale },
+        };
+        const list = try arena.create(L.Element);
+        list.* = .{
+            .direction = .column,
+            .padding = .all(12 * scale),
+            .rect_style = .{
+                .background = Color.white,
+                .border = .all(2 * scale, Color.rgb(0, 120, 255)),
+                .corner_radius = .all(10 * scale),
+            },
+            .children = row_ptrs,
+        };
+        const root = try arena.create(L.Element);
+        root.* = .{
+            .direction = .column,
+            .padding = .all(16 * scale),
+            .rect_style = .{ .background = Color.rgb(238, 240, 245) },
+            .children = try arena.dupe(*const L.Element, &.{ title, list }),
+        };
+        return root;
     }
+
+    pub fn update(self: *Demo, msg: Msg) zooee.app.Command {
+        const raw: u32 = @intFromEnum(msg);
+        const index: usize = raw & 0xff;
+        if (index >= items.len) return .none;
+        if (raw & 0x100 != 0) {
+            if (self.selected == index) return .none;
+            self.selected = index;
+        } else {
+            self.selected = index;
+            self.checked[index] = !self.checked[index];
+        }
+        return .redraw;
+    }
+
+    pub fn onEvent(self: *Demo, ev: zooee.event.Event) zooee.app.Command {
+        switch (ev) {
+            .key_down => |k| switch (k.key) {
+                .up => {
+                    self.selected = if (self.selected == 0) items.len - 1 else self.selected - 1;
+                    return .redraw;
+                },
+                .down => {
+                    self.selected = (self.selected + 1) % items.len;
+                    return .redraw;
+                },
+                .enter => {
+                    self.checked[self.selected] = !self.checked[self.selected];
+                    return .redraw;
+                },
+                .escape => return .quit,
+                else => {},
+            },
+            .text => |t| if (t.codepoint == 'q') return .quit,
+            else => {},
+        }
+        return .none;
+    }
+};
+
+pub fn main(init: std.process.Init) !void {
+    var demo: Demo = .{};
+    try zooee.app.runWindow(Demo, Msg, &demo, init, .{ .title = "zooee — native window", .width = 520, .height = 320 });
 }

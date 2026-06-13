@@ -78,10 +78,45 @@ extern "kernel32" fn GetModuleHandleW(?[*:0]const u16) callconv(WINAPI) HINSTANC
 
 // --- events ----------------------------------------------------------------
 
-pub const Event = union(enum) {
-    close_requested,
-    resized: struct { width: u32, height: u32 },
-};
+const core_event = @import("../event.zig");
+/// Native windows emit the same core events as the terminal session, so
+/// one app loop drives every surface (#5).
+pub const Event = core_event.Event;
+
+const WM_MOUSEMOVE = 0x0200;
+const WM_LBUTTONDOWN = 0x0201;
+const WM_LBUTTONUP = 0x0202;
+const WM_RBUTTONDOWN = 0x0204;
+const WM_RBUTTONUP = 0x0205;
+const WM_MOUSEWHEEL = 0x020A;
+const WM_KEYDOWN = 0x0100;
+const WM_CHAR = 0x0102;
+
+fn loShort(v: usize) i32 {
+    return @as(i16, @bitCast(@as(u16, @truncate(v & 0xFFFF))));
+}
+fn hiShort(v: usize) i32 {
+    return @as(i16, @bitCast(@as(u16, @truncate((v >> 16) & 0xFFFF))));
+}
+
+fn vkToKey(vk: usize) ?core_event.Key {
+    return switch (vk) {
+        0x26 => .up,
+        0x28 => .down,
+        0x25 => .left,
+        0x27 => .right,
+        0x24 => .home,
+        0x23 => .end,
+        0x21 => .page_up,
+        0x22 => .page_down,
+        0x0D => .enter,
+        0x1B => .escape,
+        0x09 => .tab,
+        0x08 => .backspace,
+        0x2E => .delete,
+        else => null,
+    };
+}
 
 // --- window ----------------------------------------------------------------
 
@@ -193,15 +228,47 @@ pub const Window = struct {
     fn wndProc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) callconv(WINAPI) LRESULT {
         if (fromHwnd(hwnd)) |self| switch (msg) {
             WM_CLOSE => {
-                self.queue.append(self.gpa, .close_requested) catch {};
+                self.queue.append(self.gpa, .{ .close_requested = core_event.main_window }) catch {};
                 return 0; // app decides whether to destroy
             },
             WM_SIZE => {
                 const dims: usize = @bitCast(lparam);
-                self.queue.append(self.gpa, .{ .resized = .{
-                    .width = @intCast(dims & 0xFFFF),
-                    .height = @intCast((dims >> 16) & 0xFFFF),
-                } }) catch {};
+                self.queue.append(self.gpa, .{ .resized = .{ .size = .{
+                    .width = @floatFromInt(dims & 0xFFFF),
+                    .height = @floatFromInt((dims >> 16) & 0xFFFF),
+                } } }) catch {};
+            },
+            WM_MOUSEMOVE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP => {
+                const lp: usize = @bitCast(lparam);
+                const pos: core_event.PointerEvent = .{
+                    .position = .{ .x = @floatFromInt(loShort(lp)), .y = @floatFromInt(hiShort(lp)) },
+                    .buttons = .{
+                        .primary = wparam & 0x0001 != 0,
+                        .secondary = wparam & 0x0002 != 0,
+                        .middle = wparam & 0x0010 != 0,
+                    },
+                };
+                const ev: Event = switch (msg) {
+                    WM_MOUSEMOVE => .{ .pointer_move = pos },
+                    WM_LBUTTONDOWN, WM_RBUTTONDOWN => .{ .pointer_down = pos },
+                    else => .{ .pointer_up = pos },
+                };
+                self.queue.append(self.gpa, ev) catch {};
+            },
+            WM_MOUSEWHEEL => {
+                const delta = hiShort(wparam);
+                self.queue.append(self.gpa, .{ .key_down = .{ .key = if (delta > 0) .up else .down } }) catch {};
+            },
+            WM_KEYDOWN => {
+                if (vkToKey(wparam)) |k| {
+                    self.queue.append(self.gpa, .{ .key_down = .{ .key = k } }) catch {};
+                }
+            },
+            WM_CHAR => {
+                const ch: u21 = @intCast(wparam & 0x1FFFFF);
+                if (ch >= 0x20 and ch != 0x7F) {
+                    self.queue.append(self.gpa, .{ .text = .{ .codepoint = ch } }) catch {};
+                }
             },
             WM_PAINT => {
                 if (self.frame_width > 0) {
