@@ -158,6 +158,7 @@ extern "X11" fn XWhitePixel(*Display, c_int) c_ulong;
 extern "X11" fn XCreateSimpleWindow(*Display, Window_, c_int, c_int, c_uint, c_uint, c_uint, c_ulong, c_ulong) Window_;
 extern "X11" fn XDestroyWindow(*Display, Window_) c_int;
 extern "X11" fn XStoreName(*Display, Window_, [*:0]const u8) c_int;
+extern "X11" fn XChangeProperty(*Display, Window_, Atom, Atom, c_int, c_int, [*]const u8, c_int) c_int;
 extern "X11" fn XSelectInput(*Display, Window_, c_long) c_int;
 extern "X11" fn XMapWindow(*Display, Window_) c_int;
 extern "X11" fn XFlush(*Display) c_int;
@@ -240,7 +241,12 @@ pub const Window = struct {
         const white = XWhitePixel(display, screen);
 
         const handle = XCreateSimpleWindow(display, root, 0, 0, opts.width, opts.height, 0, white, white);
-        _ = XStoreName(display, handle, opts.title.ptr);
+        _ = XStoreName(display, handle, opts.title.ptr); // legacy/fallback (Latin-1)
+        // Modern UTF-8 title: _NET_WM_NAME = UTF8_STRING, so the WM shows
+        // multibyte glyphs (e.g. the em-dash) correctly. PropModeReplace=0.
+        const net_wm_name = XInternAtom(display, "_NET_WM_NAME", 0);
+        const utf8_string = XInternAtom(display, "UTF8_STRING", 0);
+        _ = XChangeProperty(display, handle, net_wm_name, utf8_string, 8, 0, opts.title.ptr, @intCast(opts.title.len));
         _ = XSelectInput(display, handle, ExposureMask | KeyPressMask | ButtonPressMask | ButtonReleaseMask | PointerMotionMask | StructureNotifyMask);
 
         var wm_delete = XInternAtom(display, "WM_DELETE_WINDOW", 0);
