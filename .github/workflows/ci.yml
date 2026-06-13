@@ -23,9 +23,9 @@ jobs:
       - name: Check formatting
         run: zig fmt --check .
 
-      - name: Install X11 (Linux GUI backend)
+      - name: Install X11/GL (Linux backends + software GL for tests)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libx11-dev
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libgl-dev libgl1-mesa-dri xvfb
 
       - name: Build
         run: zig build
@@ -35,6 +35,10 @@ jobs:
 
       - name: Visual golden test
         run: zig build visual-test
+
+      - name: GL context test (Linux, software GL)
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a ./zig-out/bin/zooee-gl-demo
 
       - name: Binary size gate
         shell: bash
