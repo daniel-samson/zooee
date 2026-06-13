@@ -104,6 +104,14 @@ fn drawHelloText(b: Backend, s: f32) !void {
     b.drawText(.{ .x = 1 * s, .y = 1 * s }, "Zooee 1.0!", .{ .size = 2.5 * s });
 }
 
+/// Non-ASCII text (#114): accents + em-dash exercise the dynamic glyph atlas.
+/// Not in `all` (which requires cross-harness goldens); the GPU self-checks
+/// build a local Scene from it and compare against the raster reference, which
+/// rasterizes any codepoint on demand.
+pub fn drawUnicode(b: Backend, s: f32) !void {
+    b.drawText(.{ .x = 1 * s, .y = 1 * s }, "café — déjà", .{ .size = 2.5 * s });
+}
+
 /// Built via the layout engine (#3) rather than hand-placed draws: a
 /// padded column holding a bordered text card and a row of two flex-grow
 /// fills. Exercises box model, gap, text measurement, and remainder
