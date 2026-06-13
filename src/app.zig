@@ -189,6 +189,29 @@ pub const WindowOptions = struct {
     height: u32 = 600,
 };
 
+/// Render a Model's view into `b` once, offscreen — no window, no event
+/// loop. The reusable headless-rendering entry point (#13): the test
+/// harness drives it with the CPU raster backend to screenshot the full
+/// app stack (view → layout → render), and GPU backends will drive the
+/// same call against an offscreen FBO/render-target for golden
+/// comparison. Returns the LayoutResult (placements) for hit-test reuse;
+/// caller owns it (deinit, or use an arena).
+pub fn renderOffscreen(
+    comptime Model: type,
+    model: *Model,
+    b: backend_mod.Backend,
+    arena: std.mem.Allocator,
+    viewport: geometry.Size,
+    scale: f32,
+) !layout_mod.LayoutResult {
+    const root = try model.view(arena, scale);
+    const result = try layout_mod.layout(arena, b, root, viewport);
+    try b.beginFrame(viewport);
+    layout_mod.render(b, result);
+    try b.endFrame();
+    return result;
+}
+
 /// Map one event to a Command, dispatching interaction messages through
 /// the model. Shared by the terminal and GUI loops.
 fn dispatch(
