@@ -5,7 +5,8 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const metal = @import("zooee").backends.metal;
+const zooee = @import("zooee");
+const metal = zooee.backends.metal;
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.arena.allocator();
@@ -114,7 +115,6 @@ pub fn main(init: std.process.Init) !void {
 
     // Slice 5: glyph atlas text. Render white "Hi zooee" on black via the
     // Metal glyph atlas; assert ink exists and the far-right region is empty.
-    const zooee = @import("zooee");
     const font = try zooee.font.ttf.Font.parse(zooee.test_font_ttf);
     var gr = metal.MetalGlyphRenderer.init(ctx.device, ctx.queue, gpa, &font, 48) catch |err| {
         try out.print("METAL-GLYPH-INIT-FAILED: {t}\n", .{err});
@@ -155,42 +155,57 @@ pub fn main(init: std.process.Init) !void {
         const text_scenes = [_][]const u8{ "hello_text", "card", "layout_card" };
         for ([_][]const u8{ "overlap", "nested_clip", "sides", "image", "hello_text", "card", "layout_card" }) |name| {
             const scene = findScene(name) orelse continue;
-            try zooee.fixtures.run(scene, mb.interface(), 8);
-            const mpx = try mb.readPixels();
-            defer gpa.free(mpx);
-            var ras = zooee.backends.raster.RasterBackend.init(gpa);
-            defer ras.deinit();
-            try ras.setFont(zooee.test_font_ttf);
-            try zooee.fixtures.run(scene, ras.interface(), 8);
-            var bad: usize = 0;
-            const n = @min(mpx.len, ras.pixels.len) / 4;
-            for (0..n) |p| {
-                var md: u8 = 0;
-                for (0..3) |ch| {
-                    const a = mpx[p * 4 + ch];
-                    const bch = ras.pixels[p * 4 + ch];
-                    const d = if (a > bch) a - bch else bch - a;
-                    if (d > md) md = d;
-                }
-                if (md > 32) bad += 1;
-            }
-            const frac = @as(f32, @floatFromInt(bad)) / @as(f32, @floatFromInt(n));
             var is_text = false;
             for (text_scenes) |t| {
                 if (std.mem.eql(u8, name, t)) is_text = true;
             }
-            const scene_ok = frac < if (is_text) @as(f32, 0.05) else 0.03;
-            if (!scene_ok) backend_ok = false;
-            try out.print("Metal Backend vs raster [{s}]: bad_frac={d:.4} {s}\n", .{ name, frac, if (scene_ok) "PASS" else "FAIL" });
+            if (!(try compareScene(gpa, out, &mb, scene, is_text))) backend_ok = false;
         }
+        // Non-ASCII (#114): café — déjà exercises the dynamic glyph atlas.
+        // Local scene (not in fixtures.all, which requires cross-harness
+        // goldens); proves Metal renders arbitrary Unicode == raster.
+        const unicode_scene: zooee.fixtures.Scene = .{ .name = "unicode_text", .width = 20, .height = 4, .draw = drawUnicode };
+        if (!(try compareScene(gpa, out, &mb, unicode_scene, true))) backend_ok = false;
     }
 
     try out.flush();
     if (!ok or !quad_ok or !rect_ok or !round_ok or !glyph_ok or !backend_ok) std.process.exit(1);
 }
 
-fn findScene(name: []const u8) ?@import("zooee").fixtures.Scene {
-    for (@import("zooee").fixtures.all) |s| {
+/// Run a scene through the Metal Backend AND raster; print + return whether
+/// they match within tolerance (text scenes allow 1px AA wobble).
+fn compareScene(gpa: std.mem.Allocator, out: *std.Io.Writer, mb: *metal.MetalBackend, scene: zooee.fixtures.Scene, is_text: bool) !bool {
+    try zooee.fixtures.run(scene, mb.interface(), 8);
+    const mpx = try mb.readPixels();
+    defer gpa.free(mpx);
+    var ras = zooee.backends.raster.RasterBackend.init(gpa);
+    defer ras.deinit();
+    try ras.setFont(zooee.test_font_ttf);
+    try zooee.fixtures.run(scene, ras.interface(), 8);
+    var bad: usize = 0;
+    const n = @min(mpx.len, ras.pixels.len) / 4;
+    for (0..n) |p| {
+        var md: u8 = 0;
+        for (0..3) |ch| {
+            const a = mpx[p * 4 + ch];
+            const bch = ras.pixels[p * 4 + ch];
+            const d = if (a > bch) a - bch else bch - a;
+            if (d > md) md = d;
+        }
+        if (md > 32) bad += 1;
+    }
+    const frac = @as(f32, @floatFromInt(bad)) / @as(f32, @floatFromInt(n));
+    const scene_ok = frac < if (is_text) @as(f32, 0.05) else 0.03;
+    try out.print("Metal Backend vs raster [{s}]: bad_frac={d:.4} {s}\n", .{ scene.name, frac, if (scene_ok) "PASS" else "FAIL" });
+    return scene_ok;
+}
+
+fn drawUnicode(b: zooee.Backend, s: f32) !void {
+    b.drawText(.{ .x = 1 * s, .y = 1 * s }, "café — déjà", .{ .size = 2.5 * s });
+}
+
+fn findScene(name: []const u8) ?zooee.fixtures.Scene {
+    for (zooee.fixtures.all) |s| {
         if (std.mem.eql(u8, s.name, name)) return s;
     }
     return null;
