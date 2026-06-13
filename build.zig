@@ -95,10 +95,10 @@ pub fn build(b: *std.Build) void {
     // Native GUI window demo(s).
     switch (os) {
         .macos => {
-            // Two .apps so each renderer can be launched and compared: the
-            // Metal one GPU-presents (#101), the raster one forces software.
-            installMacApp(b, demos_step, guiDemo(b, mod, target, optimize, "zooee-gui-metal", false), "Zooee Metal", "zooee-gui-metal");
-            installMacApp(b, demos_step, guiDemo(b, mod, target, optimize, "zooee-gui-raster", true), "Zooee Raster", "zooee-gui-raster");
+            // One .app: Metal (#101) with the raster fallback built in. Force
+            // the raster path for QA with ZOOEE_SOFTWARE=1 — no separate app
+            // needed (raster's other role, the golden reference, is headless).
+            installMacApp(b, demos_step, guiDemo(b, mod, target, optimize, "zooee-gui-demo", false), "Zooee", "zooee-gui-demo");
         },
         .windows => {
             const gui = guiDemo(b, mod, target, optimize, "zooee-gui-demo", false);
