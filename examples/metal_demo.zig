@@ -108,8 +108,34 @@ pub fn main(init: std.process.Init) !void {
         spx[corner] < 40 and spx[corner + 2] < 70;
     try out.print("Metal rounded+border: center=({d},{d},{d}) edge=({d},{d},{d}) corner=({d},{d},{d}) {s}\n", .{ spx[ci], spx[ci + 1], spx[ci + 2], spx[ei], spx[ei + 1], spx[ei + 2], spx[corner], spx[corner + 1], spx[corner + 2], if (round_ok) "PASS" else "FAIL" });
 
+    // Slice 5: glyph atlas text. Render white "Hi zooee" on black via the
+    // Metal glyph atlas; assert ink exists and the far-right region is empty.
+    const zooee = @import("zooee");
+    const font = try zooee.font.ttf.Font.parse(zooee.test_font_ttf);
+    var gr = metal.MetalGlyphRenderer.init(gpa, &font, 48) catch |err| {
+        try out.print("METAL-GLYPH-INIT-FAILED: {t}\n", .{err});
+        try out.flush();
+        std.process.exit(1);
+    };
+    defer gr.deinit();
+    const gw: u32 = 300;
+    const gh: u32 = 64;
+    const gpx = try gr.renderTextOffscreen(gpa, gw, gh, .{ 0, 0, 0, 1 }, 6, 6, "Hi zooee", .{ 1, 1, 1, 1 });
+    defer gpa.free(gpx);
+    var ink: usize = 0;
+    var right_ink: usize = 0;
+    for (0..gh) |yy| for (0..gw) |xx| {
+        const lum = gpx[(yy * gw + xx) * 4];
+        if (lum > 128) {
+            ink += 1;
+            if (xx > gw - 20) right_ink += 1; // far-right margin should be empty
+        }
+    };
+    const glyph_ok = ink > 60 and right_ink == 0;
+    try out.print("Metal glyph text: ink_px={d} right_margin_ink={d} {s}\n", .{ ink, right_ink, if (glyph_ok) "PASS" else "FAIL" });
+
     try out.flush();
-    if (!ok or !quad_ok or !rect_ok or !round_ok) std.process.exit(1);
+    if (!ok or !quad_ok or !rect_ok or !round_ok or !glyph_ok) std.process.exit(1);
 }
 
 fn rectScene(rr: *metal.MetalRectRenderer) void {
