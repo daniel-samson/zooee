@@ -55,8 +55,16 @@ const gl_backend = if (builtin.os.tag == .linux or builtin.os.tag == .macos)
 else
     struct {};
 
+/// D3D11 backend (#12) — the GPU-present path for runWindow on Windows.
+const d3d_backend = if (builtin.os.tag == .windows)
+    @import("backends/d3d11.zig")
+else
+    struct {};
+
 /// OSes whose native window can carry a GL context (the GPU-present path).
 const has_gl_window = builtin.os.tag == .linux or builtin.os.tag == .macos;
+/// OSes with a native GPU window backend (GL or D3D11).
+const has_gpu_window = has_gl_window or builtin.os.tag == .windows;
 
 /// Run a Model as a terminal app. Msg is the app's message type
 /// (any integer-backed enum or integer type).
@@ -149,17 +157,29 @@ pub fn runWindow(
     const gpa = init.arena.allocator();
     const io = init.io;
 
-    // GPU-present by default on platforms with a GL backend (#11 decision);
+    // GPU-present by default on platforms with a GPU backend (#11/#12);
     // ZOOEE_SOFTWARE forces the CPU raster path (deterministic CI, debugging).
-    const want_gl = has_gl_window and !init.environ_map.contains("ZOOEE_SOFTWARE");
+    const want_gpu = has_gpu_window and !init.environ_map.contains("ZOOEE_SOFTWARE");
 
-    const window = try platform.Window.create(gpa, .{ .title = opts.title, .width = opts.width, .height = opts.height, .gl = want_gl });
+    const window = try platform.Window.create(gpa, .{ .title = opts.title, .width = opts.width, .height = opts.height, .gl = want_gpu });
     defer window.destroy();
 
     // GL window + current context succeeded → drive the GPU-present loop.
     // Otherwise fall through to the CPU raster + OS blit path below.
     if (comptime has_gl_window) {
         if (window.gl_ctx != null) return runWindowGl(Model, Msg, model, window, init);
+    }
+
+    // Windows: try a D3D11 swapchain on the HWND (#12). Needs the interactive
+    // desktop session — falls back to raster + GDI blit when create() fails.
+    if (comptime builtin.os.tag == .windows) {
+        if (want_gpu) {
+            const px0 = platform.contentPixelSize(window);
+            if (d3d_backend.D3dSwapchain.create(window.hwnd, @intCast(px0.width), @intCast(px0.height))) |sc| {
+                var swapchain = sc;
+                return runWindowD3d(Model, Msg, model, window, &swapchain, init);
+            } else |_| {}
+        }
     }
 
     var raster = raster_mod.RasterBackend.init(gpa);
@@ -272,6 +292,85 @@ fn runWindowGl(
 
         try io.sleep(.fromMilliseconds(16), .awake);
     }
+}
+
+/// GPU-present loop (#12), Windows/D3D11: a DXGI swapchain on the HWND.
+/// D3dBackend renders to an offscreen RT on the swapchain's device; each
+/// frame the result is copied to the back buffer and presented. Same loop
+/// shape as runWindowGl; referenced only behind a comptime windows guard.
+fn runWindowD3d(
+    comptime Model: type,
+    comptime Msg: type,
+    model: *Model,
+    window: anytype,
+    swapchain: anytype,
+    init: std.process.Init,
+) !void {
+    const platform = WindowPlatform;
+    const gpa = init.arena.allocator();
+    const io = init.io;
+    defer swapchain.destroy();
+
+    const capture_path = init.environ_map.get("ZOOEE_CAPTURE");
+
+    var db = try d3d_backend.D3dBackend.initOnDevice(gpa, swapchain.device, swapchain.context);
+    defer db.deinit();
+    if (system_font.loadBytes(gpa, io)) |data| db.setFont(data) catch {};
+    const b = db.interface();
+
+    var frame_arena = std.heap.ArenaAllocator.init(gpa);
+    defer frame_arena.deinit();
+    var placements: []layout_mod.Placement = &.{};
+    var dirty = true;
+
+    loop: while (true) {
+        for (window.pumpEvents()) |ev| {
+            switch (dispatch(Model, Msg, model, ev, placements)) {
+                .none => {},
+                .redraw => dirty = true,
+                .quit => break :loop,
+            }
+        }
+
+        if (dirty) {
+            _ = frame_arena.reset(.retain_capacity);
+            const arena = frame_arena.allocator();
+            const px = platform.contentPixelSize(window);
+            const scale: f32 = @floatCast(px.scale);
+            const root = try model.view(arena, scale);
+            const viewport: geometry.Size = .{ .width = @floatFromInt(px.width), .height = @floatFromInt(px.height) };
+            const result = try layout_mod.layout(arena, b, root, viewport);
+            placements = result.placements;
+            try b.beginFrame(viewport);
+            layout_mod.render(b, result);
+            try b.endFrame();
+
+            if (capture_path) |path| {
+                const pixels = try db.readPixels();
+                defer gpa.free(pixels);
+                try writePpm(gpa, io, path, pixels, db.off.width, db.off.height);
+                return;
+            }
+
+            db.presentTo(swapchain);
+            dirty = false;
+        }
+
+        try io.sleep(.fromMilliseconds(16), .awake);
+    }
+}
+
+/// Minimal P6 (binary RGB) PPM writer for the ZOOEE_CAPTURE hook on Windows
+/// (the GL path reuses gl.zig's writer). `rgba` is top-down RGBA.
+fn writePpm(gpa: std.mem.Allocator, io: std.Io, path: []const u8, rgba: []const u8, w: u32, h: u32) !void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(gpa);
+    var hbuf: [64]u8 = undefined;
+    const header = try std.fmt.bufPrint(&hbuf, "P6\n{d} {d}\n255\n", .{ w, h });
+    try buf.appendSlice(gpa, header);
+    var i: usize = 0;
+    while (i < rgba.len) : (i += 4) try buf.appendSlice(gpa, rgba[i .. i + 3]);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = buf.items });
 }
 
 pub const WindowOptions = struct {

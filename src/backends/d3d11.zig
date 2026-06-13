@@ -46,6 +46,32 @@ pub const Error = error{ NoDevice, NoBackBuffer, NoRtv, ReadbackFailed, ShaderFa
 
 // --- DXGI / D3D11 structs ---------------------------------------------------
 
+const HWND = *anyopaque;
+const GUID = extern struct { d1: u32, d2: u16, d3: u16, d4: [8]u8 };
+// IID_ID3D11Texture2D {6f15aaf2-d208-4e89-9ab4-489535d34f9c}
+const IID_ID3D11Texture2D: GUID = .{ .d1 = 0x6f15aaf2, .d2 = 0xd208, .d3 = 0x4e89, .d4 = .{ 0x9a, 0xb4, 0x48, 0x95, 0x35, 0xd3, 0x4f, 0x9c } };
+
+const DXGI_RATIONAL = extern struct { numerator: UINT = 0, denominator: UINT = 1 };
+const DXGI_MODE_DESC = extern struct {
+    width: UINT,
+    height: UINT,
+    refresh_rate: DXGI_RATIONAL = .{},
+    format: UINT,
+    scanline_ordering: UINT = 0,
+    scaling: UINT = 0,
+};
+const DXGI_SWAP_CHAIN_DESC = extern struct {
+    buffer_desc: DXGI_MODE_DESC,
+    sample_desc: DXGI_SAMPLE_DESC = .{},
+    buffer_usage: UINT,
+    buffer_count: UINT,
+    output_window: HWND,
+    windowed: BOOL,
+    swap_effect: UINT = 0, // DXGI_SWAP_EFFECT_DISCARD
+    flags: UINT = 0,
+};
+const DXGI_USAGE_RENDER_TARGET_OUTPUT: UINT = 0x20;
+
 const DXGI_SAMPLE_DESC = extern struct { count: UINT = 1, quality: UINT = 0 };
 const D3D11_TEXTURE2D_DESC = extern struct {
     width: UINT,
@@ -307,6 +333,78 @@ extern "d3d11" fn D3D11CreateDevice(
     context: *?*IContext,
 ) callconv(WINAPI) HRESULT;
 
+const ISwapChain = extern struct {
+    vtbl: *const Vtbl,
+    const Vtbl = extern struct {
+        _pad0: [8]*const anyopaque, // IUnknown(3)+IDXGIObject(4)+GetDevice(1)
+        Present: *const fn (*ISwapChain, UINT, UINT) callconv(WINAPI) HRESULT, // 8
+        GetBuffer: *const fn (*ISwapChain, UINT, *const GUID, *?*ITexture2D) callconv(WINAPI) HRESULT, // 9
+    };
+};
+
+extern "d3d11" fn D3D11CreateDeviceAndSwapChain(
+    adapter: ?*anyopaque,
+    driver_type: UINT,
+    software: ?*anyopaque,
+    flags: UINT,
+    feature_levels: ?[*]const UINT,
+    num_feature_levels: UINT,
+    sdk_version: UINT,
+    swap_chain_desc: *const DXGI_SWAP_CHAIN_DESC,
+    swap_chain: *?*ISwapChain,
+    device: *?*IDevice,
+    feature_level: ?*UINT,
+    context: *?*IContext,
+) callconv(WINAPI) HRESULT;
+
+/// A D3D11 device + context + DXGI swapchain bound to a Win32 window — the
+/// GPU-present path for runWindow. Requires the interactive desktop session
+/// (DXGI fails NOT_CURRENTLY_AVAILABLE in service/SSH sessions); the caller
+/// falls back to the CPU raster + GDI blit path when create() errors.
+pub const D3dSwapchain = struct {
+    device: *IDevice,
+    context: *IContext,
+    swapchain: *ISwapChain,
+    width: u32,
+    height: u32,
+
+    pub fn create(hwnd: *anyopaque, width: u32, height: u32) Error!D3dSwapchain {
+        var desc: DXGI_SWAP_CHAIN_DESC = .{
+            .buffer_desc = .{ .width = width, .height = height, .format = DXGI_FORMAT_R8G8B8A8_UNORM },
+            .buffer_usage = DXGI_USAGE_RENDER_TARGET_OUTPUT,
+            .buffer_count = 2,
+            .output_window = hwnd,
+            .windowed = 1,
+        };
+        var swapchain: ?*ISwapChain = null;
+        var device: ?*IDevice = null;
+        var context: ?*IContext = null;
+        for ([_]UINT{ D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP }) |driver| {
+            if (ok(D3D11CreateDeviceAndSwapChain(null, driver, null, 0, null, 0, D3D11_SDK_VERSION, &desc, &swapchain, &device, null, &context))) break;
+        }
+        if (swapchain == null or device == null or context == null) return error.NoDevice;
+        return .{ .device = device.?, .context = context.?, .swapchain = swapchain.?, .width = width, .height = height };
+    }
+
+    pub fn destroy(self: *D3dSwapchain) void {
+        release(self.swapchain);
+        release(self.context);
+        release(self.device);
+    }
+
+    /// The swapchain's back-buffer texture (caller releases). CopyResource
+    /// the rendered frame into it, then present().
+    pub fn backBuffer(self: *D3dSwapchain) Error!*ITexture2D {
+        var bb: ?*ITexture2D = null;
+        if (!ok(self.swapchain.vtbl.GetBuffer(self.swapchain, 0, &IID_ID3D11Texture2D, &bb)) or bb == null) return error.NoBackBuffer;
+        return bb.?;
+    }
+
+    pub fn present(self: *D3dSwapchain) void {
+        _ = self.swapchain.vtbl.Present(self.swapchain, 0, 0);
+    }
+};
+
 // --- bring-up ---------------------------------------------------------------
 
 /// A D3D11 device + offscreen render-target texture. Slice 1: enough to
@@ -318,6 +416,20 @@ pub const D3dOffscreen = struct {
     rtv: *IRtv,
     width: u32,
     height: u32,
+    /// false when the device is borrowed (e.g. from a swapchain) — destroy
+    /// must not release it then.
+    owns_device: bool = true,
+
+    /// Build the render target on an existing device/context (borrowed).
+    pub fn createOnDevice(device: *IDevice, context: *IContext, width: u32, height: u32) Error!D3dOffscreen {
+        var tdesc: D3D11_TEXTURE2D_DESC = .{ .width = width, .height = height, .format = DXGI_FORMAT_R8G8B8A8_UNORM, .usage = D3D11_USAGE_DEFAULT, .bind_flags = D3D11_BIND_RENDER_TARGET };
+        var target: ?*ITexture2D = null;
+        if (!ok(device.vtbl.CreateTexture2D(device, &tdesc, null, &target)) or target == null) return error.NoBackBuffer;
+        errdefer release(target.?);
+        var rtv: ?*IRtv = null;
+        if (!ok(device.vtbl.CreateRenderTargetView(device, target.?, null, &rtv)) or rtv == null) return error.NoRtv;
+        return .{ .device = device, .context = context, .target = target.?, .rtv = rtv.?, .width = width, .height = height, .owns_device = false };
+    }
 
     pub fn create(width: u32, height: u32) Error!D3dOffscreen {
         var device: ?*IDevice = null;
@@ -357,8 +469,10 @@ pub const D3dOffscreen = struct {
     pub fn destroy(self: *D3dOffscreen) void {
         release(self.rtv);
         release(self.target);
-        release(self.context);
-        release(self.device);
+        if (self.owns_device) {
+            release(self.context);
+            release(self.device);
+        }
     }
 
     /// Recreate the render-target texture + view at a new size (keeps the
@@ -1384,6 +1498,19 @@ pub const D3dBackend = struct {
     pub fn initOffscreen(gpa: std.mem.Allocator) !D3dBackend {
         var off = try D3dOffscreen.create(1, 1);
         errdefer off.destroy();
+        return fromOffscreen(gpa, off);
+    }
+
+    /// D3D Backend on a borrowed device/context (e.g. a swapchain's) — the
+    /// GPU-present path. Renders to an owned offscreen RT; the caller copies
+    /// it to the swapchain back buffer (copyTo) and presents.
+    pub fn initOnDevice(gpa: std.mem.Allocator, device: *IDevice, context: *IContext) !D3dBackend {
+        var off = try D3dOffscreen.createOnDevice(device, context, 1, 1);
+        errdefer off.destroy();
+        return fromOffscreen(gpa, off);
+    }
+
+    fn fromOffscreen(gpa: std.mem.Allocator, off: D3dOffscreen) !D3dBackend {
         return .{
             .gpa = gpa,
             .off = off,
@@ -1391,6 +1518,16 @@ pub const D3dBackend = struct {
             .exact = try D3dExactRectRenderer.init(off.device, off.context, true),
             .image = try D3dImageRenderer.init(off.device, off.context),
         };
+    }
+
+    /// Copy the rendered frame to the swapchain's back buffer and present it
+    /// (the GPU-present path). Same size/format required — both RGBA8 at the
+    /// window size.
+    pub fn presentTo(self: *D3dBackend, sc: *D3dSwapchain) void {
+        const back = sc.backBuffer() catch return;
+        self.off.context.vtbl.CopyResource(self.off.context, back, self.off.target);
+        release(back);
+        sc.present();
     }
 
     pub fn deinit(self: *D3dBackend) void {

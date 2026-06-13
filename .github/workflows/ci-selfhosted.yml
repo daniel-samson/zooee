@@ -75,3 +75,25 @@ jobs:
           name: window-capture
           path: window.bmp
           if-no-files-found: ignore
+
+      # D3D11 GPU window (#12): the interactive session has a desktop, so the
+      # DXGI swapchain succeeds here (unlike headless SSH). ZOOEE_CAPTURE makes
+      # runWindow render one frame through the D3D11 GPU path, read the back
+      # buffer, and write a PPM — present only when the GPU path actually ran
+      # (absent on a raster fallback).
+      - name: D3D11 GPU window capture
+        run: |
+          $env:ZOOEE_CAPTURE = "d3d_window.ppm"
+          Start-Process -FilePath "zig-out\bin\zooee-gui-demo.exe" -Wait
+          if (-not (Test-Path d3d_window.ppm)) {
+            throw "no D3D capture - GPU swapchain path did not run (raster fallback?)"
+          }
+          Write-Host "D3D11 GPU window captured: $((Get-Item d3d_window.ppm).Length) bytes"
+
+      - name: Upload D3D window capture
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: d3d-window-capture
+          path: d3d_window.ppm
+          if-no-files-found: ignore
