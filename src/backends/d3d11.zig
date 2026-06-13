@@ -1356,7 +1356,7 @@ const comp_hlsl =
     \\}
     \\Texture2D tex : register(t0);
     \\SamplerState smp : register(s0);
-    \\float4 PSMain(VSOut i) : SV_TARGET { float4 c = tex.Sample(smp, i.uv); return float4(c.rgb, c.a * opacity); }
+    \\float4 PSMain(VSOut i) : SV_TARGET { float4 c = tex.Sample(smp, i.uv); return float4(c.rgb, opacity); }
 ;
 const CompCB = extern struct { vw: f32, vh: f32, opacity: f32, pad: f32 = 0 };
 
