@@ -151,7 +151,7 @@ pub fn main(init: std.process.Init) !void {
         // exercises per-side border colors + a single rounded corner via the
         // exact renderer. card/layout_card mix border + text.
         const text_scenes = [_][]const u8{ "hello_text", "card", "layout_card" };
-        for ([_][]const u8{ "overlap", "nested_clip", "sides", "hello_text", "card", "layout_card" }) |name| {
+        for ([_][]const u8{ "overlap", "nested_clip", "sides", "image", "hello_text", "card", "layout_card" }) |name| {
             const scene = findScene(name) orelse continue;
             try zooee.fixtures.run(scene, glb.interface(), 8);
             const glpx = try glb.readPixels();

@@ -232,6 +232,7 @@ const Gl = struct {
     vertexAttribPointer: *const fn (GLuint, GLint, GLenum, u8, GLsizei, ?*const anyopaque) callconv(.c) void,
     enableVertexAttribArray: *const fn (GLuint) callconv(.c) void,
     genTextures: *const fn (GLsizei, [*]GLuint) callconv(.c) void,
+    deleteTextures: *const fn (GLsizei, [*]const GLuint) callconv(.c) void,
     bindTexture: *const fn (GLenum, GLuint) callconv(.c) void,
     texImage2D: *const fn (GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, ?*const anyopaque) callconv(.c) void,
     texParameteri: *const fn (GLenum, GLenum, GLint) callconv(.c) void,
@@ -850,6 +851,118 @@ fn col4(c: style.Color) [4]f32 {
     };
 }
 
+// === Image renderer (positioned textured quad) ==============================
+// Draws an uploaded RGBA texture into a pixel-space rect — the GL half of
+// Backend.drawImage. GL_NEAREST + CLAMP_TO_EDGE match raster.drawImage's
+// nearest-neighbor, clamped sampling, so GL is pixel-exact against the
+// raster golden. uv runs 0..1 across the rect; texel 0 (first uploaded row)
+// is our top-down row 0, placed at the rect's top edge.
+
+const image_vert: [*:0]const u8 =
+    \\#version 120
+    \\attribute vec2 pos;
+    \\attribute vec2 uv;
+    \\uniform vec2 viewport;
+    \\varying vec2 v_uv;
+    \\void main() {
+    \\  v_uv = uv;
+    \\  vec2 ndc = vec2(pos.x / viewport.x * 2.0 - 1.0, 1.0 - pos.y / viewport.y * 2.0);
+    \\  gl_Position = vec4(ndc, 0.0, 1.0);
+    \\}
+;
+const image_frag: [*:0]const u8 =
+    \\#version 120
+    \\varying vec2 v_uv;
+    \\uniform sampler2D tex;
+    \\void main() { gl_FragColor = texture2D(tex, v_uv); }
+;
+
+pub const ImageRenderer = struct {
+    gl: Gl,
+    program: GLuint,
+    vao: GLuint,
+    vbo: GLuint,
+    pos_loc: GLuint,
+    uv_loc: GLuint,
+    u_viewport: GLint,
+    u_tex: GLint,
+
+    pub fn init() Error!ImageRenderer {
+        const gl = try Gl.load();
+        const vs = QuadRenderer.compile(gl, GL_VERTEX_SHADER, image_vert) orelse return error.NoContext;
+        const fs = QuadRenderer.compile(gl, GL_FRAGMENT_SHADER, image_frag) orelse return error.NoContext;
+        const prog = gl.createProgram();
+        gl.attachShader(prog, vs);
+        gl.attachShader(prog, fs);
+        gl.linkProgram(prog);
+        var ok: GLint = 0;
+        gl.getProgramiv(prog, GL_LINK_STATUS, &ok);
+        if (ok == 0) return error.NoContext;
+
+        var vao: GLuint = 0;
+        gl.genVertexArrays(1, @ptrCast(&vao));
+        gl.bindVertexArray(vao);
+        var vbo: GLuint = 0;
+        gl.genBuffers(1, @ptrCast(&vbo));
+
+        return .{
+            .gl = gl,
+            .program = prog,
+            .vao = vao,
+            .vbo = vbo,
+            .pos_loc = @intCast(gl.getAttribLocation(prog, "pos")),
+            .uv_loc = @intCast(gl.getAttribLocation(prog, "uv")),
+            .u_viewport = gl.getUniformLocation(prog, "viewport"),
+            .u_tex = gl.getUniformLocation(prog, "tex"),
+        };
+    }
+
+    /// Upload an RGBA image (top-down) into a new GL texture; nearest +
+    /// clamp to match raster. Returns the texture id.
+    pub fn upload(self: *ImageRenderer, width: u32, height: u32, rgba: []const u8) GLuint {
+        const gl = self.gl;
+        var tex: GLuint = 0;
+        gl.genTextures(1, @ptrCast(&tex));
+        gl.bindTexture(GL_TEXTURE_2D, tex);
+        gl.texImage2D(GL_TEXTURE_2D, 0, GL_RGBA, @intCast(width), @intCast(height), 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.ptr);
+        gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        return tex;
+    }
+
+    /// Draw texture `tex` into pixel-space `rect`. `vw`/`vh` are the
+    /// framebuffer size.
+    pub fn draw(self: *ImageRenderer, vw: f32, vh: f32, rect: geometry.Rect, tex: GLuint) void {
+        const gl = self.gl;
+        const x0 = rect.x;
+        const y0 = rect.y;
+        const x1 = rect.x + rect.width;
+        const y1 = rect.y + rect.height;
+        // Interleaved pos.xy, uv.xy. uv.t = 0 at the rect top (texel row 0).
+        const verts = [_]f32{
+            x0, y0, 0, 0,
+            x1, y0, 1, 0,
+            x0, y1, 0, 1,
+            x1, y1, 1, 1,
+        };
+        gl.useProgram(self.program);
+        gl.uniform2f(self.u_viewport, vw, vh);
+        gl.activeTexture(GL_TEXTURE0);
+        gl.bindTexture(GL_TEXTURE_2D, tex);
+        gl.uniform1i(self.u_tex, 0);
+        gl.bindVertexArray(self.vao);
+        gl.bindBuffer(GL_ARRAY_BUFFER, self.vbo);
+        gl.bufferData(GL_ARRAY_BUFFER, @sizeOf(@TypeOf(verts)), &verts, GL_STATIC_DRAW);
+        gl.vertexAttribPointer(self.pos_loc, 2, GL_FLOAT, GL_FALSE, 16, @ptrFromInt(0));
+        gl.enableVertexAttribArray(self.pos_loc);
+        gl.vertexAttribPointer(self.uv_loc, 2, GL_FLOAT, GL_FALSE, 16, @ptrFromInt(8));
+        gl.enableVertexAttribArray(self.uv_loc);
+        gl.drawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
+};
+
 /// Offscreen FBO render for the rounded-rect renderer (mirrors
 /// renderRectsOffscreen). Readback is top-down.
 pub fn renderRoundedOffscreen(
@@ -1163,6 +1276,7 @@ pub const GlBackend = struct {
     win: GlWindow,
     rect: RectRenderer,
     exact: ExactRectRenderer,
+    image: ImageRenderer,
     fbo: GLuint = 0,
     target: GLuint = 0,
     width: u32 = 0,
@@ -1179,6 +1293,7 @@ pub const GlBackend = struct {
             .win = win,
             .rect = try RectRenderer.init(),
             .exact = try ExactRectRenderer.init(),
+            .image = try ImageRenderer.init(),
         };
     }
 
@@ -1306,11 +1421,9 @@ pub const GlBackend = struct {
     }
 
     fn drawImage(ptr: *anyopaque, rect: geometry.Rect, texture: *Backend.Texture) void {
-        // GL drawImage (positioned textured quad) is a follow-up; the
-        // fixtures validated this slice have no images.
-        _ = ptr;
-        _ = rect;
-        _ = texture;
+        const self = self_(ptr);
+        enableBlend();
+        self.image.draw(@floatFromInt(self.width), @floatFromInt(self.height), rect, @intCast(@intFromPtr(texture)));
     }
 
     fn applyScissor(self: *GlBackend) void {
@@ -1351,20 +1464,15 @@ pub const GlBackend = struct {
     }
 
     fn createTexture(ptr: *anyopaque, width: u32, height: u32, rgba: []const u8) Backend.Error!*Backend.Texture {
-        // Minimal: GL texture upload; drawImage wiring is a follow-up.
         const self = self_(ptr);
-        const gl = self.rect.gl;
-        _ = rgba;
-        _ = width;
-        _ = height;
-        var tex: GLuint = 0;
-        gl.genTextures(1, @ptrCast(&tex));
+        const tex = self.image.upload(width, height, rgba);
         return @ptrFromInt(tex);
     }
 
     fn destroyTexture(ptr: *anyopaque, texture: *Backend.Texture) void {
-        _ = ptr;
-        _ = texture;
+        const self = self_(ptr);
+        const tex: GLuint = @intCast(@intFromPtr(texture));
+        self.image.gl.deleteTextures(1, @ptrCast(&tex));
     }
 
     fn measureText(ptr: *anyopaque, text: []const u8, ts: style.TextStyle) geometry.Size {
