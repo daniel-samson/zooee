@@ -11,8 +11,8 @@ set -euo pipefail
 
 SMALL_MAX=$((2 * 1024 * 1024)) # 2 MiB tripwire
 
-# Product binaries to gate (dev tools excluded).
-GATED='zooee zooee-window-demo'
+# Product binaries to gate (dev tools and GPU self-checks excluded).
+GATED='zooee zooee-gui-demo'
 
 fail=0
 echo "| binary | bytes | limit | status |" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
@@ -26,7 +26,7 @@ for name in $GATED; do
   for candidate in "zig-out/bin/$name" "zig-out/bin/$name.exe"; do
     [ -f "$candidate" ] && bin="$candidate"
   done
-  [ -z "$bin" ] && continue # not built on this target (e.g. window demo off-Windows)
+  [ -z "$bin" ] && continue # not built on this target (e.g. zooee-gui-demo off-Windows/Linux)
   size=$(wc -c < "$bin" | tr -d ' ')
   status=OK
   if [ "$size" -gt "$SMALL_MAX" ]; then

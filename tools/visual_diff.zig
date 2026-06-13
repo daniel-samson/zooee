@@ -1,6 +1,11 @@
 //! visual-diff: compare two images within a perceptual tolerance (#13).
 //!
-//! Usage: visual-diff <golden> <actual> [--max-avg-diff N] [--max-pixel-frac F]
+//! Usage: visual-diff [<golden>|--expect-solid R,G,B|--reject-solid R,G,B] <actual>
+//!        [--max-avg-diff N] [--max-pixel-frac F]
+//!
+//! `--reject-solid R,G,B` passes only if the image has content (is NOT
+//! uniformly that color) — the on-screen window e2e: a rendered UI isn't
+//! solid white, a blank window is.
 //!
 //! Supports uncompressed 24/32-bit BMP (what the Windows capture script
 //! emits) and binary PPM P6 (what RasterBackend.writePpm emits). Images
@@ -24,6 +29,16 @@ const Image = struct {
 fn fail(comptime fmt: []const u8, args: anytype) noreturn {
     std.debug.print("visual-diff: " ++ fmt ++ "\n", args);
     std.process.exit(2);
+}
+
+fn parseRgb(s: []const u8) [3]u8 {
+    var it = std.mem.splitScalar(u8, s, ',');
+    var rgb: [3]u8 = undefined;
+    for (0..3) |ch| {
+        rgb[ch] = std.fmt.parseInt(u8, it.next() orelse fail("color wants R,G,B", .{}), 10) catch
+            fail("color wants R,G,B", .{});
+    }
+    return rgb;
 }
 
 fn loadImage(gpa: std.mem.Allocator, path: []const u8, io: std.Io) Image {
@@ -92,6 +107,7 @@ pub fn main(init: std.process.Init) !void {
     var golden_path: ?[]const u8 = null;
     var actual_path: ?[]const u8 = null;
     var solid: ?[3]u8 = null;
+    var reject_solid: ?[3]u8 = null;
     var max_avg_diff: f64 = 2.0;
     var max_pixel_frac: f64 = 0.01;
 
@@ -108,20 +124,45 @@ pub fn main(init: std.process.Init) !void {
             // golden is a synthesized solid color at actual's size — for
             // e2e checks where the window size varies (DPI, theme).
             i += 1;
-            var ch_it = std.mem.splitScalar(u8, args[i], ',');
-            solid = .{ 0, 0, 0 };
-            for (0..3) |ch| {
-                solid.?[ch] = std.fmt.parseInt(u8, ch_it.next() orelse fail("--expect-solid wants R,G,B", .{}), 10) catch
-                    fail("--expect-solid wants R,G,B", .{});
-            }
-        } else if (golden_path == null and solid == null) {
+            solid = parseRgb(args[i]);
+        } else if (std.mem.eql(u8, arg, "--reject-solid")) {
+            // Pass only if the image is NOT uniformly this color — i.e.
+            // something was painted. For the on-screen window e2e: a
+            // rendered UI is not solid white; a blank window is.
+            i += 1;
+            reject_solid = parseRgb(args[i]);
+        } else if (golden_path == null and solid == null and reject_solid == null) {
             golden_path = arg;
         } else if (actual_path == null) {
             actual_path = arg;
         } else fail("unexpected argument: {s}", .{arg});
     }
-    const ap = actual_path orelse fail("usage: visual-diff [<golden>|--expect-solid R,G,B] <actual>", .{});
+    const ap = actual_path orelse fail("usage: visual-diff [<golden>|--expect-solid R,G,B|--reject-solid R,G,B] <actual>", .{});
     const actual = loadImage(gpa, ap, init.io);
+
+    // --reject-solid: assert the capture has content (not a blank window).
+    if (reject_solid) |rgb| {
+        const n: usize = @as(usize, actual.width) * actual.height;
+        var painted: u64 = 0;
+        var p: usize = 0;
+        while (p < n) : (p += 1) {
+            var max_ch: u8 = 0;
+            for (0..3) |ch| {
+                const a = actual.rgb[p * 3 + ch];
+                const d = if (a > rgb[ch]) a - rgb[ch] else rgb[ch] - a;
+                max_ch = @max(max_ch, d);
+            }
+            if (max_ch > 32) painted += 1;
+        }
+        const frac = @as(f64, @floatFromInt(painted)) / @as(f64, @floatFromInt(n));
+        std.debug.print("visual-diff: {d}x{d}, painted fraction {d:.4} (vs {d},{d},{d})\n", .{ actual.width, actual.height, frac, rgb[0], rgb[1], rgb[2] });
+        if (frac < 0.01) {
+            std.debug.print("visual-diff: BLANK (no content rendered)\n", .{});
+            std.process.exit(1);
+        }
+        std.debug.print("visual-diff: OK (content present)\n", .{});
+        return;
+    }
 
     const golden: Image = if (solid) |rgb| blk: {
         const n: usize = @as(usize, actual.width) * actual.height * 3;
