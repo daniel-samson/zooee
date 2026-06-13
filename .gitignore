@@ -11,3 +11,6 @@ zig-cache/
 # OS
 .DS_Store
 Thumbs.db
+
+# GL demo debug dump
+/gl_text.ppm
