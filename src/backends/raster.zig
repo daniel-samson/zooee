@@ -31,6 +31,9 @@ pub const RasterBackend = struct {
     /// RGBA8, row-major.
     pixels: []u8 = &.{},
     clip_stack: std.ArrayList(IRect) = .empty,
+    /// Active group-opacity layers (#121). Each entry holds the parent target
+    /// `self.pixels` was redirected from, plus the opacity to composite at.
+    layers: std.ArrayList(Layer) = .empty,
     textures: std.AutoHashMapUnmanaged(u32, TextureData) = .empty,
     next_texture_id: u32 = 1,
     in_frame: bool = false,
@@ -45,6 +48,12 @@ pub const RasterBackend = struct {
         width: u32,
         height: u32,
         rgba: []u8,
+    };
+
+    const Layer = struct {
+        /// The buffer draws were going to before this layer was pushed.
+        parent: []u8,
+        opacity: f32,
     };
 
     const IRect = struct {
@@ -82,6 +91,8 @@ pub const RasterBackend = struct {
 
     pub fn deinit(self: *RasterBackend) void {
         self.gpa.free(self.pixels);
+        for (self.layers.items) |layer| self.gpa.free(layer.parent);
+        self.layers.deinit(self.gpa);
         self.clip_stack.deinit(self.gpa);
         var it = self.textures.valueIterator();
         while (it.next()) |tex| self.gpa.free(tex.rgba);
@@ -120,6 +131,8 @@ pub const RasterBackend = struct {
         .draw_image = drawImage,
         .push_clip = pushClip,
         .pop_clip = popClip,
+        .push_layer = pushLayer,
+        .pop_layer = popLayer,
         .create_texture = createTexture,
         .destroy_texture = destroyTexture,
         .measure_text = measureText,
@@ -188,6 +201,7 @@ pub const RasterBackend = struct {
         const self = self_(ptr);
         std.debug.assert(self.in_frame);
         std.debug.assert(self.clip_stack.items.len == 0);
+        std.debug.assert(self.layers.items.len == 0);
         self.in_frame = false;
     }
 
@@ -377,6 +391,43 @@ pub const RasterBackend = struct {
         _ = self.clip_stack.pop();
     }
 
+    /// Redirect draws into a fresh transparent buffer (#121). The buffer is
+    /// the same size as the target so coordinates and the clip stack carry
+    /// over unchanged.
+    fn pushLayer(ptr: *anyopaque, opacity: f32) Backend.Error!void {
+        const self = self_(ptr);
+        const buf = self.gpa.alloc(u8, self.pixels.len) catch return error.OutOfMemory;
+        @memset(buf, 0); // transparent
+        self.layers.append(self.gpa, .{ .parent = self.pixels, .opacity = opacity }) catch {
+            self.gpa.free(buf);
+            return error.OutOfMemory;
+        };
+        self.pixels = buf;
+    }
+
+    /// Composite the layer's isolated buffer over its parent with straight-
+    /// alpha source-over, scaling each source pixel's alpha by the layer
+    /// opacity — the reference semantics GPU backends match.
+    fn popLayer(ptr: *anyopaque) void {
+        const self = self_(ptr);
+        const layer = self.layers.pop().?;
+        const src = self.pixels;
+        const dst = layer.parent;
+        const op: u32 = @intFromFloat(@round(std.math.clamp(layer.opacity, 0, 1) * 255));
+        var i: usize = 0;
+        while (i < src.len) : (i += 4) {
+            const ea: u32 = (@as(u32, src[i + 3]) * op) / 255;
+            if (ea == 0) continue;
+            const da: u32 = 255 - ea;
+            dst[i + 0] = @intCast((ea * src[i + 0] + da * dst[i + 0]) / 255);
+            dst[i + 1] = @intCast((ea * src[i + 1] + da * dst[i + 1]) / 255);
+            dst[i + 2] = @intCast((ea * src[i + 2] + da * dst[i + 2]) / 255);
+            dst[i + 3] = @intCast(@min(255, ea + (da * dst[i + 3]) / 255));
+        }
+        self.gpa.free(src);
+        self.pixels = dst;
+    }
+
     fn createTexture(ptr: *anyopaque, width: u32, height: u32, rgba: []const u8) Backend.Error!*Backend.Texture {
         const self = self_(ptr);
         const copy = self.gpa.dupe(u8, rgba) catch return error.OutOfMemory;
@@ -541,6 +592,32 @@ test "alpha blending source-over" {
 
     const p = raster.pixelAt(2, 2);
     try testing.expect(p.r > 120 and p.r < 132); // ~127
+}
+
+test "group opacity composites layer over backdrop" {
+    var raster = RasterBackend.init(testing.allocator);
+    defer raster.deinit();
+    const b = raster.interface();
+
+    try b.beginFrame(.{ .width = 8, .height = 4 });
+    // Opaque red backdrop across the left half; white clear elsewhere.
+    b.drawRect(.{ .x = 0, .y = 0, .width = 4, .height = 4 }, .{ .background = Color.rgb(255, 0, 0) });
+    // A 50%-opacity layer drawing an opaque blue rect over the whole viewport.
+    try b.pushLayer(0.5);
+    b.drawRect(.{ .x = 0, .y = 0, .width = 8, .height = 4 }, .{ .background = Color.rgb(0, 0, 255) });
+    b.popLayer();
+    try b.endFrame();
+
+    // Over red: 0.5*blue + 0.5*red → (127, 0, 127).
+    const over_red = raster.pixelAt(2, 2);
+    try testing.expect(over_red.r > 122 and over_red.r < 132);
+    try testing.expectEqual(@as(u8, 0), over_red.g);
+    try testing.expect(over_red.b > 122 and over_red.b < 132);
+    // Over white: 0.5*blue + 0.5*white → (127, 127, 255).
+    const over_white = raster.pixelAt(6, 2);
+    try testing.expect(over_white.r > 122 and over_white.r < 132);
+    try testing.expect(over_white.g > 122 and over_white.g < 132);
+    try testing.expectEqual(@as(u8, 255), over_white.b);
 }
 
 test "writePpm emits valid header and size" {
