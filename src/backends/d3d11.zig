@@ -921,14 +921,25 @@ const shadow_hlsl =
     \\}
     \\float erf_(float x){ float t=1.0/(1.0+0.3275911*abs(x)); float y=1.0-(((((1.061405429*t-1.453152027)*t)+1.421413741)*t-0.284496736)*t+0.254829592)*t*exp(-x*x); return x<0.0?-y:y; }
     \\float band_(float p,float lo,float hi,float s){ float inv=1.0/(s*1.4142135623730951); return 0.5*(erf_((hi-p)*inv)-erf_((lo-p)*inv)); }
+    \\float werf_(float x){ float s=x<0.0?-1.0:1.0; float a=abs(x); float v=1.0+(0.278393+(0.230389+0.078108*(a*a))*a)*a; v*=v; return s - s/(v*v); }
+    \\float gauss_(float x, float sigma){ return exp(-(x*x)/(2.0*sigma*sigma)) / (2.5066282746310002*sigma); }
+    \\float roundedX_(float x, float y, float sigma, float cr, float hx, float hy){ float delta=min(hy-cr-abs(y), 0.0); float curved=hx-cr+sqrt(max(0.0, cr*cr-delta*delta)); float inv=0.7071067811865476/sigma; float lo=0.5+0.5*werf_((x-curved)*inv); float hi=0.5+0.5*werf_((x+curved)*inv); return hi-lo; }
     \\float4 PSMain(VSOut i) : SV_TARGET {
-    \\  float2 p = i.pos.xy;
+    \\  float2 p = i.pos.xy; float corner = pad.x;
     \\  float dx=sh.x, dy=sh.y, blur=sh.z, spread=sh.w;
     \\  float x0=rect.x+dx-spread, y0=rect.y+dy-spread;
     \\  float x1=rect.x+rect.z+dx+spread, y1=rect.y+rect.w+dy+spread;
     \\  float cov;
     \\  if (blur<=0.0) cov = (p.x>=x0 && p.x<x1 && p.y>=y0 && p.y<y1) ? 1.0 : 0.0;
-    \\  else { float s=blur*0.5; cov = clamp(band_(p.x,x0,x1,s)*band_(p.y,y0,y1,s), 0.0, 1.0); }
+    \\  else if (corner<=0.0) { float s=blur*0.5; cov = clamp(band_(p.x,x0,x1,s)*band_(p.y,y0,y1,s), 0.0, 1.0); }
+    \\  else {
+    \\    float s=blur*0.5; float cx=(x0+x1)*0.5, cy=(y0+y1)*0.5; float hx=(x1-x0)*0.5, hy=(y1-y0)*0.5;
+    \\    float cr=min(corner, min(hx,hy)); float ptx=p.x-cx, pty=p.y-cy;
+    \\    float low=pty-hy, high=pty+hy; float start=clamp(-3.0*s, low, high); float end=clamp(3.0*s, low, high);
+    \\    float step=(end-start)/4.0; float yv=start+step*0.5; float value=0.0;
+    \\    for (int k=0;k<4;k++){ value += roundedX_(ptx, pty-yv, s, cr, hx, hy)*gauss_(yv, s)*step; yv+=step; }
+    \\    cov = clamp(value, 0.0, 1.0);
+    \\  }
     \\  return float4(color.rgb, cov*color.a);
     \\}
 ;
@@ -975,7 +986,7 @@ pub const D3dShadowRenderer = struct {
         release(self.vs);
     }
 
-    pub fn draw(self: *D3dShadowRenderer, rtv: *IRtv, vw: f32, vh: f32, quad: [4]f32, rect: [4]f32, sh: [4]f32, color: [4]f32) Error!void {
+    pub fn draw(self: *D3dShadowRenderer, rtv: *IRtv, vw: f32, vh: f32, quad: [4]f32, rect: [4]f32, sh: [4]f32, color: [4]f32, corner: f32) Error!void {
         const dev = self.device;
         const ctx = self.context;
         const verts = [_]f32{ quad[0], quad[1], quad[0] + quad[2], quad[1], quad[0], quad[1] + quad[3], quad[0] + quad[2], quad[1] + quad[3] };
@@ -984,7 +995,7 @@ pub const D3dShadowRenderer = struct {
         var vb: ?*IBuffer = null;
         if (!ok(dev.vtbl.CreateBuffer(dev, &vb_desc, &vb_data, &vb)) or vb == null) return error.ShaderFailed;
         defer release(vb.?);
-        var cbv: ShadowCB = .{ .vw = vw, .vh = vh, .rect = rect, .sh = sh, .color = color };
+        var cbv: ShadowCB = .{ .vw = vw, .vh = vh, .pad0 = corner, .rect = rect, .sh = sh, .color = color };
         var cb_data: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = &cbv };
         var cb_desc: D3D11_BUFFER_DESC = .{ .byte_width = @sizeOf(ShadowCB), .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_CONSTANT_BUFFER };
         var cb: ?*IBuffer = null;
@@ -2426,7 +2437,7 @@ pub const D3dBackend = struct {
                 rect.width + 2 * (sh.spread + margin),
                 rect.height + 2 * (sh.spread + margin),
             };
-            self.shadow.draw(self.target(), w, h, quad, .{ rect.x, rect.y, rect.width, rect.height }, .{ sh.dx, sh.dy, sh.blur, sh.spread }, col(sh.color)) catch {};
+            self.shadow.draw(self.target(), w, h, quad, .{ rect.x, rect.y, rect.width, rect.height }, .{ sh.dx, sh.dy, sh.blur, sh.spread }, col(sh.color), sh.corner_radius) catch {};
         }
         if (rs.gradient) |g| {
             self.grad.fill(self.target(), w, h, rect, g) catch {};
