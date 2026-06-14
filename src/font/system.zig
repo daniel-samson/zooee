@@ -29,6 +29,49 @@ const ct = if (builtin.os.tag == .macos) struct {
     extern const kCTFontURLAttribute: ?*anyopaque; // CFStringRef
 } else struct {};
 
+// --- Linux fontconfig discovery (#204) --------------------------------------
+// dlopen libfontconfig (no link-time dependency — absent → fall back to the
+// hardcoded paths) and resolve the default sans-serif font's file path.
+extern "c" fn dlopen([*:0]const u8, c_int) ?*anyopaque;
+extern "c" fn dlsym(?*anyopaque, [*:0]const u8) ?*anyopaque;
+const RTLD_NOW: c_int = 2;
+
+/// The Linux default sans-serif font path (#204) via fontconfig, into `buf`.
+/// Null when fontconfig is unavailable or the query fails.
+fn linuxSystemFontPath(buf: []u8) ?[]const u8 {
+    if (builtin.os.tag != .linux) return null;
+    const lib = dlopen("libfontconfig.so.1", RTLD_NOW) orelse return null;
+    const FcInit = *const fn () callconv(.c) c_int;
+    const FcNameParse = *const fn ([*:0]const u8) callconv(.c) ?*anyopaque;
+    const FcConfigSubstitute = *const fn (?*anyopaque, ?*anyopaque, c_int) callconv(.c) c_int;
+    const FcDefaultSubstitute = *const fn (?*anyopaque) callconv(.c) void;
+    const FcFontMatch = *const fn (?*anyopaque, ?*anyopaque, *c_int) callconv(.c) ?*anyopaque;
+    const FcPatternGetString = *const fn (?*anyopaque, [*:0]const u8, c_int, *?[*:0]const u8) callconv(.c) c_int;
+    const FcPatternDestroy = *const fn (?*anyopaque) callconv(.c) void;
+    const init: FcInit = @ptrCast(dlsym(lib, "FcInit") orelse return null);
+    const parse: FcNameParse = @ptrCast(dlsym(lib, "FcNameParse") orelse return null);
+    const subst: FcConfigSubstitute = @ptrCast(dlsym(lib, "FcConfigSubstitute") orelse return null);
+    const dflt: FcDefaultSubstitute = @ptrCast(dlsym(lib, "FcDefaultSubstitute") orelse return null);
+    const match: FcFontMatch = @ptrCast(dlsym(lib, "FcFontMatch") orelse return null);
+    const get: FcPatternGetString = @ptrCast(dlsym(lib, "FcPatternGetString") orelse return null);
+    const destroy: FcPatternDestroy = @ptrCast(dlsym(lib, "FcPatternDestroy") orelse return null);
+
+    if (init() == 0) return null;
+    const pat = parse("sans-serif") orelse return null;
+    defer destroy(pat);
+    _ = subst(null, pat, 0); // FcMatchPattern
+    dflt(pat);
+    var result: c_int = 0;
+    const m = match(null, pat, &result) orelse return null;
+    defer destroy(m);
+    var file: ?[*:0]const u8 = null;
+    if (get(m, "file", 0, &file) != 0) return null; // != FcResultMatch
+    const path = std.mem.span(file orelse return null);
+    if (path.len >= buf.len) return null;
+    @memcpy(buf[0..path.len], path);
+    return buf[0..path.len];
+}
+
 /// The macOS system UI font's file path (#204/#205), written into `buf`.
 /// Null if CoreText is unavailable or the lookup fails.
 fn macSystemFontPath(buf: []u8) ?[]const u8 {
@@ -125,9 +168,10 @@ pub fn loadFontSet(gpa: std.mem.Allocator, io: std.Io) ?fontset.FontSet {
     // Native discovery first (#204): the OS's real system font, wherever it
     // lives this OS version (San Francisco on macOS, #205). Bold/italic still
     // come from the family list below until per-weight discovery lands.
-    if (builtin.os.tag == .macos) {
+    if (builtin.os.tag == .macos or builtin.os.tag == .linux) {
         var path_buf: [1024]u8 = undefined;
-        if (macSystemFontPath(&path_buf)) |p| {
+        const discovered = if (builtin.os.tag == .macos) macSystemFontPath(&path_buf) else linuxSystemFontPath(&path_buf);
+        if (discovered) |p| {
             if (parsed(gpa, io, p)) |reg| {
                 set.setFace(fontset.FontSet.regular, reg);
                 have_primary = true;
@@ -138,7 +182,7 @@ pub fn loadFontSet(gpa: std.mem.Allocator, io: std.Io) ?fontset.FontSet {
                     if (parsed(gpa, io, families[0].italic)) |f| set.setFace(fontset.FontSet.italic_slot, f);
                     if (parsed(gpa, io, families[0].bold_italic)) |f| set.setFace(fontset.FontSet.bold_italic_slot, f);
                 }
-            } else log.warn("CoreText system font at '{s}' failed to parse; using fallbacks", .{p});
+            } else log.warn("discovered system font at '{s}' failed to parse; using fallbacks", .{p});
         }
     }
 
