@@ -49,6 +49,8 @@ pub const window = @import("window.zig");
 pub const bidi = @import("bidi.zig");
 /// Arabic contextual joining (#202): presentation-form selection.
 pub const arabic = @import("arabic.zig");
+/// Indic reordering (#202): Devanagari pre-base matra → visual order.
+pub const indic = @import("indic.zig");
 pub const text = @import("text.zig");
 pub const clipboard = @import("clipboard.zig");
 pub const display = @import("display.zig");
