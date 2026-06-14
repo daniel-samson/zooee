@@ -356,6 +356,12 @@ pub const Window = struct {
     /// Drain pending AppKit events; non-blocking (#5 drivable loop).
     pub fn pumpEvents(self: *Window) []const Event {
         self.queue.clearRetainingCapacity();
+        // Drain the NSEvents (and other autoreleased objc objects) this pump
+        // creates, every call — otherwise a continuously-redrawing app leaks
+        // them each frame and eventually crashes. The returned queue holds our
+        // own copied Event structs, so draining here is safe.
+        const pool = msg(id, struct {}, msg(id, struct {}, cls("NSAutoreleasePool"), sel("alloc"), .{}), sel("init"), .{});
+        defer _ = msg(void, struct {}, pool, sel("drain"), .{});
         const app = msg(id, struct {}, cls("NSApplication"), sel("sharedApplication"), .{});
         const distant_past = msg(id, struct {}, cls("NSDate"), sel("distantPast"), .{});
         const mode = nsString("kCFRunLoopDefaultMode");
