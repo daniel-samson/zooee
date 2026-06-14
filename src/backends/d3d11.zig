@@ -378,6 +378,9 @@ pub const D3dSwapchain = struct {
     swapchain: *ISwapChain,
     width: u32,
     height: u32,
+    /// The window this swapchain presents to — kept so `recreate` can rebuild
+    /// the device + swapchain after a device-lost (#25).
+    hwnd: *anyopaque,
     /// Set when Present reported the device was lost (#25); read via isLost().
     lost: bool = false,
 
@@ -396,13 +399,28 @@ pub const D3dSwapchain = struct {
             if (ok(D3D11CreateDeviceAndSwapChain(null, driver, null, 0, null, 0, D3D11_SDK_VERSION, &desc, &swapchain, &device, null, &context))) break;
         }
         if (swapchain == null or device == null or context == null) return error.NoDevice;
-        return .{ .device = device.?, .context = context.?, .swapchain = swapchain.?, .width = width, .height = height };
+        return .{ .device = device.?, .context = context.?, .swapchain = swapchain.?, .width = width, .height = height, .hwnd = hwnd };
     }
 
     pub fn destroy(self: *D3dSwapchain) void {
         release(self.swapchain);
         release(self.context);
         release(self.device);
+    }
+
+    /// Rebuild the device + context + swapchain after a device-lost (#25),
+    /// in place, on the same window. The old objects are released first. On
+    /// success `lost` is cleared; the caller must also rebuild every
+    /// device-bound resource (the D3dBackend: renderers + glyph atlas +
+    /// textures) since those belonged to the now-released device. Errors
+    /// leave the old (lost) objects released — the caller should fall back to
+    /// raster / exit, exactly as it would for a failed initial create().
+    pub fn recreate(self: *D3dSwapchain) Error!void {
+        const hwnd = self.hwnd;
+        const width = self.width;
+        const height = self.height;
+        self.destroy();
+        self.* = try create(hwnd, width, height);
     }
 
     /// The swapchain's back-buffer texture (caller releases). CopyResource
