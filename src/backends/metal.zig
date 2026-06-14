@@ -210,6 +210,10 @@ pub const MetalLayer = struct {
         _ = msg(void, struct { id }, layer, sel("setDevice:"), .{device});
         _ = msg(void, struct { u64 }, layer, sel("setPixelFormat:"), .{MTLPixelFormatBGRA8Unorm});
         _ = msg(void, struct { bool }, layer, sel("setFramebufferOnly:"), .{false});
+        // Present *inside* AppKit's resize CATransaction so the drawable never
+        // lags the window bounds during a live-resize drag (the squash/stretch
+        // flicker). Paired with a synchronous present in `presentTo`. See #170.
+        _ = msg(void, struct { bool }, layer, sel("setPresentsWithTransaction:"), .{true});
         _ = msg(void, struct { CGSize }, layer, sel("setDrawableSize:"), .{.{ .width = @floatFromInt(width), .height = @floatFromInt(height) }});
         _ = msg(void, struct { bool }, view, sel("setWantsLayer:"), .{true});
         _ = msg(void, struct { id }, view, sel("setLayer:"), .{layer});
@@ -1486,8 +1490,13 @@ pub const MetalBackend = struct {
         _ = msg(void, struct { id, u64 }, enc, sel("setFragmentSamplerState:atIndex:"), .{ self.present_sampler, 0 });
         _ = msg(void, struct { u64, u64, u64 }, enc, sel("drawPrimitives:vertexStart:vertexCount:"), .{ MTLPrimitiveTypeTriangleStrip, 0, 4 });
         _ = msg(void, struct {}, enc, sel("endEncoding"), .{});
-        _ = msg(void, struct { id }, cmdbuf, sel("presentDrawable:"), .{drawable});
+        // presentsWithTransaction present: commit, wait until the GPU work is
+        // scheduled, then present the drawable synchronously on this (main)
+        // thread — so the new frame is committed in the same transaction as the
+        // window resize instead of one vblank behind it (#170, live-resize).
         _ = msg(void, struct {}, cmdbuf, sel("commit"), .{});
+        _ = msg(void, struct {}, cmdbuf, sel("waitUntilScheduled"), .{});
+        _ = msg(void, struct {}, drawable, sel("present"), .{});
     }
 
     pub fn setFont(self: *MetalBackend, data: []const u8) !void {
