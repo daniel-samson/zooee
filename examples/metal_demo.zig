@@ -189,6 +189,9 @@ pub fn main(init: std.process.Init) !void {
         // Filled path (#120): concave star via even-odd, hard edges (0.03).
         const path_scene: zooee.fixtures.Scene = .{ .name = "path", .width = 10, .height = 10, .draw = zooee.fixtures.drawPath };
         if (!(try compareScene(gpa, out, &mb, path_scene, false))) backend_ok = false;
+        // Stroked polyline (#120): checkmark + closed triangle, distance-based.
+        const stroke_scene: zooee.fixtures.Scene = .{ .name = "stroke", .width = 10, .height = 11, .draw = zooee.fixtures.drawStroke };
+        if (!(try compareScene(gpa, out, &mb, stroke_scene, false))) backend_ok = false;
     }
 
     try out.flush();
