@@ -924,23 +924,32 @@ const shadow_hlsl =
     \\float werf_(float x){ float s=x<0.0?-1.0:1.0; float a=abs(x); float v=1.0+(0.278393+(0.230389+0.078108*(a*a))*a)*a; v*=v; return s - s/(v*v); }
     \\float gauss_(float x, float sigma){ return exp(-(x*x)/(2.0*sigma*sigma)) / (2.5066282746310002*sigma); }
     \\float roundedX_(float x, float y, float sigma, float cr, float hx, float hy){ float delta=min(hy-cr-abs(y), 0.0); float curved=hx-cr+sqrt(max(0.0, cr*cr-delta*delta)); float inv=0.7071067811865476/sigma; float lo=0.5+0.5*werf_((x-curved)*inv); float hi=0.5+0.5*werf_((x+curved)*inv); return hi-lo; }
+    \\float boxCov_(float x0,float y0,float x1,float y1,float cn,float s,float px,float py){
+    \\  if (s<=0.0) return (px>=x0&&px<x1&&py>=y0&&py<y1)?1.0:0.0;
+    \\  if (cn<=0.0) return clamp(band_(px,x0,x1,s)*band_(py,y0,y1,s),0.0,1.0);
+    \\  float cx=(x0+x1)*0.5, cy=(y0+y1)*0.5, hx=(x1-x0)*0.5, hy=(y1-y0)*0.5; float cr=min(cn,min(hx,hy));
+    \\  float ptx=px-cx, pty=py-cy; float low=pty-hy, high=pty+hy; float start=clamp(-3.0*s,low,high); float end=clamp(3.0*s,low,high);
+    \\  float step=(end-start)/4.0; float yv=start+step*0.5; float value=0.0;
+    \\  for(int k=0;k<4;k++){ value+=roundedX_(ptx,pty-yv,s,cr,hx,hy)*gauss_(yv,s)*step; yv+=step; } return clamp(value,0.0,1.0);
+    \\}
+    \\bool insideRR_(float rx,float ry,float rw,float rh,float cn,float px,float py){
+    \\  if(px<rx||px>=rx+rw||py<ry||py>=ry+rh) return false; float cr=min(cn,min(rw,rh)*0.5);
+    \\  if(px<rx+cr&&py<ry+cr){float dx=px-(rx+cr),dy=py-(ry+cr); if(dx*dx+dy*dy>cr*cr) return false;}
+    \\  if(px>=rx+rw-cr&&py<ry+cr){float dx=px-(rx+rw-cr),dy=py-(ry+cr); if(dx*dx+dy*dy>cr*cr) return false;}
+    \\  if(px>=rx+rw-cr&&py>=ry+rh-cr){float dx=px-(rx+rw-cr),dy=py-(ry+rh-cr); if(dx*dx+dy*dy>cr*cr) return false;}
+    \\  if(px<rx+cr&&py>=ry+rh-cr){float dx=px-(rx+cr),dy=py-(ry+rh-cr); if(dx*dx+dy*dy>cr*cr) return false;} return true;
+    \\}
     \\float4 PSMain(VSOut i) : SV_TARGET {
-    \\  float2 p = i.pos.xy; float corner = pad.x;
-    \\  float dx=sh.x, dy=sh.y, blur=sh.z, spread=sh.w;
-    \\  float x0=rect.x+dx-spread, y0=rect.y+dy-spread;
-    \\  float x1=rect.x+rect.z+dx+spread, y1=rect.y+rect.w+dy+spread;
-    \\  float cov;
-    \\  if (blur<=0.0) cov = (p.x>=x0 && p.x<x1 && p.y>=y0 && p.y<y1) ? 1.0 : 0.0;
-    \\  else if (corner<=0.0) { float s=blur*0.5; cov = clamp(band_(p.x,x0,x1,s)*band_(p.y,y0,y1,s), 0.0, 1.0); }
-    \\  else {
-    \\    float s=blur*0.5; float cx=(x0+x1)*0.5, cy=(y0+y1)*0.5; float hx=(x1-x0)*0.5, hy=(y1-y0)*0.5;
-    \\    float cr=min(corner, min(hx,hy)); float ptx=p.x-cx, pty=p.y-cy;
-    \\    float low=pty-hy, high=pty+hy; float start=clamp(-3.0*s, low, high); float end=clamp(3.0*s, low, high);
-    \\    float step=(end-start)/4.0; float yv=start+step*0.5; float value=0.0;
-    \\    for (int k=0;k<4;k++){ value += roundedX_(ptx, pty-yv, s, cr, hx, hy)*gauss_(yv, s)*step; yv+=step; }
-    \\    cov = clamp(value, 0.0, 1.0);
+    \\  float2 p = i.pos.xy; float corner = pad.x; bool inset = pad.y > 0.5;
+    \\  float dx=sh.x, dy=sh.y, blur=sh.z, spread=sh.w; float s=blur*0.5;
+    \\  if (inset) {
+    \\    if (!insideRR_(rect.x,rect.y,rect.z,rect.w,corner, p.x,p.y)) discard;
+    \\    float ix0=rect.x+dx+spread, iy0=rect.y+dy+spread, ix1=rect.x+rect.z+dx-spread, iy1=rect.y+rect.w+dy-spread;
+    \\    float cov = clamp(1.0 - boxCov_(ix0,iy0,ix1,iy1,corner,s, p.x,p.y), 0.0, 1.0);
+    \\    return float4(color.rgb, cov*color.a);
     \\  }
-    \\  return float4(color.rgb, cov*color.a);
+    \\  float x0=rect.x+dx-spread, y0=rect.y+dy-spread, x1=rect.x+rect.z+dx+spread, y1=rect.y+rect.w+dy+spread;
+    \\  return float4(color.rgb, boxCov_(x0,y0,x1,y1,corner,s, p.x,p.y)*color.a);
     \\}
 ;
 const ShadowCB = extern struct { vw: f32, vh: f32, pad0: f32 = 0, pad1: f32 = 0, rect: [4]f32, sh: [4]f32, color: [4]f32 };
@@ -986,7 +995,7 @@ pub const D3dShadowRenderer = struct {
         release(self.vs);
     }
 
-    pub fn draw(self: *D3dShadowRenderer, rtv: *IRtv, vw: f32, vh: f32, quad: [4]f32, rect: [4]f32, sh: [4]f32, color: [4]f32, corner: f32) Error!void {
+    pub fn draw(self: *D3dShadowRenderer, rtv: *IRtv, vw: f32, vh: f32, quad: [4]f32, rect: [4]f32, sh: [4]f32, color: [4]f32, corner: f32, inset: bool) Error!void {
         const dev = self.device;
         const ctx = self.context;
         const verts = [_]f32{ quad[0], quad[1], quad[0] + quad[2], quad[1], quad[0], quad[1] + quad[3], quad[0] + quad[2], quad[1] + quad[3] };
@@ -995,7 +1004,7 @@ pub const D3dShadowRenderer = struct {
         var vb: ?*IBuffer = null;
         if (!ok(dev.vtbl.CreateBuffer(dev, &vb_desc, &vb_data, &vb)) or vb == null) return error.ShaderFailed;
         defer release(vb.?);
-        var cbv: ShadowCB = .{ .vw = vw, .vh = vh, .pad0 = corner, .rect = rect, .sh = sh, .color = color };
+        var cbv: ShadowCB = .{ .vw = vw, .vh = vh, .pad0 = corner, .pad1 = if (inset) 1 else 0, .rect = rect, .sh = sh, .color = color };
         var cb_data: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = &cbv };
         var cb_desc: D3D11_BUFFER_DESC = .{ .byte_width = @sizeOf(ShadowCB), .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_CONSTANT_BUFFER };
         var cb: ?*IBuffer = null;
@@ -2429,29 +2438,27 @@ pub const D3dBackend = struct {
         const self = self_(ptr);
         const w: f32 = @floatFromInt(self.off.width);
         const h: f32 = @floatFromInt(self.off.height);
-        if (rs.shadow) |sh| {
+        const rrect: [4]f32 = .{ rect.x, rect.y, rect.width, rect.height };
+        // Outer shadow behind the fill.
+        if (rs.shadow) |sh| if (!sh.inset) {
             const margin = sh.blur * 2 + @abs(sh.spread) + 2;
-            const quad: [4]f32 = .{
-                rect.x + sh.dx - sh.spread - margin,
-                rect.y + sh.dy - sh.spread - margin,
-                rect.width + 2 * (sh.spread + margin),
-                rect.height + 2 * (sh.spread + margin),
-            };
-            self.shadow.draw(self.target(), w, h, quad, .{ rect.x, rect.y, rect.width, rect.height }, .{ sh.dx, sh.dy, sh.blur, sh.spread }, col(sh.color), sh.corner_radius) catch {};
-        }
+            const quad: [4]f32 = .{ rect.x + sh.dx - sh.spread - margin, rect.y + sh.dy - sh.spread - margin, rect.width + 2 * (sh.spread + margin), rect.height + 2 * (sh.spread + margin) };
+            self.shadow.draw(self.target(), w, h, quad, rrect, .{ sh.dx, sh.dy, sh.blur, sh.spread }, col(sh.color), sh.corner_radius, false) catch {};
+        };
+        // Fill.
         if (rs.gradient) |g| {
             self.grad.fill(self.target(), w, h, rect, g) catch {};
-            return;
-        }
-        if (rs.corner_radius.isNone() and rs.border.isNone()) {
+        } else if (rs.corner_radius.isNone() and rs.border.isNone()) {
             if (rs.background) |bg| {
                 self.rect.fillRect(self.target(), w, h, rect.x, rect.y, rect.width, rect.height, col(bg)) catch {};
             }
-            return;
+        } else {
+            self.exact.draw(self.target(), w, h, rect, rs) catch {};
         }
-        // bg + border + radius via the exact renderer: per-side borders +
-        // per-corner radii, pixel-exact vs raster (hard-edged).
-        self.exact.draw(self.target(), w, h, rect, rs) catch {};
+        // Inset shadow on top, clipped to the rect's rounded shape.
+        if (rs.shadow) |sh| if (sh.inset) {
+            self.shadow.draw(self.target(), w, h, rrect, rrect, .{ sh.dx, sh.dy, sh.blur, sh.spread }, col(sh.color), sh.corner_radius, true) catch {};
+        };
     }
 
     fn glyphFor(self: *D3dBackend, size_px: u16) ?*D3dGlyphRenderer {
