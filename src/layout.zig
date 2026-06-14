@@ -23,12 +23,18 @@ const text_mod = @import("text.zig");
 const cursor_mod = @import("cursor.zig");
 const bidi = @import("bidi.zig");
 const arabic = @import("arabic.zig");
+const indic = @import("indic.zig");
 
-/// Shape a line for display (#202/#203): Arabic contextual joining (logical
-/// order) then BiDi visual reorder. `abuf`/`vbuf` are caller scratch (the forms
-/// are 3-byte UTF-8, so size generously); both no-op for plain LTR text.
+/// Shape a line for display (#202/#203): Arabic contextual joining → Indic
+/// pre-base matra reordering → BiDi visual reorder, all on the logical string.
+/// `abuf`/`vbuf` are caller scratch (the forms are 3-byte UTF-8, so size
+/// generously); every stage no-ops for plain LTR/ASCII text. The buffers are
+/// ping-ponged: each stage fully decodes its input before writing its output,
+/// so reusing `abuf` for the final stage's output is safe even when it aliases.
 fn shapeForDisplay(t: []const u8, abuf: []u8, vbuf: []u8) []const u8 {
-    return bidi.reorderUtf8(arabic.shapeUtf8(t, abuf), vbuf);
+    const joined = arabic.shapeUtf8(t, abuf);
+    const reordered = indic.reorderUtf8(joined, vbuf);
+    return bidi.reorderUtf8(reordered, abuf);
 }
 
 const Backend = backend_mod.Backend;
