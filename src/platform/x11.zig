@@ -636,9 +636,25 @@ pub const Window = struct {
                 MotionNotify => self.queue.append(self.gpa, .{ .pointer_move = .{ .position = .{ .x = @floatFromInt(ev.xmotion.x), .y = @floatFromInt(ev.xmotion.y) } } }) catch {},
                 ButtonPress, ButtonRelease => {
                     const b = ev.xbutton.button;
-                    if (b == 4 or b == 5) {
+                    if (b >= 4 and b <= 7) {
+                        // Wheel: 4=up, 5=down, 6=left, 7=right. One notch per
+                        // press (X sends a press+release pair) → a line-unit
+                        // .scroll (#126/#210). dy>0 = up, dx>0 = right.
                         if (ev.type == ButtonPress) {
-                            self.queue.append(self.gpa, .{ .key_down = .{ .key = if (b == 4) .up else .down } }) catch {};
+                            self.queue.append(self.gpa, .{ .scroll = .{
+                                .position = .{ .x = @floatFromInt(ev.xbutton.x), .y = @floatFromInt(ev.xbutton.y) },
+                                .dx = switch (b) {
+                                    6 => -1,
+                                    7 => 1,
+                                    else => 0,
+                                },
+                                .dy = switch (b) {
+                                    4 => 1,
+                                    5 => -1,
+                                    else => 0,
+                                },
+                                .unit = .line,
+                            } }) catch {};
                         }
                     } else {
                         const pe: core_event.PointerEvent = .{
