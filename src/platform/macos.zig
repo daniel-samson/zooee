@@ -69,6 +69,48 @@ fn nsString(text: [:0]const u8) id {
     return msg(id, struct { [*:0]const u8 }, cls("NSString"), sel("stringWithUTF8String:"), .{text.ptr});
 }
 
+// --- clipboard (#19) --------------------------------------------------------
+
+const clipboard_mod = @import("../clipboard.zig");
+
+/// System clipboard backed by NSPasteboard (#19). Implements the core
+/// `Clipboard` interface so apps copy/paste against the OS pasteboard. Live
+/// interop with other apps needs an on-device check (no hosted GUI runner).
+pub const SystemClipboard = struct {
+    gpa: std.mem.Allocator,
+
+    pub fn init(gpa: std.mem.Allocator) SystemClipboard {
+        return .{ .gpa = gpa };
+    }
+
+    pub fn interface(self: *SystemClipboard) clipboard_mod.Clipboard {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable: clipboard_mod.Clipboard.VTable = .{ .get_text = getText, .set_text = setText };
+    const utf8_type = "public.utf8-plain-text";
+
+    fn getText(ptr: *anyopaque, gpa: std.mem.Allocator) anyerror!?[]u8 {
+        _ = ptr;
+        const pb = msg(id, struct {}, cls("NSPasteboard"), sel("generalPasteboard"), .{});
+        const ns = msg(id, struct { id }, pb, sel("stringForType:"), .{nsString(utf8_type)});
+        if (ns == null) return null;
+        const c = msg([*:0]const u8, struct {}, ns, sel("UTF8String"), .{});
+        return try gpa.dupe(u8, std.mem.span(c));
+    }
+
+    fn setText(ptr: *anyopaque, text: []const u8) anyerror!void {
+        const self: *SystemClipboard = @ptrCast(@alignCast(ptr));
+        // NSString needs a null-terminated buffer; copy once.
+        const z = try self.gpa.dupeZ(u8, text);
+        defer self.gpa.free(z);
+        const pb = msg(id, struct {}, cls("NSPasteboard"), sel("generalPasteboard"), .{});
+        _ = msg(i64, struct {}, pb, sel("clearContents"), .{});
+        const s = msg(id, struct { [*:0]const u8 }, cls("NSString"), sel("stringWithUTF8String:"), .{z.ptr});
+        _ = msg(bool, struct { id, id }, pb, sel("setString:forType:"), .{ s, nsString(utf8_type) });
+    }
+};
+
 // --- events ----------------------------------------------------------------
 
 const core_event = @import("../event.zig");
