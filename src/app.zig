@@ -47,9 +47,27 @@ const FrameLoop = struct {
     /// Monotonic ns at the start of the previous frame.
     last: i96 = 0,
     started: bool = false,
+    /// Frames since the last refresh-rate re-sample (#27 hot-plug).
+    tune_ctr: u32 = 0,
 
     fn init(hz: f32) FrameLoop {
         return .{ .pacer = display.FramePacer.forHz(hz) };
+    }
+
+    /// True roughly twice a second — when the loop should re-query the display
+    /// refresh rate, so dragging the window to a different-Hz monitor (#27
+    /// hot-plug) re-paces. Throttled so we don't query the OS every frame.
+    fn shouldRetune(self: *FrameLoop) bool {
+        self.tune_ctr += 1;
+        if (self.tune_ctr < 120) return false;
+        self.tune_ctr = 0;
+        return true;
+    }
+
+    /// Adopt a new refresh rate (no-op if unchanged).
+    fn retune(self: *FrameLoop, hz: f32) void {
+        const p = display.FramePacer.forHz(hz);
+        if (p.interval_ns != self.pacer.interval_ns) self.pacer = p;
     }
 
     fn nowNs(io: std.Io) i96 {
@@ -343,6 +361,8 @@ pub fn runWindow(
             dirty = false;
         }
 
+        // Re-pace if the window moved to a different-refresh monitor (#27).
+        if (fl.shouldRetune()) fl.retune(platform.refreshHz(window));
         try fl.pace(io);
     }
 }
@@ -463,6 +483,8 @@ fn runWindowGl(
             dirty = false;
         }
 
+        // Re-pace if the window moved to a different-refresh monitor (#27).
+        if (fl.shouldRetune()) fl.retune(platform.refreshHz(window));
         try fl.pace(io);
     }
 }
@@ -582,6 +604,8 @@ fn runWindowMetal(
             dirty = false;
         }
 
+        // Re-pace if the window moved to a different-refresh monitor (#27).
+        if (fl.shouldRetune()) fl.retune(platform.refreshHz(window));
         try fl.pace(io);
     }
 }
@@ -693,6 +717,8 @@ fn runWindowD3d(
             dirty = false;
         }
 
+        // Re-pace if the window moved to a different-refresh monitor (#27).
+        if (fl.shouldRetune()) fl.retune(platform.refreshHz(window));
         try fl.pace(io);
     }
 }
