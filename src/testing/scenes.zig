@@ -109,8 +109,22 @@ pub fn drawImageFit(b: Backend, s: f32) !void {
     };
     const tex = try b.createTexture(4, 2, &px);
     defer b.destroyTexture(tex);
-    b.drawImageFit(.{ .x = 1 * s, .y = 1 * s, .width = 6 * s, .height = 6 * s }, tex, 4, 2, .cover);
-    b.drawImageFit(.{ .x = 8 * s, .y = 1 * s, .width = 6 * s, .height = 6 * s }, tex, 4, 2, .contain);
+    b.drawImageFit(.{ .x = 1 * s, .y = 1 * s, .width = 6 * s, .height = 6 * s }, tex, 4, 2, .cover, .nearest);
+    b.drawImageFit(.{ .x = 8 * s, .y = 1 * s, .width = 6 * s, .height = 6 * s }, tex, 4, 2, .contain, .nearest);
+}
+
+/// Bilinear sampling (#122): a tiny 2×2 image upscaled into a large rect with
+/// LINEAR filtering — smooth color gradients between the 4 texels. CPU and GPU
+/// agree only within a small edge tolerance (the classic non-exact case), so
+/// the GPU checks allow ~0.06. Not in `all`.
+pub fn drawImageBilinear(b: Backend, s: f32) !void {
+    const px = [_]u8{
+        255, 0, 0, 255, 0, 255, 0, 255, // red,  green
+        0, 0, 255, 255, 255, 255, 0, 255, // blue, yellow
+    };
+    const tex = try b.createTexture(2, 2, &px);
+    defer b.destroyTexture(tex);
+    b.drawImageUv(.{ .x = 1 * s, .y = 1 * s, .width = 8 * s, .height = 8 * s }, tex, .{ .x = 0, .y = 0, .width = 1, .height = 1 }, .linear);
 }
 
 /// Real text rendering (#10): glyphs on raster (font set by the
