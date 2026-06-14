@@ -131,6 +131,30 @@ pub fn Driver(comptime Model: type, comptime Msg: type) type {
             return self.send(.{ .key_down = .{ .key = k } });
         }
 
+        pub fn keyUp(self: *Self, k: event_mod.Key) !Command {
+            return self.send(.{ .key_up = .{ .key = k } });
+        }
+
+        /// A primary click carrying keyboard modifiers (#127): shift/⌘-click.
+        pub fn clickMods(self: *Self, x: f32, y: f32, mods: event_mod.Modifiers) !Command {
+            const cmd = try self.send(.{ .pointer_down = .{ .position = .{ .x = x, .y = y }, .buttons = .{ .primary = true }, .mods = mods } });
+            _ = try self.pointerUp(x, y);
+            return cmd;
+        }
+
+        /// A primary down with an explicit click count (#127): 2 = double.
+        pub fn clickN(self: *Self, x: f32, y: f32, count: u8) !Command {
+            return self.send(.{ .pointer_down = .{ .position = .{ .x = x, .y = y }, .buttons = .{ .primary = true }, .click_count = count } });
+        }
+
+        pub fn pointerEnter(self: *Self, x: f32, y: f32) !Command {
+            return self.send(.{ .pointer_enter = .{ .position = .{ .x = x, .y = y } } });
+        }
+
+        pub fn pointerLeave(self: *Self, x: f32, y: f32) !Command {
+            return self.send(.{ .pointer_leave = .{ .position = .{ .x = x, .y = y } } });
+        }
+
         pub fn text(self: *Self, codepoint: u21) !Command {
             return self.send(.{ .text = .{ .codepoint = codepoint } });
         }
@@ -175,8 +199,12 @@ const Color = @import("../style.zig").Color;
 const Toggle = struct {
     on: bool = false,
     keys: u32 = 0,
+    key_ups: u32 = 0,
     chars: u32 = 0,
     scroll_y: f32 = 0,
+    entered: bool = false,
+    last_mods: event_mod.Modifiers = .{},
+    last_count: u8 = 0,
 
     const Msg = enum { tapped };
 
@@ -209,6 +237,13 @@ const Toggle = struct {
     pub fn onEvent(self: *Toggle, ev: event_mod.Event) Command {
         switch (ev) {
             .key_down => self.keys += 1,
+            .key_up => self.key_ups += 1,
+            .pointer_enter => self.entered = true,
+            .pointer_leave => self.entered = false,
+            .pointer_down => |p| {
+                self.last_mods = p.mods;
+                self.last_count = p.click_count;
+            },
             .text => self.chars += 1,
             .scroll => |s| {
                 // Clamp to a 0..100 content range — the typical app pattern.
@@ -277,6 +312,38 @@ test "wheel scroll routes to onEvent and updates + clamps offset" {
     try testing.expectApproxEqAbs(@as(f32, 100), model.scroll_y, 1e-3);
     _ = try d.scrollPixel(10, 10, 0, -50, .momentum); // back down, clamps at 0
     try testing.expectApproxEqAbs(@as(f32, 0), model.scroll_y, 1e-3);
+}
+
+test "key_up routes to onEvent separately from key_down (#127)" {
+    var model: Toggle = .{};
+    var d = try Driver(Toggle, Toggle.Msg).init(testing.allocator, &model, .{ .width = 60, .height = 40 });
+    defer d.deinit();
+    _ = try d.key(.enter);
+    _ = try d.keyUp(.enter);
+    try testing.expectEqual(@as(u32, 1), model.keys);
+    try testing.expectEqual(@as(u32, 1), model.key_ups);
+}
+
+test "pointer enter/leave drive hover state (#127)" {
+    var model: Toggle = .{};
+    var d = try Driver(Toggle, Toggle.Msg).init(testing.allocator, &model, .{ .width = 60, .height = 40 });
+    defer d.deinit();
+    _ = try d.pointerEnter(30, 20);
+    try testing.expect(model.entered);
+    _ = try d.pointerLeave(30, 20);
+    try testing.expect(!model.entered); // hover cleared on exit
+}
+
+test "modifiers and click-count reach the model (#127)" {
+    var model: Toggle = .{};
+    var d = try Driver(Toggle, Toggle.Msg).init(testing.allocator, &model, .{ .width = 60, .height = 40 });
+    defer d.deinit();
+    // Click empty space (outside the 5,5..45,25 button) so the raw pointer_down
+    // routes to onEvent carrying its modifiers + count.
+    _ = try d.clickMods(55, 35, .{ .shift = true, .super = true });
+    try testing.expect(model.last_mods.shift and model.last_mods.super);
+    _ = try d.clickN(55, 35, 2);
+    try testing.expectEqual(@as(u8, 2), model.last_count);
 }
 
 test "resize relays out to the new viewport" {

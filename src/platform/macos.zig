@@ -91,6 +91,17 @@ const NSEventType = struct {
     const scroll_wheel: u64 = 22;
 };
 
+/// NSEvent.modifierFlags bitmask → our Modifiers (#127). The device-independent
+/// flags live in the high bits: shift 1<<17, ctrl 1<<18, alt 1<<19, cmd 1<<20.
+fn modsFromFlags(flags: u64) core_event.Modifiers {
+    return .{
+        .shift = (flags & (1 << 17)) != 0,
+        .ctrl = (flags & (1 << 18)) != 0,
+        .alt = (flags & (1 << 19)) != 0,
+        .super = (flags & (1 << 20)) != 0,
+    };
+}
+
 fn keyCodeToKey(kc: u16) ?core_event.Key {
     return switch (kc) {
         126 => .up,
@@ -276,13 +287,16 @@ pub const Window = struct {
                     // Window coords (y-up, bottom-left) → content-view →
                     // top-left pixels matching the rendered framebuffer.
                     const cv = msg(NSPoint, struct { NSPoint, id }, view, sel("convertPoint:fromView:"), .{ loc, null });
+                    const flags = msg(u64, struct {}, ev, sel("modifierFlags"), .{});
+                    const is_down = et == NSEventType.left_down or et == NSEventType.right_down;
+                    const cc: u8 = if (is_down) @intCast(@max(1, msg(i64, struct {}, ev, sel("clickCount"), .{}))) else 1;
                     const pos: core_event.PointerEvent = .{ .position = .{
                         .x = @floatCast(cv.x * scale),
                         .y = @floatCast((bounds.h - cv.y) * scale),
                     }, .buttons = .{
                         .primary = et == NSEventType.left_down or et == NSEventType.left_dragged,
                         .secondary = et == NSEventType.right_down or et == NSEventType.right_dragged,
-                    } };
+                    }, .mods = modsFromFlags(flags), .click_count = cc };
                     const core_ev: Event = switch (et) {
                         NSEventType.left_down, NSEventType.right_down => .{ .pointer_down = pos },
                         NSEventType.left_up, NSEventType.right_up => .{ .pointer_up = pos },
@@ -293,7 +307,8 @@ pub const Window = struct {
                 NSEventType.key_down => {
                     const kc = msg(u16, struct {}, ev, sel("keyCode"), .{});
                     if (keyCodeToKey(kc)) |k| {
-                        self.queue.append(self.gpa, .{ .key_down = .{ .key = k } }) catch {};
+                        const kflags = msg(u64, struct {}, ev, sel("modifierFlags"), .{});
+                        self.queue.append(self.gpa, .{ .key_down = .{ .key = k, .mods = modsFromFlags(kflags) } }) catch {};
                     } else {
                         const chars = msg(id, struct {}, ev, sel("characters"), .{});
                         if (chars != null) {
@@ -320,6 +335,7 @@ pub const Window = struct {
                     const dx = msg(f64, struct {}, ev, sel("scrollingDeltaX"), .{});
                     const dy = msg(f64, struct {}, ev, sel("scrollingDeltaY"), .{});
                     const ph = msg(u64, struct {}, ev, sel("momentumPhase"), .{});
+                    const sflags = msg(u64, struct {}, ev, sel("modifierFlags"), .{});
                     const phase: core_event.ScrollPhase = if (ph != 0) .momentum else .continue_;
                     self.queue.append(self.gpa, .{ .scroll = .{
                         .position = .{ .x = @floatCast(cv.x * scale), .y = @floatCast((bounds.h - cv.y) * scale) },
@@ -327,9 +343,17 @@ pub const Window = struct {
                         .dy = @floatCast(dy),
                         .unit = if (precise) .pixel else .line,
                         .phase = phase,
+                        .mods = modsFromFlags(sflags),
                     } }) catch {};
                 },
-                NSEventType.key_up => continue,
+                NSEventType.key_up => {
+                    const kc = msg(u16, struct {}, ev, sel("keyCode"), .{});
+                    const flags = msg(u64, struct {}, ev, sel("modifierFlags"), .{});
+                    if (keyCodeToKey(kc)) |k| {
+                        self.queue.append(self.gpa, .{ .key_up = .{ .key = k, .mods = modsFromFlags(flags) } }) catch {};
+                    }
+                    continue;
+                },
                 else => {},
             }
             _ = msg(void, struct { id }, app, sel("sendEvent:"), .{ev});
