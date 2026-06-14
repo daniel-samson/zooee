@@ -210,6 +210,16 @@ pub fn drawBoxShadow(b: Backend, s: f32) !void {
     });
 }
 
+/// Inset box shadow (#119): a light-grey rounded rect with an inset shadow —
+/// a pressed "well", shadow hugging the inner edges, clipped to the rounding.
+pub fn drawInsetShadow(b: Backend, s: f32) !void {
+    b.drawRect(.{ .x = 2 * s, .y = 2 * s, .width = 7 * s, .height = 6 * s }, .{
+        .background = Color.rgb(225, 228, 232),
+        .corner_radius = .all(1.5 * s),
+        .shadow = .{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 130 }, .dy = 0.5 * s, .blur = 2 * s, .corner_radius = 1.5 * s, .inset = true },
+    });
+}
+
 /// Rounded box shadow (#119): a rounded card on a blurred, rounded-corner
 /// shadow (Wallace integral). Not in `all`.
 pub fn drawRoundedShadow(b: Backend, s: f32) !void {

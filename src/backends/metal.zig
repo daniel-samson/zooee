@@ -976,23 +976,32 @@ pub const MetalShadowRenderer = struct {
         \\static float band_(float p, float lo, float hi, float s) { float inv = 1.0/(s*1.4142135623730951); return 0.5*(erf_((hi-p)*inv)-erf_((lo-p)*inv)); }
         \\static float werf_(float x) { float s = x<0.0?-1.0:1.0; float a = fabs(x); float v = 1.0+(0.278393+(0.230389+0.078108*(a*a))*a)*a; v*=v; return s - s/(v*v); }
         \\static float gauss_(float x, float sigma) { return exp(-(x*x)/(2.0*sigma*sigma)) / (2.5066282746310002*sigma); }
-        \\static float roundedX_(float x, float y, float sigma, float corner, float hx, float hy) { float delta = min(hy-corner-fabs(y), 0.0); float curved = hx-corner+sqrt(max(0.0, corner*corner-delta*delta)); float inv = 0.7071067811865476/sigma; float i0 = 0.5+0.5*werf_((x-curved)*inv); float i1 = 0.5+0.5*werf_((x+curved)*inv); return i1-i0; }
+        \\static float roundedX_(float x, float y, float sigma, float corner, float hx, float hy) { float delta = min(hy-corner-fabs(y), 0.0); float curved = hx-corner+sqrt(max(0.0, corner*corner-delta*delta)); float inv = 0.7071067811865476/sigma; float lo = 0.5+0.5*werf_((x-curved)*inv); float hi = 0.5+0.5*werf_((x+curved)*inv); return hi-lo; }
+        \\static float boxCov_(float x0,float y0,float x1,float y1,float corner,float s,float px,float py){
+        \\    if (s<=0.0) return (px>=x0&&px<x1&&py>=y0&&py<y1)?1.0:0.0;
+        \\    if (corner<=0.0) return clamp(band_(px,x0,x1,s)*band_(py,y0,y1,s),0.0,1.0);
+        \\    float cx=(x0+x1)*0.5, cy=(y0+y1)*0.5, hx=(x1-x0)*0.5, hy=(y1-y0)*0.5; float cr=min(corner,min(hx,hy));
+        \\    float ptx=px-cx, pty=py-cy; float low=pty-hy, high=pty+hy; float start=clamp(-3.0*s,low,high); float end=clamp(3.0*s,low,high);
+        \\    float step=(end-start)/4.0; float yv=start+step*0.5; float value=0.0;
+        \\    for(int k=0;k<4;k++){ value+=roundedX_(ptx,pty-yv,s,cr,hx,hy)*gauss_(yv,s)*step; yv+=step; } return clamp(value,0.0,1.0);
+        \\}
+        \\static bool insideRR_(float rx,float ry,float rw,float rh,float corner,float px,float py){
+        \\    if(px<rx||px>=rx+rw||py<ry||py>=ry+rh) return false; float cr=min(corner,min(rw,rh)*0.5);
+        \\    if(px<rx+cr&&py<ry+cr){float dx=px-(rx+cr),dy=py-(ry+cr); if(dx*dx+dy*dy>cr*cr) return false;}
+        \\    if(px>=rx+rw-cr&&py<ry+cr){float dx=px-(rx+rw-cr),dy=py-(ry+cr); if(dx*dx+dy*dy>cr*cr) return false;}
+        \\    if(px>=rx+rw-cr&&py>=ry+rh-cr){float dx=px-(rx+rw-cr),dy=py-(ry+rh-cr); if(dx*dx+dy*dy>cr*cr) return false;}
+        \\    if(px<rx+cr&&py>=ry+rh-cr){float dx=px-(rx+cr),dy=py-(ry+rh-cr); if(dx*dx+dy*dy>cr*cr) return false;} return true;
+        \\}
         \\fragment float4 f_main(float4 fp [[position]], constant ShU& u [[buffer(0)]]) {
-        \\    float dx=u.sh.x, dy=u.sh.y, blur=u.sh.z, spread=u.sh.w; float corner=u.vp.z;
-        \\    float x0=u.rect.x+dx-spread, y0=u.rect.y+dy-spread;
-        \\    float x1=u.rect.x+u.rect.z+dx+spread, y1=u.rect.y+u.rect.w+dy+spread;
-        \\    float cov;
-        \\    if (blur<=0.0) cov = (fp.x>=x0 && fp.x<x1 && fp.y>=y0 && fp.y<y1) ? 1.0 : 0.0;
-        \\    else if (corner<=0.0) { float s=blur*0.5; cov = clamp(band_(fp.x,x0,x1,s)*band_(fp.y,y0,y1,s), 0.0, 1.0); }
-        \\    else {
-        \\        float s=blur*0.5; float cx=(x0+x1)*0.5, cy=(y0+y1)*0.5; float hx=(x1-x0)*0.5, hy=(y1-y0)*0.5;
-        \\        float cr=min(corner, min(hx,hy)); float ptx=fp.x-cx, pty=fp.y-cy;
-        \\        float low=pty-hy, high=pty+hy; float start=clamp(-3.0*s, low, high); float end=clamp(3.0*s, low, high);
-        \\        float step=(end-start)/4.0; float y=start+step*0.5; float value=0.0;
-        \\        for (int i=0;i<4;i++) { value += roundedX_(ptx, pty-y, s, cr, hx, hy)*gauss_(y, s)*step; y+=step; }
-        \\        cov = clamp(value, 0.0, 1.0);
+        \\    float dx=u.sh.x, dy=u.sh.y, blur=u.sh.z, spread=u.sh.w; float corner=u.vp.z; bool inset=u.vp.w>0.5; float s=blur*0.5;
+        \\    if (inset) {
+        \\        if (!insideRR_(u.rect.x,u.rect.y,u.rect.z,u.rect.w,corner, fp.x,fp.y)) discard_fragment();
+        \\        float ix0=u.rect.x+dx+spread, iy0=u.rect.y+dy+spread, ix1=u.rect.x+u.rect.z+dx-spread, iy1=u.rect.y+u.rect.w+dy-spread;
+        \\        float cov = clamp(1.0 - boxCov_(ix0,iy0,ix1,iy1,corner,s, fp.x,fp.y), 0.0, 1.0);
+        \\        return float4(u.color.rgb, cov*u.color.a);
         \\    }
-        \\    return float4(u.color.rgb, cov*u.color.a);
+        \\    float x0=u.rect.x+dx-spread, y0=u.rect.y+dy-spread, x1=u.rect.x+u.rect.z+dx+spread, y1=u.rect.y+u.rect.w+dy+spread;
+        \\    return float4(u.color.rgb, boxCov_(x0,y0,x1,y1,corner,s, fp.x,fp.y)*u.color.a);
         \\}
     ;
 
@@ -1005,8 +1014,8 @@ pub const MetalShadowRenderer = struct {
         release(self.pipeline);
     }
 
-    pub fn draw(self: *MetalShadowRenderer, quad: [4]f32, rect: [4]f32, sh: [4]f32, color: [4]f32, corner: f32) void {
-        var u: ShadowUniform = .{ .quad = quad, .rect = rect, .sh = sh, .color = color, .vp = .{ self.vw, self.vh, corner, 0 } };
+    pub fn draw(self: *MetalShadowRenderer, quad: [4]f32, rect: [4]f32, sh: [4]f32, color: [4]f32, corner: f32, inset: bool) void {
+        var u: ShadowUniform = .{ .quad = quad, .rect = rect, .sh = sh, .color = color, .vp = .{ self.vw, self.vh, corner, if (inset) 1 else 0 } };
         _ = msg(void, struct { *const ShadowUniform, u64, u64 }, self.enc, sel("setVertexBytes:length:atIndex:"), .{ &u, @as(u64, @sizeOf(ShadowUniform)), 0 });
         _ = msg(void, struct { *const ShadowUniform, u64, u64 }, self.enc, sel("setFragmentBytes:length:atIndex:"), .{ &u, @as(u64, @sizeOf(ShadowUniform)), 0 });
         _ = msg(void, struct { u64, u64, u64 }, self.enc, sel("drawPrimitives:vertexStart:vertexCount:"), .{ MTLPrimitiveTypeTriangleStrip, 0, 4 });
@@ -1589,31 +1598,33 @@ pub const MetalBackend = struct {
 
     fn drawRect(ptr: *anyopaque, rect: geometry.Rect, rs: style.RectStyle) void {
         const self = self_(ptr);
-        if (rs.shadow) |sh| {
+        const rrect: [4]f32 = .{ rect.x, rect.y, rect.width, rect.height };
+        const shc: [4]f32 = if (rs.shadow) |sh| .{ sh.dx, sh.dy, sh.blur, sh.spread } else undefined;
+        // Outer shadow paints behind the fill.
+        if (rs.shadow) |sh| if (!sh.inset) {
             const margin = sh.blur * 2 + @abs(sh.spread) + 2;
-            const quad: [4]f32 = .{
-                rect.x + sh.dx - sh.spread - margin,
-                rect.y + sh.dy - sh.spread - margin,
-                rect.width + 2 * (sh.spread + margin),
-                rect.height + 2 * (sh.spread + margin),
-            };
+            const quad: [4]f32 = .{ rect.x + sh.dx - sh.spread - margin, rect.y + sh.dy - sh.spread - margin, rect.width + 2 * (sh.spread + margin), rect.height + 2 * (sh.spread + margin) };
             _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{self.shadow.pipeline});
-            self.shadow.draw(quad, .{ rect.x, rect.y, rect.width, rect.height }, .{ sh.dx, sh.dy, sh.blur, sh.spread }, col4(sh.color), sh.corner_radius);
-        }
+            self.shadow.draw(quad, rrect, shc, col4(sh.color), sh.corner_radius, false);
+        };
+        // Fill.
         if (rs.gradient) |g| {
             _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{self.grad.pipeline});
             self.grad.fill(rect, g);
-            return;
-        }
-        if (rs.corner_radius.isNone() and rs.border.isNone()) {
+        } else if (rs.corner_radius.isNone() and rs.border.isNone()) {
             if (rs.background) |bg| {
                 _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{self.rect.pipeline});
                 self.rect.fillRect(rect.x, rect.y, rect.width, rect.height, col4(bg));
             }
-            return;
+        } else {
+            _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{self.exact.pipeline});
+            self.exact.draw(rect, rs);
         }
-        _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{self.exact.pipeline});
-        self.exact.draw(rect, rs);
+        // Inset shadow paints on top, clipped to the rect's rounded shape.
+        if (rs.shadow) |sh| if (sh.inset) {
+            _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{self.shadow.pipeline});
+            self.shadow.draw(rrect, rrect, shc, col4(sh.color), sh.corner_radius, true);
+        };
     }
 
     fn glyphFor(self: *MetalBackend, size_px: u16) ?*MetalGlyphRenderer {

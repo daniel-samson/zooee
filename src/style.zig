@@ -173,6 +173,9 @@ pub const BoxShadow = struct {
     /// Corner radius of the shadowed box (#119): >0 uses the rounded-shadow
     /// integral; 0 uses the fast closed-form erf product.
     corner_radius: f32 = 0,
+    /// Inset shadow (#119): the shadow is cast inward from the rect edges
+    /// (a pressed "well") instead of outward behind the rect.
+    inset: bool = false,
 
     /// Abramowitz-Stegun 7.1.26 erf approximation (max abs error ~1.5e-7).
     /// Backends MUST replicate this exact polynomial so results match.
@@ -213,28 +216,21 @@ pub const BoxShadow = struct {
         return hi - lo;
     }
 
-    /// Shadow coverage [0,1] at pixel center (px,py) for the rect at
-    /// (rect_x,rect_y) sized rect_w×rect_h.
-    pub fn coverage(self: BoxShadow, rect_x: f32, rect_y: f32, rect_w: f32, rect_h: f32, px: f32, py: f32) f32 {
-        const x0 = rect_x + self.dx - self.spread;
-        const y0 = rect_y + self.dy - self.spread;
-        const x1 = rect_x + rect_w + self.dx + self.spread;
-        const y1 = rect_y + rect_h + self.dy + self.spread;
-        if (self.blur <= 0) {
+    /// Gaussian coverage [0,1] of the (optionally rounded) box [x0,y0,x1,y1] at
+    /// (px,py), sigma `s`. The shared kernel for outer and inset shadows; every
+    /// backend replicates it.
+    pub fn boxCoverage(x0: f32, y0: f32, x1: f32, y1: f32, corner: f32, s: f32, px: f32, py: f32) f32 {
+        if (s <= 0) {
             return if (px >= x0 and px < x1 and py >= y0 and py < y1) 1 else 0;
         }
-        const s = self.blur * 0.5;
-        if (self.corner_radius <= 0) {
-            const c = band(px, x0, x1, s) * band(py, y0, y1, s);
-            return @max(0, @min(1, c));
+        if (corner <= 0) {
+            return @max(0, @min(1, band(px, x0, x1, s) * band(py, y0, y1, s)));
         }
-        // Rounded box: 4-sample vertical Gaussian integral of the rounded
-        // horizontal extent. Same loop on CPU and shader → matching result.
         const cx = (x0 + x1) * 0.5;
         const cy = (y0 + y1) * 0.5;
         const hx = (x1 - x0) * 0.5;
         const hy = (y1 - y0) * 0.5;
-        const corner = @min(self.corner_radius, @min(hx, hy));
+        const cr = @min(corner, @min(hx, hy));
         const ptx = px - cx;
         const pty = py - cy;
         const low = pty - hy;
@@ -246,10 +242,30 @@ pub const BoxShadow = struct {
         var value: f32 = 0;
         var i: usize = 0;
         while (i < 4) : (i += 1) {
-            value += roundedX(ptx, pty - y, s, corner, hx, hy) * gaussian(y, s) * step;
+            value += roundedX(ptx, pty - y, s, cr, hx, hy) * gaussian(y, s) * step;
             y += step;
         }
         return @max(0, @min(1, value));
+    }
+
+    /// Outer shadow coverage [0,1] at (px,py): the box grown by `spread`.
+    pub fn coverage(self: BoxShadow, rect_x: f32, rect_y: f32, rect_w: f32, rect_h: f32, px: f32, py: f32) f32 {
+        const x0 = rect_x + self.dx - self.spread;
+        const y0 = rect_y + self.dy - self.spread;
+        const x1 = rect_x + rect_w + self.dx + self.spread;
+        const y1 = rect_y + rect_h + self.dy + self.spread;
+        return boxCoverage(x0, y0, x1, y1, self.corner_radius, self.blur * 0.5, px, py);
+    }
+
+    /// Inset shadow coverage [0,1] at (px,py): 1 − coverage of the inner
+    /// (offset + spread-shrunk) box, so the shadow hugs the inner edges. Paint
+    /// only inside the rect (the caller clips to the rect's rounded shape).
+    pub fn insetCoverage(self: BoxShadow, rect_x: f32, rect_y: f32, rect_w: f32, rect_h: f32, px: f32, py: f32) f32 {
+        const x0 = rect_x + self.dx + self.spread;
+        const y0 = rect_y + self.dy + self.spread;
+        const x1 = rect_x + rect_w + self.dx - self.spread;
+        const y1 = rect_y + rect_h + self.dy - self.spread;
+        return @max(0, @min(1, 1.0 - boxCoverage(x0, y0, x1, y1, self.corner_radius, self.blur * 0.5, px, py)));
     }
 };
 
