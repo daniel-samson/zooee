@@ -366,12 +366,20 @@ extern "d3d11" fn D3D11CreateDeviceAndSwapChain(
 /// GPU-present path for runWindow. Requires the interactive desktop session
 /// (DXGI fails NOT_CURRENTLY_AVAILABLE in service/SSH sessions); the caller
 /// falls back to the CPU raster + GDI blit path when create() errors.
+// DXGI device-lost HRESULTs (#25): the GPU was removed (driver crash/upgrade,
+// TDR, eviction) or reset. The window loop should recreate the device + GPU
+// resources, or exit gracefully, rather than silently present nothing.
+const DXGI_ERROR_DEVICE_REMOVED: HRESULT = @bitCast(@as(u32, 0x887A0005));
+const DXGI_ERROR_DEVICE_RESET: HRESULT = @bitCast(@as(u32, 0x887A0007));
+
 pub const D3dSwapchain = struct {
     device: *IDevice,
     context: *IContext,
     swapchain: *ISwapChain,
     width: u32,
     height: u32,
+    /// Set when Present reported the device was lost (#25); read via isLost().
+    lost: bool = false,
 
     pub fn create(hwnd: *anyopaque, width: u32, height: u32) Error!D3dSwapchain {
         var desc: DXGI_SWAP_CHAIN_DESC = .{
@@ -406,7 +414,19 @@ pub const D3dSwapchain = struct {
     }
 
     pub fn present(self: *D3dSwapchain) void {
-        _ = self.swapchain.vtbl.Present(self.swapchain, 0, 0);
+        const hr = self.swapchain.vtbl.Present(self.swapchain, 0, 0);
+        // Device-lost detection (#25): surface it instead of silently presenting
+        // blank frames forever. Full recreate (device + atlas + textures) is the
+        // caller's job once it sees isLost().
+        if (hr == DXGI_ERROR_DEVICE_REMOVED or hr == DXGI_ERROR_DEVICE_RESET) {
+            self.lost = true;
+            std.log.scoped(.d3d11).err("GPU device lost (hr=0x{X:0>8}); recreate or exit", .{@as(u32, @bitCast(hr))});
+        }
+    }
+
+    /// Whether the GPU device was lost on a recent present (#25).
+    pub fn isLost(self: *const D3dSwapchain) bool {
+        return self.lost;
     }
 
     /// Resize the swapchain's back buffer to match the window's client area.
