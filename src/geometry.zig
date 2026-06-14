@@ -24,6 +24,38 @@ pub const Size = struct {
 /// definition of a filled path's interior — every backend (raster reference +
 /// each shader) must replicate this exact logic so fills match pixel-exact.
 /// Concave shapes and self-intersections resolve by even-odd parity.
+/// Squared distance from (px,py) to segment a→b. Division is by the segment
+/// length² (never near-zero for real segments), so it's numerically stable and
+/// matches across CPU/GPU.
+fn segDist2(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) f32 {
+    const vx = bx - ax;
+    const vy = by - ay;
+    const wx = px - ax;
+    const wy = py - ay;
+    const vv = vx * vx + vy * vy;
+    const t = if (vv > 0) @max(0.0, @min(1.0, (wx * vx + wy * vy) / vv)) else 0.0;
+    const dx = ax + t * vx - px;
+    const dy = ay + t * vy - py;
+    return dx * dx + dy * dy;
+}
+
+/// Is (px,py) within `hw` (half stroke width) of the polyline through `pts`?
+/// `closed` adds the segment from the last point back to the first. Compared
+/// as squared distances (no sqrt), so the canonical stroke test (#120) matches
+/// pixel-exact across every backend. Round caps/joins (distance to the line).
+pub fn pointNearPolyline(pts: []const Point, closed: bool, hw: f32, px: f32, py: f32) bool {
+    if (pts.len < 2) return false;
+    const hw2 = hw * hw;
+    const last = if (closed) pts.len else pts.len - 1;
+    var i: usize = 0;
+    while (i < last) : (i += 1) {
+        const a = pts[i];
+        const b = pts[(i + 1) % pts.len];
+        if (segDist2(a.x, a.y, b.x, b.y, px, py) <= hw2) return true;
+    }
+    return false;
+}
+
 pub fn pointInPolygon(pts: []const Point, px: f32, py: f32) bool {
     if (pts.len < 3) return false;
     var inside = false;
@@ -108,4 +140,14 @@ test "even-odd point-in-polygon handles concavity" {
     try std.testing.expect(pointInPolygon(&l, 4, 1)); // bottom bar → inside
     try std.testing.expect(!pointInPolygon(&l, 4, 4)); // notch → outside
     try std.testing.expect(!pointInPolygon(&l, 10, 10)); // far → outside
+}
+
+test "stroke proximity to a polyline" {
+    // A horizontal segment from (0,10) to (20,10), half-width 2.
+    const line = [_]Point{ .{ .x = 0, .y = 10 }, .{ .x = 20, .y = 10 } };
+    try std.testing.expect(pointNearPolyline(&line, false, 2, 10, 10)); // on the line
+    try std.testing.expect(pointNearPolyline(&line, false, 2, 10, 11.5)); // within half-width
+    try std.testing.expect(!pointNearPolyline(&line, false, 2, 10, 13)); // beyond
+    try std.testing.expect(pointNearPolyline(&line, false, 2, 0, 9)); // near an endpoint (round cap)
+    try std.testing.expect(!pointNearPolyline(&line, false, 2, 25, 10)); // past the end
 }
