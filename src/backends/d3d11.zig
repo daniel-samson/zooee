@@ -109,6 +109,7 @@ const D3D_DRIVER_TYPE_WARP: UINT = 5;
 const D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST: UINT = 4;
 const D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP: UINT = 5;
 const D3D11_FILTER_MIN_MAG_MIP_POINT: UINT = 0;
+const D3D11_FILTER_MIN_MAG_MIP_LINEAR: UINT = 0x15;
 const D3D11_TEXTURE_ADDRESS_CLAMP: UINT = 3;
 const D3D11_INPUT_PER_VERTEX_DATA: UINT = 0;
 const D3D11_FILL_SOLID: UINT = 3;
@@ -1688,6 +1689,7 @@ const D3dImageRenderer = struct {
     layout: *IInputLayout,
     raster: *IRasterizerState,
     sampler: *ISampler,
+    sampler_linear: *ISampler,
 
     fn init(device: *IDevice, context: *IContext) Error!D3dImageRenderer {
         const d3d_compile = loadD3DCompile() orelse return error.ShaderFailed;
@@ -1713,10 +1715,14 @@ const D3dImageRenderer = struct {
         var sdesc: D3D11_SAMPLER_DESC = .{ .filter = D3D11_FILTER_MIN_MAG_MIP_POINT, .address_u = D3D11_TEXTURE_ADDRESS_CLAMP, .address_v = D3D11_TEXTURE_ADDRESS_CLAMP, .address_w = D3D11_TEXTURE_ADDRESS_CLAMP };
         var sampler: ?*ISampler = null;
         if (!ok(device.vtbl.CreateSamplerState(device, &sdesc, &sampler)) or sampler == null) return error.ShaderFailed;
-        return .{ .device = device, .context = context, .vs = vs.?, .ps = ps.?, .layout = layout.?, .raster = raster.?, .sampler = sampler.? };
+        var ldesc: D3D11_SAMPLER_DESC = .{ .filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR, .address_u = D3D11_TEXTURE_ADDRESS_CLAMP, .address_v = D3D11_TEXTURE_ADDRESS_CLAMP, .address_w = D3D11_TEXTURE_ADDRESS_CLAMP };
+        var sampler_linear: ?*ISampler = null;
+        if (!ok(device.vtbl.CreateSamplerState(device, &ldesc, &sampler_linear)) or sampler_linear == null) return error.ShaderFailed;
+        return .{ .device = device, .context = context, .vs = vs.?, .ps = ps.?, .layout = layout.?, .raster = raster.?, .sampler = sampler.?, .sampler_linear = sampler_linear.? };
     }
 
     fn deinit(self: *D3dImageRenderer) void {
+        release(self.sampler_linear);
         release(self.sampler);
         release(self.raster);
         release(self.layout);
@@ -1725,10 +1731,10 @@ const D3dImageRenderer = struct {
     }
 
     fn draw(self: *D3dImageRenderer, rtv: *IRtv, vw: f32, vh: f32, rect: geometry.Rect, srv: *ISrv) Error!void {
-        return self.drawUv(rtv, vw, vh, rect, .{ .x = 0, .y = 0, .width = 1, .height = 1 }, srv);
+        return self.drawUv(rtv, vw, vh, rect, .{ .x = 0, .y = 0, .width = 1, .height = 1 }, srv, .nearest);
     }
 
-    fn drawUv(self: *D3dImageRenderer, rtv: *IRtv, vw: f32, vh: f32, dst: geometry.Rect, src: geometry.Rect, srv: *ISrv) Error!void {
+    fn drawUv(self: *D3dImageRenderer, rtv: *IRtv, vw: f32, vh: f32, dst: geometry.Rect, src: geometry.Rect, srv: *ISrv, sampling: Backend.Sampling) Error!void {
         const dev = self.device;
         const ctx = self.context;
         const x0 = dst.x;
@@ -1770,7 +1776,10 @@ const D3dImageRenderer = struct {
         ctx.vtbl.PSSetShader(ctx, self.ps, null, 0);
         var srv_slot: ?*ISrv = srv;
         ctx.vtbl.PSSetShaderResources(ctx, 0, 1, &srv_slot);
-        var samp_slot: ?*ISampler = self.sampler;
+        var samp_slot: ?*ISampler = switch (sampling) {
+            .nearest => self.sampler,
+            .linear => self.sampler_linear,
+        };
         ctx.vtbl.PSSetSamplers(ctx, 0, 1, &samp_slot);
         ctx.vtbl.Draw(ctx, 4, 0);
     }
@@ -2496,12 +2505,12 @@ pub const D3dBackend = struct {
         self.image.draw(self.target(), w, h, rect, srv) catch {};
     }
 
-    fn drawImageUv(ptr: *anyopaque, dst: geometry.Rect, texture: *Backend.Texture, src: geometry.Rect) void {
+    fn drawImageUv(ptr: *anyopaque, dst: geometry.Rect, texture: *Backend.Texture, src: geometry.Rect, sampling: Backend.Sampling) void {
         const self = self_(ptr);
         const w: f32 = @floatFromInt(self.off.width);
         const h: f32 = @floatFromInt(self.off.height);
         const srv: *ISrv = @ptrCast(@alignCast(texture));
-        self.image.drawUv(self.target(), w, h, dst, src, srv) catch {};
+        self.image.drawUv(self.target(), w, h, dst, src, srv, sampling) catch {};
     }
 
     fn fillPath(ptr: *anyopaque, points: []const geometry.Point, color: style.Color) void {

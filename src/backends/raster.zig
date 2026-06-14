@@ -489,15 +489,22 @@ pub const RasterBackend = struct {
     }
 
     fn drawImage(ptr: *anyopaque, rect: Rect, texture: *Backend.Texture) void {
-        drawImageUv(ptr, rect, texture, .{ .x = 0, .y = 0, .width = 1, .height = 1 });
+        drawImageUv(ptr, rect, texture, .{ .x = 0, .y = 0, .width = 1, .height = 1 }, .nearest);
     }
 
-    /// Draw the `src` UV sub-rect of the texture into `dst`, nearest sampling.
-    fn drawImageUv(ptr: *anyopaque, dst: Rect, texture: *Backend.Texture, src: Rect) void {
+    /// Draw the `src` UV sub-rect of the texture into `dst`. `nearest` snaps to
+    /// the covering texel; `linear` is a bilinear lerp of the 4 neighbors with
+    /// clamp-to-edge — the same math a GPU linear sampler runs, so the GPU
+    /// backends match this reference within a small edge tolerance (#122).
+    fn drawImageUv(ptr: *anyopaque, dst: Rect, texture: *Backend.Texture, src: Rect, sampling: Backend.Sampling) void {
         const self = self_(ptr);
         const tex = self.textures.get(@intCast(@intFromPtr(texture))) orelse unreachable;
         const bounds = IRect.fromRect(dst).intersect(self.currentClip());
         if (bounds.isEmpty()) return;
+        const tw: f32 = @floatFromInt(tex.width);
+        const th: f32 = @floatFromInt(tex.height);
+        const maxx: i32 = @intCast(tex.width - 1);
+        const maxy: i32 = @intCast(tex.height - 1);
         var y = bounds.y0;
         while (y < bounds.y1) : (y += 1) {
             var x = bounds.x0;
@@ -506,17 +513,58 @@ pub const RasterBackend = struct {
                 const fy = (@as(f32, @floatFromInt(y)) + 0.5 - dst.y) / dst.height;
                 const u = src.x + fx * src.width;
                 const v = src.y + fy * src.height;
-                const tx: u32 = @intFromFloat(std.math.clamp(u * @as(f32, @floatFromInt(tex.width)), 0, @as(f32, @floatFromInt(tex.width - 1))));
-                const ty: u32 = @intFromFloat(std.math.clamp(v * @as(f32, @floatFromInt(tex.height)), 0, @as(f32, @floatFromInt(tex.height - 1))));
-                const ti = (@as(usize, ty) * tex.width + tx) * 4;
-                self.setPixel(x, y, .{
-                    .r = tex.rgba[ti + 0],
-                    .g = tex.rgba[ti + 1],
-                    .b = tex.rgba[ti + 2],
-                    .a = tex.rgba[ti + 3],
-                });
+                const px = switch (sampling) {
+                    .nearest => blk: {
+                        const tx: i32 = std.math.clamp(@as(i32, @intFromFloat(@floor(u * tw))), 0, maxx);
+                        const ty: i32 = std.math.clamp(@as(i32, @intFromFloat(@floor(v * th))), 0, maxy);
+                        break :blk texel(tex, tx, ty);
+                    },
+                    .linear => blk: {
+                        // Sample point in texel space; texel centers at +0.5.
+                        const sx = u * tw - 0.5;
+                        const sy = v * th - 0.5;
+                        const x0: i32 = @intFromFloat(@floor(sx));
+                        const y0: i32 = @intFromFloat(@floor(sy));
+                        const fxr = sx - @floor(sx);
+                        const fyr = sy - @floor(sy);
+                        const cx0 = std.math.clamp(x0, 0, maxx);
+                        const cx1 = std.math.clamp(x0 + 1, 0, maxx);
+                        const cy0 = std.math.clamp(y0, 0, maxy);
+                        const cy1 = std.math.clamp(y0 + 1, 0, maxy);
+                        const c00 = texel(tex, cx0, cy0);
+                        const c10 = texel(tex, cx1, cy0);
+                        const c01 = texel(tex, cx0, cy1);
+                        const c11 = texel(tex, cx1, cy1);
+                        break :blk lerp2(c00, c10, c01, c11, fxr, fyr);
+                    },
+                };
+                self.setPixel(x, y, px);
             }
         }
+    }
+
+    fn texel(tex: anytype, x: i32, y: i32) Color {
+        const ti = (@as(usize, @intCast(y)) * tex.width + @as(usize, @intCast(x))) * 4;
+        return .{ .r = tex.rgba[ti + 0], .g = tex.rgba[ti + 1], .b = tex.rgba[ti + 2], .a = tex.rgba[ti + 3] };
+    }
+
+    fn lerp2(c00: Color, c10: Color, c01: Color, c11: Color, fx: f32, fy: f32) Color {
+        return .{
+            .r = bilerp(c00.r, c10.r, c01.r, c11.r, fx, fy),
+            .g = bilerp(c00.g, c10.g, c01.g, c11.g, fx, fy),
+            .b = bilerp(c00.b, c10.b, c01.b, c11.b, fx, fy),
+            .a = bilerp(c00.a, c10.a, c01.a, c11.a, fx, fy),
+        };
+    }
+
+    fn bilerp(a: u8, b: u8, c: u8, d: u8, fx: f32, fy: f32) u8 {
+        const af: f32 = @floatFromInt(a);
+        const bf: f32 = @floatFromInt(b);
+        const cf: f32 = @floatFromInt(c);
+        const df: f32 = @floatFromInt(d);
+        const top = af + (bf - af) * fx;
+        const bot = cf + (df - cf) * fx;
+        return @intFromFloat(@round(top + (bot - top) * fy));
     }
 
     fn pushClip(ptr: *anyopaque, rect: Rect) void {

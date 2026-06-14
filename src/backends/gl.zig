@@ -212,6 +212,7 @@ const GL_TEXTURE_MAG_FILTER: GLenum = 0x2800;
 const GL_TEXTURE_WRAP_S: GLenum = 0x2802;
 const GL_TEXTURE_WRAP_T: GLenum = 0x2803;
 const GL_NEAREST: GLint = 0x2600;
+const GL_LINEAR: GLint = 0x2601;
 const GL_CLAMP_TO_EDGE: GLint = 0x812F;
 const GL_TRIANGLE_STRIP: GLenum = 0x0005;
 const GL_FRAMEBUFFER: GLenum = 0x8D40;
@@ -1601,11 +1602,12 @@ pub const ImageRenderer = struct {
     /// Draw texture `tex` into pixel-space `rect`. `vw`/`vh` are the
     /// framebuffer size.
     pub fn draw(self: *ImageRenderer, vw: f32, vh: f32, rect: geometry.Rect, tex: GLuint) void {
-        self.drawUv(vw, vh, rect, .{ .x = 0, .y = 0, .width = 1, .height = 1 }, tex);
+        self.drawUv(vw, vh, rect, .{ .x = 0, .y = 0, .width = 1, .height = 1 }, tex, .nearest);
     }
 
-    /// Draw the `src` UV sub-rect of `tex` into pixel-space `dst` (#122 fit).
-    pub fn drawUv(self: *ImageRenderer, vw: f32, vh: f32, dst: geometry.Rect, src: geometry.Rect, tex: GLuint) void {
+    /// Draw the `src` UV sub-rect of `tex` into pixel-space `dst` (#122 fit),
+    /// with nearest or bilinear filtering.
+    pub fn drawUv(self: *ImageRenderer, vw: f32, vh: f32, dst: geometry.Rect, src: geometry.Rect, tex: GLuint, sampling: Backend.Sampling) void {
         const gl = self.gl;
         const x0 = dst.x;
         const y0 = dst.y;
@@ -1626,6 +1628,12 @@ pub const ImageRenderer = struct {
         gl.uniform2f(self.u_viewport, vw, vh);
         gl.activeTexture(GL_TEXTURE0);
         gl.bindTexture(GL_TEXTURE_2D, tex);
+        const filter: GLint = switch (sampling) {
+            .nearest => GL_NEAREST,
+            .linear => GL_LINEAR,
+        };
+        gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+        gl.texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
         gl.uniform1i(self.u_tex, 0);
         gl.bindVertexArray(self.vao);
         gl.bindBuffer(GL_ARRAY_BUFFER, self.vbo);
@@ -2153,10 +2161,10 @@ pub const GlBackend = struct {
         self.image.draw(@floatFromInt(self.width), @floatFromInt(self.height), rect, @intCast(@intFromPtr(texture)));
     }
 
-    fn drawImageUv(ptr: *anyopaque, dst: geometry.Rect, texture: *Backend.Texture, src: geometry.Rect) void {
+    fn drawImageUv(ptr: *anyopaque, dst: geometry.Rect, texture: *Backend.Texture, src: geometry.Rect, sampling: Backend.Sampling) void {
         const self = self_(ptr);
         enableBlend();
-        self.image.drawUv(@floatFromInt(self.width), @floatFromInt(self.height), dst, src, @intCast(@intFromPtr(texture)));
+        self.image.drawUv(@floatFromInt(self.width), @floatFromInt(self.height), dst, src, @intCast(@intFromPtr(texture)), sampling);
     }
 
     fn fillPath(ptr: *anyopaque, points: []const geometry.Point, color: style.Color) void {

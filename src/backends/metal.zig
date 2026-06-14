@@ -83,6 +83,7 @@ const MTLLoadActionClear: u64 = 2;
 const MTLStoreActionStore: u64 = 1;
 const MTLPrimitiveTypeTriangleStrip: u64 = 4;
 const MTLSamplerMinMagFilterNearest: u64 = 0;
+const MTLSamplerMinMagFilterLinear: u64 = 1;
 const MTLTextureUsageShaderRead: u64 = 1;
 const MTLTextureUsageRenderTarget: u64 = 4;
 const MTLStorageModeShared: u64 = 0; // CPU+GPU shared (Apple Silicon) → getBytes w/o sync
@@ -273,9 +274,13 @@ fn uploadTexture(device: id, rgba: []const u8, w: u32, h: u32) Error!id {
 }
 
 fn makeSampler(device: id) id {
+    return makeSamplerFilter(device, MTLSamplerMinMagFilterNearest);
+}
+
+fn makeSamplerFilter(device: id, filter: u64) id {
     const desc = msg(id, struct {}, msg(id, struct {}, cls("MTLSamplerDescriptor"), sel("alloc"), .{}), sel("init"), .{});
-    _ = msg(void, struct { u64 }, desc, sel("setMinFilter:"), .{MTLSamplerMinMagFilterNearest});
-    _ = msg(void, struct { u64 }, desc, sel("setMagFilter:"), .{MTLSamplerMinMagFilterNearest});
+    _ = msg(void, struct { u64 }, desc, sel("setMinFilter:"), .{filter});
+    _ = msg(void, struct { u64 }, desc, sel("setMagFilter:"), .{filter});
     return msg(id, struct { id }, device, sel("newSamplerStateWithDescriptor:"), .{desc});
 }
 
@@ -830,6 +835,7 @@ pub const MetalImageRenderer = struct {
     queue: id,
     pipeline: id,
     sampler: id,
+    sampler_linear: id,
     enc: id = null,
     vw: f32 = 0,
     vh: f32 = 0,
@@ -853,25 +859,31 @@ pub const MetalImageRenderer = struct {
     pub fn init(device: id, queue: id) Error!MetalImageRenderer {
         const pipeline = try compilePipeline(device, shader, MTLPixelFormatRGBA8Unorm, true);
         const sampler = makeSampler(device);
-        return .{ .device = device, .queue = queue, .pipeline = pipeline, .sampler = sampler };
+        const sampler_linear = makeSamplerFilter(device, MTLSamplerMinMagFilterLinear);
+        return .{ .device = device, .queue = queue, .pipeline = pipeline, .sampler = sampler, .sampler_linear = sampler_linear };
     }
 
     pub fn deinit(self: *MetalImageRenderer) void {
+        release(self.sampler_linear);
         release(self.sampler);
         release(self.pipeline);
     }
 
     pub fn draw(self: *MetalImageRenderer, x: f32, y: f32, w: f32, h: f32, tex: id) void {
-        self.drawUv(x, y, w, h, .{ 0, 0, 1, 1 }, tex);
+        self.drawUv(x, y, w, h, .{ 0, 0, 1, 1 }, tex, .nearest);
     }
 
-    /// Draw the `src` UV sub-rect into the dst rect.
-    pub fn drawUv(self: *MetalImageRenderer, x: f32, y: f32, w: f32, h: f32, src: [4]f32, tex: id) void {
+    /// Draw the `src` UV sub-rect into the dst rect with `sampling`.
+    pub fn drawUv(self: *MetalImageRenderer, x: f32, y: f32, w: f32, h: f32, src: [4]f32, tex: id, sampling: Backend.Sampling) void {
         const ImgUniform = extern struct { rect: [4]f32, src: [4]f32, vp: [4]f32 };
         var u: ImgUniform = .{ .rect = .{ x, y, w, h }, .src = src, .vp = .{ self.vw, self.vh, 0, 0 } };
         _ = msg(void, struct { *const ImgUniform, u64, u64 }, self.enc, sel("setVertexBytes:length:atIndex:"), .{ &u, @as(u64, @sizeOf(ImgUniform)), 0 });
         _ = msg(void, struct { id, u64 }, self.enc, sel("setFragmentTexture:atIndex:"), .{ tex, 0 });
-        _ = msg(void, struct { id, u64 }, self.enc, sel("setFragmentSamplerState:atIndex:"), .{ self.sampler, 0 });
+        const samp = switch (sampling) {
+            .nearest => self.sampler,
+            .linear => self.sampler_linear,
+        };
+        _ = msg(void, struct { id, u64 }, self.enc, sel("setFragmentSamplerState:atIndex:"), .{ samp, 0 });
         _ = msg(void, struct { u64, u64, u64 }, self.enc, sel("drawPrimitives:vertexStart:vertexCount:"), .{ MTLPrimitiveTypeTriangleStrip, 0, 4 });
     }
 };
@@ -1660,10 +1672,10 @@ pub const MetalBackend = struct {
         self.image.draw(rect.x, rect.y, rect.width, rect.height, @ptrCast(texture));
     }
 
-    fn drawImageUv(ptr: *anyopaque, dst: geometry.Rect, texture: *Backend.Texture, src: geometry.Rect) void {
+    fn drawImageUv(ptr: *anyopaque, dst: geometry.Rect, texture: *Backend.Texture, src: geometry.Rect, sampling: Backend.Sampling) void {
         const self = self_(ptr);
         _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{self.image.pipeline});
-        self.image.drawUv(dst.x, dst.y, dst.width, dst.height, .{ src.x, src.y, src.width, src.height }, @ptrCast(texture));
+        self.image.drawUv(dst.x, dst.y, dst.width, dst.height, .{ src.x, src.y, src.width, src.height }, @ptrCast(texture), sampling);
     }
 
     fn fillPath(ptr: *anyopaque, points: []const geometry.Point, color: style.Color) void {
