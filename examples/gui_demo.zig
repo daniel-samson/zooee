@@ -31,6 +31,9 @@ const Demo = struct {
     checked: [items.len]bool = .{ true, true, true, true, true },
     /// Wheel-driven scroll offset for the showcase list viewport (#96/#126).
     scroll_y: f32 = 40,
+    /// Pointer-inside state (#127): the panel border brightens while the
+    /// cursor is over the window (driven by pointer_enter/leave).
+    pointer_inside: bool = false,
 
     pub fn view(self: *Demo, arena: std.mem.Allocator, scale: f32) !*const L.Element {
         const rows = try arena.alloc(L.Element, items.len);
@@ -328,7 +331,8 @@ const Demo = struct {
             .padding = .all(12 * scale),
             .rect_style = .{
                 .background = Color.white,
-                .border = .all(2 * scale, Color.rgb(120, 120, 130)),
+                // Border brightens to blue while the pointer is inside (#127).
+                .border = .all(2 * scale, if (self.pointer_inside) Color.rgb(0, 120, 255) else Color.rgb(120, 120, 130)),
                 .corner_radius = .all(10 * scale),
             },
             .children = try arena.dupe(*const L.Element, &.{ grad_bar, swatches, card_wrap, icons, button, scroller, paragraph, uni }),
@@ -374,6 +378,16 @@ const Demo = struct {
                 // Content is ~8 rows × 26px ≈ 200px tall in a 70px box.
                 const step: f32 = if (s.unit == .pixel) s.dy else s.dy * 12;
                 self.scroll_y = @max(0, @min(140, self.scroll_y + step));
+                return .redraw;
+            },
+            // Pointer enter/leave drive the panel-border highlight (#127). Live
+            // emission needs the per-platform tracking-area/grab wiring (on-device).
+            .pointer_enter => {
+                self.pointer_inside = true;
+                return .redraw;
+            },
+            .pointer_leave => {
+                self.pointer_inside = false;
                 return .redraw;
             },
             else => {},

@@ -29,6 +29,12 @@ pub const PointerEvent = struct {
     kind: PointerKind = .mouse,
     position: geometry.Point,
     buttons: Buttons = .{},
+    /// Keyboard modifiers held during the event (#127): shift/⌘-click for
+    /// multi-select and range-select. Empty on platforms that don't report it.
+    mods: Modifiers = .{},
+    /// Consecutive-click count on `pointer_down` (#127): 1 single, 2 double,
+    /// 3 triple. Always 1 for move/up. OS-provided where available, else 1.
+    click_count: u8 = 1,
 };
 
 pub const Modifiers = packed struct(u8) {
@@ -124,10 +130,16 @@ pub const ScrollPhase = enum {
 
 pub const Event = union(enum) {
     key_down: KeyEvent,
+    /// Key release (#127): held-key state, modifier release, games.
+    key_up: KeyEvent,
     text: TextEvent,
     pointer_down: PointerEvent,
     pointer_up: PointerEvent,
     pointer_move: PointerEvent,
+    /// Pointer entered the window's content area (#127).
+    pointer_enter: PointerEvent,
+    /// Pointer left the window — clears stuck hover state (#127).
+    pointer_leave: PointerEvent,
     scroll: ScrollEvent,
     resized: ResizeEvent,
     focus_gained: WindowId,
