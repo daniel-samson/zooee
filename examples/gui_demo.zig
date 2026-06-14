@@ -114,9 +114,67 @@ const Demo = struct {
         return root;
     }
 
-    /// A panel showcasing the paint primitives so they can be eyeballed on the
-    /// live GPU window: a linear gradient (#118), a square fill rounded-clipped
-    /// (#117), a half-opacity group (#121), and a Unicode string (#114).
+    /// Three overlapping circles (#95/#121). `alpha` is per-circle opacity;
+    /// `group` wraps them in an offscreen layer composited at that opacity.
+    /// Per-primitive alpha double-blends the overlaps (darker seams); group
+    /// opacity fades the union as one unit (clean overlaps) — the difference
+    /// offscreen-layer compositing buys you.
+    fn overlapCircles(arena: std.mem.Allocator, scale: f32, alpha: u8, group: ?f32) !*const L.Element {
+        const d: f32 = 40 * scale;
+        const colors = [_]Color{
+            .{ .r = 230, .g = 60, .b = 60, .a = alpha },
+            .{ .r = 60, .g = 200, .b = 90, .a = alpha },
+            .{ .r = 70, .g = 120, .b = 240, .a = alpha },
+        };
+        const circles = try arena.alloc(L.Element, colors.len);
+        const ptrs = try arena.alloc(*const L.Element, colors.len);
+        for (colors, 0..) |c, i| {
+            circles[i] = .{
+                .width = d,
+                .height = d,
+                // Pull each circle back over the previous one to overlap by ~half.
+                .margin = if (i == 0) .{} else .{ .left = -d * 0.45 },
+                .rect_style = .{ .background = c, .corner_radius = .all(d * 0.5) },
+            };
+            ptrs[i] = &circles[i];
+        }
+        const row = try arena.create(L.Element);
+        row.* = .{ .direction = .row, .opacity = group, .children = ptrs };
+        return row;
+    }
+
+    /// "Layers & alpha" section (#95/#121): per-primitive translucency vs an
+    /// offscreen group composited at one opacity.
+    fn buildLayers(self: *Demo, arena: std.mem.Allocator, scale: f32) !*const L.Element {
+        const header = try arena.create(L.Element);
+        header.* = .{
+            .text = "Layers — per-primitive alpha vs. group opacity",
+            .text_style = .{ .color = self.theme.text_muted, .size = 12 * scale },
+            .margin = .{ .bottom = 6 * scale },
+        };
+        // Left: 3 translucent circles — overlaps double-blend (darker seams).
+        const alpha_demo = try overlapCircles(arena, scale, 150, null);
+        // Right: 3 opaque circles in a 55% group — union fades cleanly, no seams.
+        const group_demo = try overlapCircles(arena, scale, 255, 0.55);
+        const cols = try arena.create(L.Element);
+        cols.* = .{
+            .direction = .row,
+            .gap = 28 * scale,
+            .children = try arena.dupe(*const L.Element, &.{ alpha_demo, group_demo }),
+        };
+        const section = try arena.create(L.Element);
+        section.* = .{
+            .direction = .column,
+            .margin = .{ .bottom = 12 * scale },
+            .children = try arena.dupe(*const L.Element, &.{ header, cols }),
+        };
+        return section;
+    }
+
+    /// A panel showcasing the paint primitives on the live GPU window: gradients
+    /// (#118), rounded clip (#117), group opacity (#121), the animated dot (#170),
+    /// the layers/alpha section (#95/#121), vector icons (#120), shadows (#119),
+    /// images (#122), scroll (#96), text layout (#115), and Unicode (#114).
     fn buildShowcase(self: *Demo, arena: std.mem.Allocator, scale: f32) !*const L.Element {
         // Gradient bar (#118): a 4-stop rainbow (multi-stop linear).
         var rainbow: zooee.style.Gradient = .{ .axis = .horizontal, .stop_count = 4 };
@@ -391,10 +449,14 @@ const Demo = struct {
             .text = ime_text,
             .text_style = .{ .color = self.theme.text_muted, .size = 13 * scale },
         };
-        // Unicode (#114): accents + em-dash exercise the dynamic glyph atlas.
+        // Layers & alpha section (#95/#121).
+        const layers = try self.buildLayers(arena, scale);
+        // Unicode (#114): the dynamic glyph atlas rasterizes any codepoint the
+        // OS font carries — Latin accents, Greek, Cyrillic, punctuation, arrows,
+        // and math symbols all from one renderer.
         const uni = try arena.create(L.Element);
         uni.* = .{
-            .text = "café — déjà vu",
+            .text = "café · Ελληνικά · Привет · ½→∞ · «—»",
             .text_style = .{ .color = self.theme.text, .size = 16 * scale },
         };
 
@@ -408,7 +470,7 @@ const Demo = struct {
                 .border = .all(2 * scale, if (self.pointer_inside) self.theme.accent else self.theme.border),
                 .corner_radius = .all(10 * scale),
             },
-            .children = try arena.dupe(*const L.Element, &.{ grad_bar, track, swatches, card_wrap, icons, button, scroller, paragraph, drop_zone, ime_label, uni }),
+            .children = try arena.dupe(*const L.Element, &.{ grad_bar, track, swatches, layers, card_wrap, icons, button, scroller, paragraph, drop_zone, ime_label, uni }),
         };
         return panel;
     }
@@ -540,5 +602,5 @@ pub fn main(init: std.process.Init) !void {
     const title: [:0]const u8 = if (force_software) "zooee - raster" else "zooee - GPU";
     // Pass the same theme the UI is built from, so the backend clear color
     // (window backdrop + resize-exposed regions) matches the content.
-    try zooee.app.runWindow(Demo, Msg, &demo, init, .{ .title = title, .width = 760, .height = 620, .force_software = force_software, .theme = demo.theme });
+    try zooee.app.runWindow(Demo, Msg, &demo, init, .{ .title = title, .width = 760, .height = 720, .force_software = force_software, .theme = demo.theme });
 }

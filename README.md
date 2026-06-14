@@ -4,7 +4,7 @@
 
 A cross-platform UI framework written in [Zig](https://ziglang.org/), with pluggable rendering backends: write your interface once and run it in the terminal, as a GPU-accelerated native window, or in the browser via WebAssembly.
 
-> **Status: early development.** Zooee is in the design/bootstrap phase — the API and backends described below are the project's direction, not yet a finished product. Expect breaking changes on every commit.
+> **Status: pre-1.0, but the engine works.** All four rendering backends, the layout engine, real text layout, the animation system, theming, and the full input/event stack are implemented and CI-verified (see [Features](#features)). What's still in flight is the high-level component library, the web/wasm backend, and some per-platform OS plumbing. The API is not yet stable — expect breaking changes.
 
 ## Why Zooee?
 
@@ -22,14 +22,48 @@ No bundled runtime. A zooee app is native code that dynamically links the OS's *
 
 | Binary | Size |
 |---|---:|
-| Terminal app | **~180 KB** |
-| Native GPU window app | **~240 KB** |
+| Terminal app | **~196 KB** |
+| Native GPU window app | **~269 KB** |
 
-That's the entire framework + app. CI gates the shipping size at a 2 MB tripwire ([`ci/check-size.sh`](ci/check-size.sh)) — currently ~10× under it. (Debug builds are ~2 MB; that's just DWARF debug info, stripped in release.)
+That's the entire framework + app — the full GPU renderer (gradients, shadows, vector paths, offscreen layers, images, real text layout), the layout engine, the animation system, theming, and the complete input/event stack. CI gates the shipping size at a 2 MB tripwire ([`ci/check-size.sh`](ci/check-size.sh)) — still **~7–8× under it** even with everything turned on. (Debug builds are ~2 MB; that's just DWARF debug info, stripped in release.)
 
 ### Rendering: GPU-accelerated, with a software fallback
 
 Native windows render on the GPU by default — **Metal** on macOS, **Direct3D 11** on Windows, **OpenGL** on Linux. When a usable GPU isn't available — missing or old drivers, remote-desktop sessions, virtual machines without 3D acceleration, or GPU device loss — zooee automatically falls back to a built-in CPU software renderer that draws into a framebuffer and blits it to the window. **It always renders something.** The software renderer is also the reference used to verify GPU output in tests: each GPU backend is checked pixel-exact against it, so all paths produce the same result.
+
+## Features
+
+Everything below works **today**, on **all four backends** (raster + Metal + OpenGL + Direct3D 11) where rendering is involved, and is **verified pixel-exact** against the software reference in CI — or unit-/harness-tested where it's pure logic.
+
+### Drawing primitives
+- **Rects & borders** — solid fills, per-side borders (CSS-style), independent per-corner radii.
+- **Rounded-rect clipping** — clip a whole subtree to rounded corners.
+- **Gradients** — linear, multi-stop, and radial, with a shared analytic formula so CPU and GPU match.
+- **Shadows** — drop / box / **inset**, with blur, spread, and rounded corners (Evan-Wallace rounded-box-shadow math).
+- **Vector paths** — arbitrary filled polygons (even-odd) and stroked polylines with round caps/joins.
+- **Offscreen layers** — group opacity / render-to-texture compositing for a subtree.
+- **Images** — fit modes (stretch / contain / cover), nearest **and bilinear** sampling, and **9-slice** scaling.
+- **Text** — a dynamic Unicode glyph atlas (glyphs rasterized on demand), drawn from the OS font.
+
+### Layout & text
+- **Flexbox-style layout** — row/column containers, `grow`, `gap`, per-side margin/padding/border, snap-to-grid so independently-rounded children tile exactly.
+- **Text layout** — word **wrapping** to a width, horizontal **alignment**, line-height, multi-line paragraphs, and caret ↔ point **hit-testing** (for selection / editable text).
+- **Scrollable viewports** — clip + content offset as a backend primitive, driven by wheel/trackpad input.
+
+### Motion & theming
+- **Animation system** — a frame clock with real delta-time, a scheduler (one-shot/repeating timers, tweens, easing curves), and an **idle guarantee** (zero wakeups/redraws when nothing animates). Frames are **paced to the display's actual refresh rate** — no hard-coded 60 fps cap.
+- **Theming** — semantic color tokens (background, surface, text, accent, border…) with built-in **light & dark** themes; the window backdrop and content share one source of truth, switchable at runtime.
+
+### Input, events & OS integration
+- **Pointer** — down/move/up with keyboard modifiers, click-count (double/triple), enter/leave, and capture.
+- **Keyboard & text** — key down/up, text input, and **IME composition** (CJK pre-edit + commit).
+- **Scroll / wheel** — line vs pixel deltas and trackpad gesture phases (incl. momentum).
+- **Drag-and-drop**, **clipboard**, **window operations** (resize/minimise/maximise/close + state events), and **display robustness** (resize-storm coalescing, DPI-change policy).
+
+### Testing
+- A **synthetic-event harness** drives a real app (view → layout → dispatch → render) headlessly with scripted events and asserts Model state or pixels — so interaction is self-verified, no flaky on-screen automation.
+
+> Some OS-level plumbing (e.g. wheel/clipboard/drag-and-drop on Windows & Linux) has its logic, fakes, and macOS path in place with the per-platform hooks flagged for on-device QA — see the closed issues for the precise per-feature status.
 
 ## Goals
 
@@ -104,9 +138,11 @@ build.zig     # build graph (see `zig build --help`)
 
 Tracked as [milestones](https://github.com/daniel-samson/zooee/milestones), built backends-first and test-driven:
 
-1. **Test harness & backends** — e2e test infrastructure (terminal output snapshots, offscreen golden-image rendering for GPU), then the terminal, Metal (macOS), OpenGL (Linux), DirectX (Windows), and web (wasm + DOM/CSS) backends, native windowing with integrated/headless title bars, in-house text rendering, and a CI gate keeping release binaries under 2MB
-2. **Core framework** — layout engine, declarative widget API, event loop
-3. **Component library** — high-level widgets (buttons, inputs, tables, tab bars) built on the backend primitives
+1. ✅ **Test harness & backends** — golden-image + synthetic-event test infrastructure, and the terminal, Metal (macOS), OpenGL (Linux), and Direct3D 11 (Windows) backends with native windowing, in-house text rendering, and the under-2 MB CI gate. *(Web/wasm backend still to come.)*
+2. ✅ **Core framework** — layout engine, the full drawing-primitive set, text layout, the event loop + input stack, animation, and theming. *(See [Features](#features).)*
+3. 🔜 **Component library** — high-level widgets (buttons, inputs, tables, tab bars) built on the backend primitives.
+
+Still ahead: the web (wasm + DOM/CSS) backend, text shaping (kerning/ligatures/BiDi), font fallback + bold/italic faces, cursor shapes, a declarative keyframes/transitions API, and accessibility.
 
 ## Acknowledgements
 
