@@ -137,6 +137,25 @@ const XClientMessageEvent = extern struct {
     format: c_int,
     data: extern union { b: [20]u8, s: [10]c_short, l: [5]c_long },
 };
+const XCrossingEvent = extern struct {
+    type: c_int,
+    serial: c_ulong,
+    send_event: Bool,
+    display: ?*Display,
+    window: Window_,
+    root: Window_,
+    subwindow: Window_,
+    time: Time,
+    x: c_int,
+    y: c_int,
+    x_root: c_int,
+    y_root: c_int,
+    mode: c_int,
+    detail: c_int,
+    same_screen: Bool,
+    focus: Bool,
+    state: c_uint,
+};
 const XEvent = extern union {
     type: c_int,
     xkey: XKeyEvent,
@@ -144,8 +163,20 @@ const XEvent = extern union {
     xmotion: XMotionEvent,
     xconfigure: XConfigureEvent,
     xclient: XClientMessageEvent,
+    xcrossing: XCrossingEvent,
     pad: [24]c_long,
 };
+
+/// Core modifiers from an X event `state` mask (#211): Shift/Control/Mod1(Alt)/
+/// Mod4(Super).
+fn x11Mods(state: c_uint) core_event.Modifiers {
+    return .{
+        .shift = state & (1 << 0) != 0,
+        .ctrl = state & (1 << 2) != 0,
+        .alt = state & (1 << 3) != 0,
+        .super = state & (1 << 6) != 0,
+    };
+}
 
 // --- Xlib functions ---------------------------------------------------------
 
@@ -268,7 +299,13 @@ const ButtonReleaseMask: c_long = 1 << 3;
 const PointerMotionMask: c_long = 1 << 6;
 const StructureNotifyMask: c_long = 1 << 17;
 
+const KeyReleaseMask: c_long = 1 << 1;
+const EnterWindowMask: c_long = 1 << 4;
+const LeaveWindowMask: c_long = 1 << 5;
 const KeyPress = 2;
+const KeyRelease = 3;
+const EnterNotify = 7;
+const LeaveNotify = 8;
 const ButtonPress = 4;
 const ButtonRelease = 5;
 const MotionNotify = 6;
@@ -325,6 +362,11 @@ pub const Window = struct {
     /// Lazily-created X font cursors per shape (#123), indexed by the Cursor
     /// enum tag; 0 = not yet created. Freed in `destroy`.
     cursors: [std.meta.fields(cursor_mod.Cursor).len]XID = [_]XID{0} ** std.meta.fields(cursor_mod.Cursor).len,
+    /// Click-count tracking (#211): X has no native multi-click, so we count
+    /// presses of the same button within 250 ms.
+    last_click_time: Time = 0,
+    last_click_button: c_uint = 0,
+    click_count: u8 = 1,
 
     pub const CreateOptions = struct {
         title: [:0]const u8 = "zooee",
@@ -363,7 +405,7 @@ pub const Window = struct {
                 var swa: XSetWindowAttributes = .{
                     .border_pixel = 0,
                     .colormap = cmap,
-                    .event_mask = ExposureMask | KeyPressMask | ButtonPressMask | ButtonReleaseMask | PointerMotionMask | StructureNotifyMask,
+                    .event_mask = ExposureMask | KeyPressMask | KeyReleaseMask | ButtonPressMask | ButtonReleaseMask | PointerMotionMask | EnterWindowMask | LeaveWindowMask | StructureNotifyMask,
                     // Anchor existing content top-left on grow so the exposed
                     // strip is the only repaint, not a full re-expose (#182).
                     .bit_gravity = NorthWestGravity,
@@ -390,7 +432,7 @@ pub const Window = struct {
         const net_wm_name = XInternAtom(display, "_NET_WM_NAME", 0);
         const utf8_string = XInternAtom(display, "UTF8_STRING", 0);
         _ = XChangeProperty(display, handle, net_wm_name, utf8_string, 8, 0, opts.title.ptr, @intCast(opts.title.len));
-        _ = XSelectInput(display, handle, ExposureMask | KeyPressMask | ButtonPressMask | ButtonReleaseMask | PointerMotionMask | StructureNotifyMask);
+        _ = XSelectInput(display, handle, ExposureMask | KeyPressMask | KeyReleaseMask | ButtonPressMask | ButtonReleaseMask | PointerMotionMask | EnterWindowMask | LeaveWindowMask | StructureNotifyMask);
 
         var wm_delete = XInternAtom(display, "WM_DELETE_WINDOW", 0);
         _ = XSetWMProtocols(display, handle, &wm_delete, 1);
@@ -633,7 +675,15 @@ pub const Window = struct {
                     }
                 },
                 Expose => self.queue.append(self.gpa, .{ .resized = .{ .size = .{ .width = @floatFromInt(self.width), .height = @floatFromInt(self.height) } } }) catch {},
-                MotionNotify => self.queue.append(self.gpa, .{ .pointer_move = .{ .position = .{ .x = @floatFromInt(ev.xmotion.x), .y = @floatFromInt(ev.xmotion.y) } } }) catch {},
+                MotionNotify => self.queue.append(self.gpa, .{ .pointer_move = .{ .position = .{ .x = @floatFromInt(ev.xmotion.x), .y = @floatFromInt(ev.xmotion.y) }, .mods = x11Mods(ev.xmotion.state) } }) catch {},
+                EnterNotify => self.queue.append(self.gpa, .{ .pointer_enter = .{ .position = .{ .x = @floatFromInt(ev.xcrossing.x), .y = @floatFromInt(ev.xcrossing.y) }, .mods = x11Mods(ev.xcrossing.state) } }) catch {},
+                LeaveNotify => self.queue.append(self.gpa, .{ .pointer_leave = .{ .position = .{ .x = @floatFromInt(ev.xcrossing.x), .y = @floatFromInt(ev.xcrossing.y) }, .mods = x11Mods(ev.xcrossing.state) } }) catch {},
+                KeyRelease => {
+                    const ks = XLookupKeysym(&ev.xkey, 0);
+                    if (keysymToKey(ks)) |k| {
+                        self.queue.append(self.gpa, .{ .key_up = .{ .key = k, .mods = x11Mods(ev.xkey.state) } }) catch {};
+                    }
+                },
                 ButtonPress, ButtonRelease => {
                     const b = ev.xbutton.button;
                     if (b >= 4 and b <= 7) {
@@ -657,9 +707,23 @@ pub const Window = struct {
                             } }) catch {};
                         }
                     } else {
+                        // Click-count (#211): X has no native multi-click — count
+                        // same-button presses within 250 ms.
+                        if (ev.type == ButtonPress) {
+                            const t = ev.xbutton.time;
+                            if (b == self.last_click_button and t >= self.last_click_time and t - self.last_click_time <= 250) {
+                                self.click_count +|= 1;
+                            } else {
+                                self.click_count = 1;
+                            }
+                            self.last_click_time = t;
+                            self.last_click_button = b;
+                        }
                         const pe: core_event.PointerEvent = .{
                             .position = .{ .x = @floatFromInt(ev.xbutton.x), .y = @floatFromInt(ev.xbutton.y) },
                             .buttons = .{ .primary = b == 1, .middle = b == 2, .secondary = b == 3 },
+                            .mods = x11Mods(ev.xbutton.state),
+                            .click_count = if (ev.type == ButtonPress) self.click_count else 1,
                         };
                         self.queue.append(self.gpa, if (ev.type == ButtonPress) .{ .pointer_down = pe } else .{ .pointer_up = pe }) catch {};
                     }
@@ -667,7 +731,7 @@ pub const Window = struct {
                 KeyPress => {
                     const ks = XLookupKeysym(&ev.xkey, 0);
                     if (keysymToKey(ks)) |k| {
-                        self.queue.append(self.gpa, .{ .key_down = .{ .key = k } }) catch {};
+                        self.queue.append(self.gpa, .{ .key_down = .{ .key = k, .mods = x11Mods(ev.xkey.state) } }) catch {};
                     } else {
                         var buf: [8]u8 = undefined;
                         const n = XLookupString(&ev.xkey, &buf, buf.len, null, null);
