@@ -135,6 +135,12 @@ extern "user32" fn SetClipboardData(u32, ?*anyopaque) callconv(WINAPI) ?*anyopaq
 extern "kernel32" fn GlobalAlloc(u32, usize) callconv(WINAPI) ?*anyopaque;
 extern "kernel32" fn GlobalLock(?*anyopaque) callconv(WINAPI) ?*anyopaque;
 extern "kernel32" fn GlobalUnlock(?*anyopaque) callconv(WINAPI) win.BOOL;
+// Drag-and-drop file target (#212).
+const WM_DROPFILES = 0x0233;
+extern "shell32" fn DragAcceptFiles(HWND, win.BOOL) callconv(WINAPI) void;
+extern "shell32" fn DragQueryFileW(?*anyopaque, u32, ?[*]u16, u32) callconv(WINAPI) u32;
+extern "shell32" fn DragQueryPoint(?*anyopaque, *POINT) callconv(WINAPI) win.BOOL;
+extern "shell32" fn DragFinish(?*anyopaque) callconv(WINAPI) void;
 
 /// System clipboard backed by the Win32 clipboard (#209). Implements the core
 /// `Clipboard` interface, mirroring the macOS `SystemClipboard`. Cross-app
@@ -277,6 +283,10 @@ pub const Window = struct {
     /// True between a synthesized pointer_enter and the matching WM_MOUSELEAVE
     /// (#211): we re-arm TrackMouseEvent on each move only when not tracking.
     mouse_tracking: bool = false,
+    /// Scratch for drop payloads (#212): dropped file paths are allocated here
+    /// and stay valid until the next pumpEvents resets it (matching DragData's
+    /// "valid only during dispatch" contract).
+    drop_arena: std.heap.ArenaAllocator,
 
     /// Apply a pointer cursor shape (#123). Stores the system-cursor id and
     /// applies it now; the wndproc re-applies it on WM_SETCURSOR (Windows
@@ -416,8 +426,9 @@ pub const Window = struct {
             null,
         ) orelse return error.BackendFailure;
 
-        self.* = .{ .hwnd = hwnd, .gpa = gpa };
+        self.* = .{ .hwnd = hwnd, .gpa = gpa, .drop_arena = std.heap.ArenaAllocator.init(gpa) };
         _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, @bitCast(@intFromPtr(self)));
+        DragAcceptFiles(hwnd, .TRUE); // accept WM_DROPFILES (#212)
         if (opts.visible) _ = ShowWindow(hwnd, SW_SHOWNORMAL);
         return self;
     }
@@ -429,6 +440,7 @@ pub const Window = struct {
         }
         self.frame_bgra.deinit(self.gpa);
         self.queue.deinit(self.gpa);
+        self.drop_arena.deinit();
         self.gpa.destroy(self);
     }
 
@@ -436,6 +448,7 @@ pub const Window = struct {
     /// Non-blocking — the drivable-loop primitive (#5).
     pub fn pumpEvents(self: *Window) []const Event {
         self.queue.clearRetainingCapacity();
+        _ = self.drop_arena.reset(.retain_capacity); // free last frame's drop paths (#212)
         var msg: MSG = undefined;
         while (PeekMessageW(&msg, null, 0, 0, PM_REMOVE).toBool()) {
             _ = TranslateMessage(&msg);
@@ -524,6 +537,36 @@ pub const Window = struct {
                     else => .{ .pointer_down = pos }, // down + dbl-click
                 };
                 self.queue.append(self.gpa, ev) catch {};
+            },
+            WM_DROPFILES => {
+                // Files dropped from Explorer (#212). HDROP in wParam; query the
+                // paths into the per-frame arena and emit a .drop.
+                const hdrop: ?*anyopaque = @ptrFromInt(wparam);
+                const a = self.drop_arena.allocator();
+                const count = DragQueryFileW(hdrop, 0xFFFFFFFF, null, 0);
+                const paths = a.alloc([]const u8, count) catch {
+                    DragFinish(hdrop);
+                    return 0;
+                };
+                var n: usize = 0;
+                var i: u32 = 0;
+                while (i < count) : (i += 1) {
+                    const len = DragQueryFileW(hdrop, i, null, 0); // chars, excl NUL
+                    const wbuf = a.alloc(u16, len + 1) catch continue;
+                    _ = DragQueryFileW(hdrop, i, wbuf.ptr, len + 1);
+                    const path = std.unicode.utf16LeToUtf8Alloc(a, wbuf[0..len]) catch continue;
+                    paths[n] = path;
+                    n += 1;
+                }
+                var pt: POINT = undefined;
+                _ = DragQueryPoint(hdrop, &pt);
+                DragFinish(hdrop);
+                self.queue.append(self.gpa, .{ .drop = .{
+                    .position = .{ .x = @floatFromInt(pt.x), .y = @floatFromInt(pt.y) },
+                    .data = .{ .files = paths[0..n] },
+                    .operation = .copy,
+                } }) catch {};
+                return 0;
             },
             WM_MOUSELEAVE => {
                 self.mouse_tracking = false;
