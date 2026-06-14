@@ -224,12 +224,25 @@ const Demo = struct {
             .image_fit = .cover,
             .clip_radius = .all(6 * scale),
         };
+        // Bilinear upscale (#122): the same swatch sampled LINEAR — smooth
+        // color blends between texels instead of hard nearest-neighbor blocks.
+        const img_smooth = try arena.create(L.Element);
+        img_smooth.* = .{
+            .width = 40 * scale,
+            .height = 40 * scale,
+            .image_rgba = img_px,
+            .image_w = 4,
+            .image_h = 2,
+            .image_fit = .cover,
+            .image_sampling = .linear,
+            .clip_radius = .all(6 * scale),
+        };
         const icons = try arena.create(L.Element);
         icons.* = .{
             .direction = .row,
             .gap = 12 * scale,
             .margin = .{ .bottom = 12 * scale },
-            .children = try arena.dupe(*const L.Element, &.{ star, check, img }),
+            .children = try arena.dupe(*const L.Element, &.{ star, check, img, img_smooth }),
         };
         // Unicode (#114): accents + em-dash exercise the dynamic glyph atlas.
         const uni = try arena.create(L.Element);
