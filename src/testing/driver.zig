@@ -181,6 +181,20 @@ pub fn Driver(comptime Model: type, comptime Msg: type) type {
             return self.send(.{ .pointer_leave = .{ .position = .{ .x = x, .y = y } } });
         }
 
+        // --- Window state (#98) -------------------------------------------
+
+        pub fn windowMinimized(self: *Self) !Command {
+            return self.send(.{ .window_minimized = event_mod.main_window });
+        }
+
+        pub fn windowMaximized(self: *Self) !Command {
+            return self.send(.{ .window_maximized = event_mod.main_window });
+        }
+
+        pub fn windowRestored(self: *Self) !Command {
+            return self.send(.{ .window_restored = event_mod.main_window });
+        }
+
         pub fn text(self: *Self, codepoint: u21) !Command {
             return self.send(.{ .text = .{ .codepoint = codepoint } });
         }
@@ -246,6 +260,7 @@ const Toggle = struct {
     composing: bool = false,
     preedit_len: usize = 0,
     committed_len: usize = 0,
+    win_state: enum { normal, minimized, maximized } = .normal,
 
     const Msg = enum { tapped };
 
@@ -281,6 +296,9 @@ const Toggle = struct {
             .key_up => self.key_ups += 1,
             .pointer_enter => self.entered = true,
             .pointer_leave => self.entered = false,
+            .window_minimized => self.win_state = .minimized,
+            .window_maximized => self.win_state = .maximized,
+            .window_restored => self.win_state = .normal,
             .drag_enter, .drag_over => {
                 self.drag_active = true;
                 return .redraw;
@@ -435,6 +453,18 @@ test "IME composition: preedit then commit (#19)" {
     _ = try d.commit("你"); // commit the Han character (3 UTF-8 bytes)
     try testing.expect(!model.composing);
     try testing.expectEqual(@as(usize, 3), model.committed_len);
+}
+
+test "window-state events normalize into the model (#98)" {
+    var model: Toggle = .{};
+    var d = try Driver(Toggle, Toggle.Msg).init(testing.allocator, &model, .{ .width = 60, .height = 40 });
+    defer d.deinit();
+    _ = try d.windowMaximized();
+    try testing.expectEqual(@as(@TypeOf(model.win_state), .maximized), model.win_state);
+    _ = try d.windowMinimized();
+    try testing.expectEqual(@as(@TypeOf(model.win_state), .minimized), model.win_state);
+    _ = try d.windowRestored();
+    try testing.expectEqual(@as(@TypeOf(model.win_state), .normal), model.win_state);
 }
 
 test "resize relays out to the new viewport" {
