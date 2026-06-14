@@ -446,11 +446,17 @@ pub const RasterBackend = struct {
 
         var pen_x = origin.x;
         const baseline = origin.y + ascent;
+        var prev: ?fontset.Glyph = null;
         var it = std.unicode.Utf8View.initUnchecked(text).iterator();
         while (it.nextCodepoint()) |cp| {
             const r = set.resolve(cp, fstyle);
             const face = set.face(r.face_id);
             const fscale = @as(f32, @floatFromInt(size_px)) / @as(f32, @floatFromInt(face.units_per_em));
+            // Kerning (#116): same-face pairs only — matches FontSet.measure.
+            if (prev) |pg| if (pg.face_id == r.face_id) {
+                pen_x += @as(f32, @floatFromInt(face.kern(pg.glyph, r.glyph))) * fscale;
+            };
+            prev = r;
             const metrics = face.hMetrics(r.glyph);
             if (self.cachedGlyph(r.face_id, face, r.glyph, size_px)) |bmp| {
                 const gx: i32 = @as(i32, @intFromFloat(@round(pen_x))) + bmp.x_off;
@@ -731,17 +737,10 @@ pub const RasterBackend = struct {
         const self = self_(ptr);
         if (self.fonts) |*set| {
             const fstyle: fontset.Style = .{ .bold = text_style.bold, .italic = text_style.italic };
-            var width: f32 = 0;
-            var it = std.unicode.Utf8View.initUnchecked(text).iterator();
-            while (it.nextCodepoint()) |cp| {
-                const r = set.resolve(cp, fstyle);
-                const face = set.face(r.face_id);
-                width += @as(f32, @floatFromInt(face.hMetrics(r.glyph).advance)) * (text_style.size / @as(f32, @floatFromInt(face.units_per_em)));
-            }
-            // Line height from the primary face's vertical metrics.
-            const primary = set.primary();
-            const line = @as(f32, @floatFromInt(primary.ascent - primary.descent + primary.line_gap)) * (text_style.size / @as(f32, @floatFromInt(primary.units_per_em)));
-            return .{ .width = width, .height = line };
+            // Delegate to the shared FontSet.measure (kerning #116, fallback,
+            // line metrics) so measure and render agree across every backend.
+            const m = set.measure(text, text_style.size, fstyle);
+            return .{ .width = m.width, .height = m.height };
         }
         const n = std.unicode.utf8CountCodepoints(text) catch text.len;
         return .{

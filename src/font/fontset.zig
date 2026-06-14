@@ -106,11 +106,20 @@ pub const FontSet = struct {
     /// measureText so they agree (#114).
     pub fn measure(self: *const FontSet, text: []const u8, size: f32, style: Style) Metrics {
         var width: f32 = 0;
+        var prev: ?Glyph = null;
         var it = std.unicode.Utf8View.initUnchecked(text).iterator();
         while (it.nextCodepoint()) |cp| {
             const r = self.resolve(cp, style);
             const f = self.face(r.face_id);
-            width += @as(f32, @floatFromInt(f.hMetrics(r.glyph).advance)) * (size / @as(f32, @floatFromInt(f.units_per_em)));
+            const scale = size / @as(f32, @floatFromInt(f.units_per_em));
+            // Kerning (#116): adjust by the GPOS/kern pair value, but only
+            // between two glyphs from the same face (cross-face pairs have no
+            // shared kern data).
+            if (prev) |pg| if (pg.face_id == r.face_id) {
+                width += @as(f32, @floatFromInt(f.kern(pg.glyph, r.glyph))) * scale;
+            };
+            width += @as(f32, @floatFromInt(f.hMetrics(r.glyph).advance)) * scale;
+            prev = r;
         }
         const p = self.primary();
         const line = @as(f32, @floatFromInt(p.ascent - p.descent + p.line_gap)) * (size / @as(f32, @floatFromInt(p.units_per_em)));
