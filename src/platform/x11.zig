@@ -770,12 +770,26 @@ pub fn contentPixelSize(window: *Window) struct { width: usize, height: usize, s
     return .{ .width = window.width, .height = window.height, .scale = if (scale > 0.1) scale else 1.0 };
 }
 
-/// Display refresh rate (Hz) for frame pacing (#170). Returning 0 makes the
-/// caller fall back to 60. The real query — XRRConfigCurrentRate (Xrandr) —
-/// NEEDS ON-DEVICE QA on the Ubuntu VM, so this is a safe 60 stub for now.
+extern "c" fn dlopen([*:0]const u8, c_int) ?*anyopaque;
+extern "c" fn dlsym(?*anyopaque, [*:0]const u8) ?*anyopaque;
+const RTLD_NOW: c_int = 2;
+
+/// Display refresh rate (Hz) for frame pacing (#170/#206) via XRandR, loaded
+/// with dlopen so libXrandr is NOT a hard link dependency (absent → 0 → the
+/// caller falls back to 60). Keeps the binary runnable on minimal X setups.
 pub fn refreshHz(window: *Window) f32 {
-    _ = window;
-    return 0;
+    const lib = dlopen("libXrandr.so.2", RTLD_NOW) orelse return 0;
+    const GetInfo = *const fn (*Display, Window_) callconv(.c) ?*anyopaque;
+    const CurRate = *const fn (?*anyopaque) callconv(.c) c_short;
+    const FreeInfo = *const fn (?*anyopaque) callconv(.c) void;
+    const get_info: GetInfo = @ptrCast(dlsym(lib, "XRRGetScreenInfo") orelse return 0);
+    const cur_rate: CurRate = @ptrCast(dlsym(lib, "XRRConfigCurrentRate") orelse return 0);
+    const free_info: FreeInfo = @ptrCast(dlsym(lib, "XRRFreeScreenConfigInfo") orelse return 0);
+    const root = XRootWindow(window.display, XDefaultScreen(window.display));
+    const conf = get_info(window.display, root) orelse return 0;
+    defer free_info(conf);
+    const rate = cur_rate(conf);
+    return if (rate > 0) @floatFromInt(rate) else 0;
 }
 
 pub fn blit(window: *Window, rgba: []const u8, width: usize, height: usize) void {

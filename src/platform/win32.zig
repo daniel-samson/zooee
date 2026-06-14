@@ -103,6 +103,11 @@ extern "user32" fn PostMessageW(HWND, u32, WPARAM, LPARAM) callconv(WINAPI) win.
 extern "user32" fn AdjustWindowRectEx(*RECT, u32, win.BOOL, u32) callconv(WINAPI) win.BOOL;
 extern "user32" fn GetWindowLongW(HWND, i32) callconv(WINAPI) i32;
 extern "user32" fn ScreenToClient(HWND, *POINT) callconv(WINAPI) win.BOOL;
+// Refresh rate (#206): VREFRESH from the device context.
+extern "user32" fn GetDC(HWND) callconv(WINAPI) ?*anyopaque;
+extern "user32" fn ReleaseDC(HWND, ?*anyopaque) callconv(WINAPI) i32;
+extern "gdi32" fn GetDeviceCaps(?*anyopaque, i32) callconv(WINAPI) i32;
+const VREFRESH: i32 = 116;
 const SW_MAXIMIZE = 3;
 const SW_MINIMIZE = 6;
 const SW_RESTORE = 9;
@@ -594,13 +599,13 @@ pub fn contentPixelSize(window: *Window) struct { width: usize, height: usize, s
     };
 }
 
-/// Display refresh rate (Hz) for frame pacing (#170). Returning 0 makes the
-/// caller fall back to 60. The real query — EnumDisplaySettings(ENUM_CURRENT_
-/// SETTINGS).dmDisplayFrequency or DwmGetCompositionTimingInfo — NEEDS ON-DEVICE
-/// QA on the Win11 VM, so this is a safe 60 stub for now.
+/// Display refresh rate (Hz) for frame pacing (#170/#206) via the device
+/// context's VREFRESH. 0 or 1 means "default" → 0 so the caller falls back to 60.
 pub fn refreshHz(window: *Window) f32 {
-    _ = window;
-    return 0;
+    const hdc = GetDC(window.hwnd) orelse return 0;
+    defer _ = ReleaseDC(window.hwnd, hdc);
+    const hz = GetDeviceCaps(hdc, VREFRESH);
+    return if (hz > 1) @floatFromInt(hz) else 0;
 }
 
 test "create, pump, and destroy a real window" {
