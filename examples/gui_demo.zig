@@ -414,7 +414,7 @@ const Demo = struct {
             .margin = .{ .bottom = 10 * scale },
             .text = "zooee lays out wrapped, aligned paragraphs across every backend — pixel for pixel.",
             .text_style = .{ .color = self.theme.text, .size = 15 * scale },
-            .text_wrap = true,
+            .text_wrap = .balance, // CSS text-wrap: even out the lines (#192)
             .text_align = .center,
         };
         // Drop zone (#128): highlights while a drag is over it; shows the last
