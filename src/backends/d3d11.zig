@@ -25,6 +25,7 @@ const builtin = @import("builtin");
 const ttf = @import("../font/ttf.zig");
 const grast = @import("../font/raster.zig");
 const gatlas = @import("../font/atlas.zig");
+const fontset = @import("../font/fontset.zig");
 const geometry = @import("../geometry.zig");
 const style = @import("../style.zig");
 const backend_mod = @import("../backend.zig");
@@ -1497,8 +1498,8 @@ pub const D3dGlyphRenderer = struct {
     atlas_srv: *ISrv,
     atlas: gatlas.Atlas,
 
-    pub fn init(gpa: std.mem.Allocator, device: *IDevice, context: *IContext, font: *const ttf.Font, size_px: f32, scissor: bool) !D3dGlyphRenderer {
-        var atlas = try gatlas.Atlas.init(gpa, font, size_px, atlas_dim, atlas_dim);
+    pub fn init(gpa: std.mem.Allocator, device: *IDevice, context: *IContext, set: *const fontset.FontSet, size_px: f32, scissor: bool) !D3dGlyphRenderer {
+        var atlas = try gatlas.Atlas.init(gpa, set, size_px, atlas_dim, atlas_dim);
         errdefer atlas.deinit();
 
         // GPU resources.
@@ -1592,7 +1593,7 @@ pub const D3dGlyphRenderer = struct {
     /// `color` into the render target. Glyphs rasterized + packed on demand
     /// into the dynamic atlas (#114); the texture is recreated before the draw
     /// when new glyphs appear (the atlas appends, so existing UVs stay valid).
-    pub fn drawText(self: *D3dGlyphRenderer, gpa: std.mem.Allocator, rtv: *IRtv, vw: f32, vh: f32, x: f32, y: f32, text: []const u8, color: [4]f32) !void {
+    pub fn drawText(self: *D3dGlyphRenderer, gpa: std.mem.Allocator, rtv: *IRtv, vw: f32, vh: f32, x: f32, y: f32, text: []const u8, color: [4]f32, fstyle: fontset.Style) !void {
         const dev = self.device;
         const ctx = self.context;
         var verts: std.ArrayList(f32) = .empty;
@@ -1601,7 +1602,7 @@ pub const D3dGlyphRenderer = struct {
         const baseline = y + self.atlas.ascent;
         var it = std.unicode.Utf8View.initUnchecked(text).iterator();
         while (it.nextCodepoint()) |cp| {
-            const e = self.atlas.glyph(self.atlas.font.glyphIndex(cp));
+            const e = self.atlas.glyphForCp(cp, fstyle);
             if (e.w > 0) {
                 const gx = @round(pen) + e.x_off;
                 const gy = @round(baseline) + e.y_off;
@@ -2287,7 +2288,7 @@ pub const D3dBackend = struct {
     stroke: D3dStrokeRenderer,
     comp: D3dLayerCompositor,
     rclip: D3dRoundClipCompositor,
-    font: ?ttf.Font = null,
+    fonts: ?fontset.FontSet = null,
     glyphs: std.AutoHashMapUnmanaged(u32, D3dGlyphRenderer) = .empty,
     clips: std.ArrayList(ScissorRect) = .empty,
     /// Content translation for scroll viewports (#96): added to draw coords and
@@ -2404,7 +2405,13 @@ pub const D3dBackend = struct {
     }
 
     pub fn setFont(self: *D3dBackend, data: []const u8) !void {
-        self.font = try ttf.Font.parse(data);
+        var set: fontset.FontSet = .{};
+        set.setFace(fontset.FontSet.regular, try ttf.Font.parse(data));
+        self.fonts = set;
+    }
+
+    pub fn setFontSet(self: *D3dBackend, set: fontset.FontSet) void {
+        self.fonts = set;
     }
 
     pub fn interface(self: *D3dBackend) Backend {
@@ -2504,9 +2511,9 @@ pub const D3dBackend = struct {
     }
 
     fn glyphFor(self: *D3dBackend, size_px: u16) ?*D3dGlyphRenderer {
-        if (self.font == null) return null;
+        if (self.fonts == null) return null;
         if (self.glyphs.getPtr(size_px)) |g| return g;
-        const g = D3dGlyphRenderer.init(self.gpa, self.off.device, self.off.context, &self.font.?, @floatFromInt(size_px), true) catch return null;
+        const g = D3dGlyphRenderer.init(self.gpa, self.off.device, self.off.context, &self.fonts.?, @floatFromInt(size_px), true) catch return null;
         self.glyphs.put(self.gpa, size_px, g) catch return null;
         return self.glyphs.getPtr(size_px);
     }
@@ -2518,7 +2525,7 @@ pub const D3dBackend = struct {
         const w: f32 = @floatFromInt(self.off.width);
         const h: f32 = @floatFromInt(self.off.height);
         const color = ts.color orelse style.Color.black;
-        gr.drawText(self.gpa, self.target(), w, h, origin.x + self.translate.x, origin.y + self.translate.y, text, col(color)) catch {};
+        gr.drawText(self.gpa, self.target(), w, h, origin.x + self.translate.x, origin.y + self.translate.y, text, col(color), .{ .bold = ts.bold, .italic = ts.italic }) catch {};
     }
 
     fn drawImage(ptr: *anyopaque, rect_in: geometry.Rect, texture: *Backend.Texture) void {
@@ -2678,16 +2685,9 @@ pub const D3dBackend = struct {
 
     fn measureText(ptr: *anyopaque, text: []const u8, ts: style.TextStyle) geometry.Size {
         const self = self_(ptr);
-        if (self.font) |*font| {
-            const upem: f32 = @floatFromInt(font.units_per_em);
-            const fscale = ts.size / upem;
-            var width: f32 = 0;
-            var it = std.unicode.Utf8View.initUnchecked(text).iterator();
-            while (it.nextCodepoint()) |cp| {
-                width += @as(f32, @floatFromInt(font.hMetrics(font.glyphIndex(cp)).advance)) * fscale;
-            }
-            const line = @as(f32, @floatFromInt(font.ascent - font.descent + font.line_gap)) * fscale;
-            return .{ .width = width, .height = line };
+        if (self.fonts) |*set| {
+            const mtr = set.measure(text, ts.size, .{ .bold = ts.bold, .italic = ts.italic });
+            return .{ .width = mtr.width, .height = mtr.height };
         }
         const n = std.unicode.utf8CountCodepoints(text) catch text.len;
         return .{ .width = @as(f32, @floatFromInt(n)) * 8, .height = 16 };

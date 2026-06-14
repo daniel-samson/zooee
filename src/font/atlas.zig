@@ -14,6 +14,7 @@
 const std = @import("std");
 const ttf = @import("ttf.zig");
 const grast = @import("raster.zig");
+const fontset = @import("fontset.zig");
 
 /// A packed glyph: normalized atlas UVs, pixel size, baseline offsets, advance.
 /// `w == 0` for blank glyphs (space) or any that failed to pack — the caller
@@ -32,15 +33,18 @@ pub const Glyph = struct {
 
 pub const Atlas = struct {
     gpa: std.mem.Allocator,
-    font: *const ttf.Font,
+    /// Face set (#114): bold/italic + Unicode fallback. Glyphs from any face are
+    /// packed into the one texture, keyed by (face_id, glyph).
+    set: *const fontset.FontSet,
     size_px: f32,
-    fscale: f32,
+    /// Vertical metrics come from the primary face so mixed-face runs share a
+    /// baseline grid.
     ascent: f32,
     width: u32,
     height: u32,
     /// RGBA, row-major, top-down. Backends upload this to a GPU texture.
     pixels: []u8,
-    glyphs: std.AutoHashMapUnmanaged(u32, Glyph) = .empty,
+    glyphs: std.AutoHashMapUnmanaged(u64, Glyph) = .empty,
     // Shelf-pack cursor.
     cx: u32 = 1,
     cy: u32 = 1,
@@ -48,16 +52,16 @@ pub const Atlas = struct {
     /// Set when a glyph was packed since the last upload; backend clears it.
     dirty: bool = true,
 
-    pub fn init(gpa: std.mem.Allocator, font: *const ttf.Font, size_px: f32, width: u32, height: u32) !Atlas {
+    pub fn init(gpa: std.mem.Allocator, set: *const fontset.FontSet, size_px: f32, width: u32, height: u32) !Atlas {
         const pixels = try gpa.alloc(u8, @as(usize, width) * height * 4);
         @memset(pixels, 0);
-        const fscale = size_px / @as(f32, @floatFromInt(font.units_per_em));
+        const primary = set.primary();
+        const fscale = size_px / @as(f32, @floatFromInt(primary.units_per_em));
         return .{
             .gpa = gpa,
-            .font = font,
+            .set = set,
             .size_px = size_px,
-            .fscale = fscale,
-            .ascent = @as(f32, @floatFromInt(font.ascent)) * fscale,
+            .ascent = @as(f32, @floatFromInt(primary.ascent)) * fscale,
             .width = width,
             .height = height,
             .pixels = pixels,
@@ -69,16 +73,21 @@ pub const Atlas = struct {
         self.gpa.free(self.pixels);
     }
 
-    /// The atlas entry for a font glyph index, rasterizing + packing it on
-    /// first use. Always returns a valid `advance`; `w == 0` if blank/unpacked.
-    pub fn glyph(self: *Atlas, gi: u16) Glyph {
-        if (self.glyphs.get(gi)) |g| return g;
+    /// The atlas entry for a codepoint at `style`, resolving the face (bold/
+    /// italic/fallback) via the FontSet and rasterizing + packing on first use.
+    /// Always returns a valid `advance`; `w == 0` if blank/unpacked.
+    pub fn glyphForCp(self: *Atlas, cp: u21, style: fontset.Style) Glyph {
+        const r = self.set.resolve(cp, style);
+        const face = self.set.face(r.face_id);
+        const face_fscale = self.size_px / @as(f32, @floatFromInt(face.units_per_em));
+        const key: u64 = (@as(u64, r.face_id) << 32) | r.glyph;
+        if (self.glyphs.get(key)) |g| return g;
 
-        var e: Glyph = .{ .advance = @as(f32, @floatFromInt(self.font.hMetrics(gi).advance)) * self.fscale };
-        if (self.font.outline(self.gpa, gi) catch null) |outline_| {
+        var e: Glyph = .{ .advance = @as(f32, @floatFromInt(face.hMetrics(r.glyph).advance)) * face_fscale };
+        if (face.outline(self.gpa, r.glyph) catch null) |outline_| {
             var outline = outline_;
             defer outline.deinit(self.gpa);
-            if (grast.rasterize(self.gpa, self.font, outline, self.size_px) catch null) |bmp_| {
+            if (grast.rasterize(self.gpa, face, outline, self.size_px) catch null) |bmp_| {
                 var bmp = bmp_;
                 defer bmp.deinit(self.gpa);
                 const bw: u32 = @intCast(bmp.width);
@@ -121,7 +130,7 @@ pub const Atlas = struct {
                 }
             }
         }
-        self.glyphs.put(self.gpa, gi, e) catch {};
+        self.glyphs.put(self.gpa, key, e) catch {};
         return e;
     }
 };

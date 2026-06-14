@@ -120,9 +120,11 @@ pub fn main(init: std.process.Init) !void {
     defer d3d5.destroy();
     d3d5.clear(0, 0, 0, 1);
     const font = try zooee.font.ttf.Font.parse(zooee.test_font_ttf);
-    var glyphs = try d3d11.D3dGlyphRenderer.init(gpa, d3d5.device, d3d5.context, &font, 48, false);
+    var fset: zooee.font.FontSet = .{};
+    fset.setFace(zooee.font.FontSet.regular, font);
+    var glyphs = try d3d11.D3dGlyphRenderer.init(gpa, d3d5.device, d3d5.context, &fset, 48, false);
     defer glyphs.deinit();
-    try glyphs.drawText(gpa, d3d5.rtv, @floatFromInt(gw), @floatFromInt(gh), 6, 6, "Hi zooee", .{ 1, 1, 1, 1 });
+    try glyphs.drawText(gpa, d3d5.rtv, @floatFromInt(gw), @floatFromInt(gh), 6, 6, "Hi zooee", .{ 1, 1, 1, 1 }, .{});
     const gpx = try d3d5.readPixels(gpa);
     var ink: usize = 0;
     var right_ink: usize = 0;
