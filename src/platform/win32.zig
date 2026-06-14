@@ -62,8 +62,21 @@ const CW_USEDEFAULT: i32 = @bitCast(@as(u32, 0x80000000));
 const SW_SHOWNORMAL = 1;
 const GWLP_USERDATA = -21;
 const IDC_ARROW: usize = 32512;
+// Standard system-cursor ids (#123).
+const IDC_IBEAM: usize = 32513;
+const IDC_WAIT: usize = 32514;
+const IDC_CROSS: usize = 32515;
+const IDC_SIZENWSE: usize = 32642;
+const IDC_SIZENESW: usize = 32643;
+const IDC_SIZEWE: usize = 32644;
+const IDC_SIZENS: usize = 32645;
+const IDC_NO: usize = 32648;
+const IDC_HAND: usize = 32649;
+const WM_SETCURSOR: u32 = 0x0020;
+const HTCLIENT: usize = 1;
 
 extern "user32" fn LoadCursorW(?HINSTANCE, ?*const anyopaque) callconv(WINAPI) ?*anyopaque;
+extern "user32" fn SetCursor(?*anyopaque) callconv(WINAPI) ?*anyopaque;
 
 extern "user32" fn RegisterClassExW(*const WNDCLASSEXW) callconv(WINAPI) u16;
 extern "user32" fn CreateWindowExW(u32, [*:0]const u16, [*:0]const u16, u32, i32, i32, i32, i32, ?HWND, ?*anyopaque, HINSTANCE, ?*anyopaque) callconv(WINAPI) ?HWND;
@@ -80,6 +93,7 @@ extern "kernel32" fn GetModuleHandleW(?[*:0]const u16) callconv(WINAPI) HINSTANC
 // --- events ----------------------------------------------------------------
 
 const core_event = @import("../event.zig");
+const cursor_mod = @import("../cursor.zig");
 /// Native windows emit the same core events as the terminal session, so
 /// one app loop drives every surface (#5).
 pub const Event = core_event.Event;
@@ -137,6 +151,31 @@ pub const Window = struct {
     /// a resize drag instead of stretching the stale blit. See the macOS twin.
     redraw_ctx: ?*anyopaque = null,
     redraw_fn: ?*const fn (?*anyopaque) void = null,
+    /// Desired pointer cursor id (#123). Windows resets the cursor to the class
+    /// cursor on every WM_MOUSEMOVE, so the wndproc re-applies this on
+    /// WM_SETCURSOR over the client area instead of fighting it from the loop.
+    cursor_idc: usize = IDC_ARROW,
+
+    /// Apply a pointer cursor shape (#123). Stores the system-cursor id and
+    /// applies it now; the wndproc re-applies it on WM_SETCURSOR (Windows
+    /// otherwise reverts to the class cursor on each mouse move). Diagonal
+    /// resizes and grab map to the nearest IDC_* cursor.
+    pub fn setCursor(self: *Window, shape: cursor_mod.Cursor) void {
+        self.cursor_idc = switch (shape) {
+            .default => IDC_ARROW,
+            .pointer => IDC_HAND,
+            .text => IDC_IBEAM,
+            .crosshair => IDC_CROSS,
+            .not_allowed => IDC_NO,
+            .grab, .grabbing => IDC_HAND, // no open/closed-hand system cursor
+            .ew_resize => IDC_SIZEWE,
+            .ns_resize => IDC_SIZENS,
+            .nwse_resize => IDC_SIZENWSE,
+            .nesw_resize => IDC_SIZENESW,
+            .wait => IDC_WAIT,
+        };
+        _ = SetCursor(LoadCursorW(null, @ptrFromInt(self.cursor_idc)));
+    }
 
     /// Register the live-resize redraw callback (mirrors macos/x11 setRedraw).
     pub fn setRedraw(self: *Window, ctx: ?*anyopaque, f: *const fn (?*anyopaque) void) void {
@@ -262,6 +301,16 @@ pub const Window = struct {
                 // Redraw live during the modal WM_ENTERSIZEMOVE loop (which
                 // parks our pump loop) so the frame tracks the size.
                 if (self.redraw_fn) |f| f(self.redraw_ctx);
+            },
+            WM_SETCURSOR => {
+                // Over the client area, apply the app-requested cursor (#123)
+                // and claim the message; elsewhere (borders, title bar) let the
+                // default proc draw the resize/arrow cursors.
+                if (loShort(@bitCast(lparam)) == HTCLIENT) {
+                    _ = SetCursor(LoadCursorW(null, @ptrFromInt(self.cursor_idc)));
+                    return 1; // TRUE — handled
+                }
+                return DefWindowProcW(hwnd, msg, wparam, lparam);
             },
             WM_MOUSEMOVE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP => {
                 const lp: usize = @bitCast(lparam);
