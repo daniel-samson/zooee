@@ -21,6 +21,7 @@ const style = @import("style.zig");
 const backend_mod = @import("backend.zig");
 const text_mod = @import("text.zig");
 const cursor_mod = @import("cursor.zig");
+const bidi = @import("bidi.zig");
 
 const Backend = backend_mod.Backend;
 const Rect = geometry.Rect;
@@ -213,7 +214,8 @@ fn renderNode(b: Backend, placements: []const Placement, i: *usize) void {
         if (el.text_wrap != .nowrap or hasNewline(t)) {
             drawWrappedText(b, el, t, inner);
         } else {
-            b.drawText(inner.origin(), t, el.text_style);
+            var vbuf: [2048]u8 = undefined;
+            b.drawText(inner.origin(), bidi.reorderUtf8(t, &vbuf), el.text_style); // #203
         }
     }
 
@@ -282,12 +284,16 @@ fn drawWrappedText(b: Backend, el: *const Element, t: []const u8, inner: Rect) v
         .line_height = line_h,
         .wrap = el.text_wrap,
     }) catch {
-        b.drawText(inner.origin(), t, el.text_style);
+        var vbuf: [2048]u8 = undefined;
+        b.drawText(inner.origin(), bidi.reorderUtf8(t, &vbuf), el.text_style);
         return;
     };
     defer lay.deinit(fba.allocator());
+    var vbuf: [2048]u8 = undefined;
     for (lay.lines) |ln| {
-        b.drawText(.{ .x = inner.x + ln.x, .y = inner.y + ln.y }, ln.slice(t), el.text_style);
+        // BiDi (#203): reorder each line into visual order for display.
+        const vis = bidi.reorderUtf8(ln.slice(t), &vbuf);
+        b.drawText(.{ .x = inner.x + ln.x, .y = inner.y + ln.y }, vis, el.text_style);
     }
 }
 
