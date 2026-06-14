@@ -537,12 +537,15 @@ const grad_frag: [*:0]const u8 =
     \\  else { float cx = rect.x + radial.x*rect.z; float cy = rect.y + radial.y*rect.w; float rr = radial.z*max(rect.z,rect.w); float dx=v_px.x-cx, dy=v_px.y-cy; t = (rr>0.0) ? sqrt(dx*dx+dy*dy)/rr : 0.0; }
     \\  t = clamp(t, 0.0, 1.0);
     \\  if (t <= offsets[0]) { gl_FragColor = colors[0]; return; }
-    \\  vec4 col = colors[count-1];
     \\  for (int i = 1; i < 8; i++) {
     \\    if (i >= count) break;
-    \\    if (t <= offsets[i]) { float span = offsets[i]-offsets[i-1]; float f = (span>0.0) ? (t-offsets[i-1])/span : 0.0; col = mix(colors[i-1], colors[i], f); break; }
+    \\    if (t <= offsets[i]) { float span = offsets[i]-offsets[i-1]; float f = (span>0.0) ? (t-offsets[i-1])/span : 0.0; gl_FragColor = mix(colors[i-1], colors[i], f); return; }
     \\  }
-    \\  gl_FragColor = col;
+    \\  // t past the last stop — use the last color (loop-index access only; GLSL
+    \\  // 120 forbids indexing a uniform array by a non-constant like count-1).
+    \\  vec4 last = colors[0];
+    \\  for (int i = 0; i < 8; i++) { if (i >= count) break; last = colors[i]; }
+    \\  gl_FragColor = last;
     \\}
 ;
 
