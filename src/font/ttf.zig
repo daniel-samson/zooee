@@ -66,6 +66,11 @@ pub const Font = struct {
     /// Windows) keep kerning here rather than in GPOS. 0 = absent.
     kern_legacy_pairs: u32 = 0,
     kern_legacy_count: u16 = 0,
+    /// GSUB LigatureSubst (type 4) subtable offsets for the standard-ligature
+    /// features (#201), resolved once at parse. Empty when the font has no
+    /// ligatures. Capped like the kern set.
+    liga_subtables: [16]u32 = [_]u32{0} ** 16,
+    liga_count: usize = 0,
 
     /// Parse a TTF from bytes (borrowed; the Font reads from it lazily).
     pub fn parse(data: []const u8) Error!Font {
@@ -82,6 +87,7 @@ pub const Font = struct {
         var glyf: ?usize = null;
         var cmap: ?usize = null;
         var gpos: ?usize = null;
+        var gsub: ?usize = null;
         var kern_tbl: ?usize = null;
 
         var i: usize = 0;
@@ -99,6 +105,7 @@ pub const Font = struct {
             if (std.mem.eql(u8, tag, "glyf")) glyf = off;
             if (std.mem.eql(u8, tag, "cmap")) cmap = off;
             if (std.mem.eql(u8, tag, "GPOS")) gpos = off;
+            if (std.mem.eql(u8, tag, "GSUB")) gsub = off;
             if (std.mem.eql(u8, tag, "kern")) kern_tbl = off;
         }
         const head_off = head orelse return error.MissingTable;
@@ -123,8 +130,111 @@ pub const Font = struct {
             .hmtx = hmtx orelse return error.MissingTable,
         };
         if (gpos) |g| font.collectKernSubtables(g);
+        if (gsub) |g| font.collectLigaSubtables(g);
         if (kern_tbl) |k| font.parseLegacyKern(k);
         return font;
+    }
+
+    /// Walk GSUB (#201) to find the standard-ligature features (`liga`/`rlig`/
+    /// `clig`) and record their LigatureSubst (type 4) subtable offsets, so
+    /// `ligature()` can substitute without re-walking. Mirrors the GPOS kern
+    /// walk; fully bounds-checked.
+    fn collectLigaSubtables(self: *Font, gsub: usize) void {
+        const d = self.data;
+        if (gsub + 10 > d.len) return;
+        const feature_list = gsub + readU16(d, gsub + 6);
+        const lookup_list = gsub + readU16(d, gsub + 8);
+        if (feature_list + 2 > d.len or lookup_list + 2 > d.len) return;
+
+        const feature_count = readU16(d, feature_list);
+        var fi: usize = 0;
+        while (fi < feature_count) : (fi += 1) {
+            const rec = feature_list + 2 + fi * 6;
+            if (rec + 6 > d.len) return;
+            const tag = d[rec .. rec + 4];
+            if (!std.mem.eql(u8, tag, "liga") and !std.mem.eql(u8, tag, "rlig") and !std.mem.eql(u8, tag, "clig")) continue;
+            const feature = feature_list + readU16(d, rec + 4);
+            if (feature + 4 > d.len) continue;
+            const idx_count = readU16(d, feature + 2);
+            var li: usize = 0;
+            while (li < idx_count) : (li += 1) {
+                self.collectLigaLookup(lookup_list, readU16(d, feature + 4 + li * 2));
+            }
+        }
+    }
+
+    fn collectLigaLookup(self: *Font, lookup_list: usize, lookup_idx: u16) void {
+        const d = self.data;
+        const lookup_count = readU16(d, lookup_list);
+        if (lookup_idx >= lookup_count) return;
+        const lookup = lookup_list + readU16(d, lookup_list + 2 + @as(usize, lookup_idx) * 2);
+        if (lookup + 6 > d.len) return;
+        const lookup_type = readU16(d, lookup);
+        const sub_count = readU16(d, lookup + 4);
+        var si: usize = 0;
+        while (si < sub_count) : (si += 1) {
+            const sub = lookup + readU16(d, lookup + 6 + si * 2);
+            // Type 7 = extension: redirect to the real subtable/type (4).
+            if (lookup_type == 7) {
+                if (sub + 8 > d.len) continue;
+                if (readU16(d, sub + 2) == 4) self.pushLigaSubtable(sub + readU32(d, sub + 4));
+            } else if (lookup_type == 4) {
+                self.pushLigaSubtable(sub);
+            }
+        }
+    }
+
+    fn pushLigaSubtable(self: *Font, off: usize) void {
+        if (self.liga_count >= self.liga_subtables.len) return;
+        if (off + 2 > self.data.len) return;
+        self.liga_subtables[self.liga_count] = @intCast(off);
+        self.liga_count += 1;
+    }
+
+    pub const LigatureResult = struct { glyph: u16, consumed: usize };
+
+    /// Standard-ligature substitution (#201): if a ligature begins at
+    /// `glyphs[0]` and its remaining components match the following glyphs,
+    /// return the ligature glyph and how many input glyphs it consumes (≥2).
+    /// Null when no ligature applies. The first covering subtable decides.
+    pub fn ligature(self: *const Font, glyphs: []const u16) ?LigatureResult {
+        if (glyphs.len == 0) return null;
+        var k: usize = 0;
+        while (k < self.liga_count) : (k += 1) {
+            if (self.ligaSubstAt(self.liga_subtables[k], glyphs)) |r| return r;
+        }
+        return null;
+    }
+
+    fn ligaSubstAt(self: *const Font, sub: usize, glyphs: []const u16) ?LigatureResult {
+        const d = self.data;
+        if (sub + 6 > d.len) return null;
+        if (readU16(d, sub) != 1) return null; // LigatureSubstFormat1
+        const cov_index = self.coverageIndex(sub + readU16(d, sub + 2), glyphs[0]) orelse return null;
+        const set_count = readU16(d, sub + 4);
+        if (cov_index >= set_count) return null;
+        const lig_set = sub + readU16(d, sub + 6 + @as(usize, cov_index) * 2);
+        if (lig_set + 2 > d.len) return null;
+        const lig_count = readU16(d, lig_set);
+        var j: usize = 0;
+        while (j < lig_count) : (j += 1) {
+            const lig = lig_set + readU16(d, lig_set + 2 + j * 2);
+            if (lig + 4 > d.len) continue;
+            const lig_glyph = readU16(d, lig);
+            const comp_count = readU16(d, lig + 2); // includes the first glyph
+            if (comp_count < 2 or glyphs.len < comp_count) continue;
+            if (lig + 4 + (@as(usize, comp_count) - 1) * 2 > d.len) continue;
+            var matched = true;
+            var c: usize = 1;
+            while (c < comp_count) : (c += 1) {
+                if (glyphs[c] != readU16(d, lig + 4 + (c - 1) * 2)) {
+                    matched = false;
+                    break;
+                }
+            }
+            if (matched) return .{ .glyph = lig_glyph, .consumed = comp_count };
+        }
+        return null;
     }
 
     /// Parse the legacy `kern` table (#116), recording the first format-0
@@ -756,6 +866,44 @@ test "legacy kern table format 0 binary search" {
     try testing.expectEqual(@as(i16, 15), font.kern(10, 25));
     try testing.expectEqual(@as(i16, 0), font.kern(10, 99));
     try testing.expectEqual(@as(i16, 0), font.kern(5, 20));
+}
+
+test "GSUB LigatureSubst format 1: f+i -> fi" {
+    // One ligature set covering glyph 10 (f); ligature {10,20}(f,i) -> 99 (fi).
+    var buf = [_]u8{0} ** 40;
+    wU16(&buf, 0, 1); // substFormat
+    wU16(&buf, 2, 8); // coverageOffset
+    wU16(&buf, 4, 1); // ligatureSetCount
+    wU16(&buf, 6, 14); // ligatureSetOffset[0]
+    // Coverage @8 (format 1): covers glyph 10 (the first component).
+    wU16(&buf, 8, 1);
+    wU16(&buf, 10, 1);
+    wU16(&buf, 12, 10);
+    // LigatureSet @14: one ligature.
+    wU16(&buf, 14, 1); // ligatureCount
+    wU16(&buf, 16, 4); // ligatureOffset[0], relative to set base 14 → lig @18
+    // Ligature @18: glyph 99, componentCount 2, component[1] = 20.
+    wU16(&buf, 18, 99); // ligatureGlyph
+    wU16(&buf, 20, 2); // componentCount (incl. first)
+    wU16(&buf, 22, 20); // componentGlyphIDs[0] = second component (i)
+
+    var font = bareFont(&buf);
+    font.liga_subtables[0] = 0;
+    font.liga_count = 1;
+    // f,i -> fi consuming 2.
+    const r = font.ligature(&.{ 10, 20, 30 }) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(u16, 99), r.glyph);
+    try testing.expectEqual(@as(usize, 2), r.consumed);
+    // f followed by something else: no ligature.
+    try testing.expectEqual(@as(?Font.LigatureResult, null), font.ligature(&.{ 10, 30 }));
+    // not the first component: no ligature.
+    try testing.expectEqual(@as(?Font.LigatureResult, null), font.ligature(&.{ 20, 10 }));
+}
+
+test "no GSUB ligatures → null, no crash" {
+    const font = try Font.parse(poppins);
+    // Whatever Poppins has, ligature() must be safe and total.
+    _ = font.ligature(&.{ font.glyphIndex('f'), font.glyphIndex('i') });
 }
 
 test "no kern data → zero, no crash" {
