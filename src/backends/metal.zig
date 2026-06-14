@@ -1738,10 +1738,10 @@ pub const MetalBackend = struct {
         gr.vh = @floatFromInt(self.height);
         const color = ts.color orelse style.Color.black;
         _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{gr.pipeline});
-        gr.drawText(self.gpa, origin.x + self.translate.x, origin.y + self.translate.y, text, col4(color), .{ .bold = ts.bold, .italic = ts.italic }) catch {};
+        gr.drawText(self.gpa, origin.x + self.translate.x, origin.y + self.translate.y, text, col4(color), .{ .bold = ts.effectiveBold(), .italic = ts.italic }) catch {};
         // Text decorations (#191): a filled line, same geometry as raster.
         if (ts.underline or ts.strikethrough) {
-            const rw = self.fonts.?.measure(text, ts.size, .{ .bold = ts.bold, .italic = ts.italic }).width;
+            const rw = self.fonts.?.measure(text, ts.size, .{ .bold = ts.effectiveBold(), .italic = ts.italic }).width;
             const bx = origin.x + self.translate.x;
             const baseline = origin.y + self.translate.y + gr.atlas.ascent;
             const c4 = col4(color);
@@ -1906,7 +1906,7 @@ pub const MetalBackend = struct {
     fn measureText(ptr: *anyopaque, text: []const u8, ts: style.TextStyle) geometry.Size {
         const self = self_(ptr);
         if (self.fonts) |*set| {
-            const mtr = set.measure(text, ts.size, .{ .bold = ts.bold, .italic = ts.italic });
+            const mtr = set.measure(text, ts.size, .{ .bold = ts.effectiveBold(), .italic = ts.italic });
             return .{ .width = mtr.width, .height = mtr.height };
         }
         const n = std.unicode.utf8CountCodepoints(text) catch text.len;

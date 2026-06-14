@@ -440,7 +440,7 @@ pub const RasterBackend = struct {
         // Baseline comes from the primary face so mixed-face runs share a grid.
         const primary = set.primary();
         const ascent = @as(f32, @floatFromInt(primary.ascent)) * (@as(f32, @floatFromInt(size_px)) / @as(f32, @floatFromInt(primary.units_per_em)));
-        const fstyle: fontset.Style = .{ .bold = text_style.bold, .italic = text_style.italic };
+        const fstyle: fontset.Style = .{ .bold = text_style.effectiveBold(), .italic = text_style.italic };
         const color = text_style.color orelse Color.black;
         const clip = self.currentClip();
 
@@ -736,7 +736,7 @@ pub const RasterBackend = struct {
     fn measureText(ptr: *anyopaque, text: []const u8, text_style: style.TextStyle) geometry.Size {
         const self = self_(ptr);
         if (self.fonts) |*set| {
-            const fstyle: fontset.Style = .{ .bold = text_style.bold, .italic = text_style.italic };
+            const fstyle: fontset.Style = .{ .bold = text_style.effectiveBold(), .italic = text_style.italic };
             // Delegate to the shared FontSet.measure (kerning #116, fallback,
             // line metrics) so measure and render agree across every backend.
             const m = set.measure(text, text_style.size, fstyle);

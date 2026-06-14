@@ -240,7 +240,7 @@ pub const TerminalBackend = struct {
                 const cell = self.cellAt(x, y);
                 cell.cp = cp;
                 cell.fg = text_style.color; // null = terminal default fg
-                cell.bold = text_style.bold;
+                cell.bold = text_style.effectiveBold();
                 cell.underline = text_style.underline;
                 cell.strikethrough = text_style.strikethrough;
                 // A wide glyph owns the next cell too — blank it so stale content
