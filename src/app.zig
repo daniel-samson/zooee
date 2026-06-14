@@ -527,7 +527,9 @@ fn runWindowMetal(
             self.backend.beginFrame(viewport) catch return;
             layout_mod.render(self.backend, result);
             self.backend.endFrame() catch return;
-            self.mb.presentTo(self.layer);
+            // Transaction-synced present only during a live-resize drag; async
+            // (display-link-paced) otherwise, so steady animation stays smooth.
+            self.mb.presentTo(self.layer, self.win.inLiveResize());
         }
     };
     var frame: Frame = .{ .model = model, .win = window, .backend = b, .mb = &mb, .layer = &layer, .arena = &frame_arena, .placements = &placements };

@@ -224,10 +224,10 @@ pub const MetalLayer = struct {
         _ = msg(void, struct { id }, layer, sel("setDevice:"), .{device});
         _ = msg(void, struct { u64 }, layer, sel("setPixelFormat:"), .{MTLPixelFormatBGRA8Unorm});
         _ = msg(void, struct { bool }, layer, sel("setFramebufferOnly:"), .{false});
-        // Present *inside* AppKit's resize CATransaction so the drawable never
-        // lags the window bounds during a live-resize drag (the squash/stretch
-        // flicker). Paired with a synchronous present in `presentTo`. See #170.
-        _ = msg(void, struct { bool }, layer, sel("setPresentsWithTransaction:"), .{true});
+        // presentsWithTransaction is toggled per-frame in `presentTo`: false for
+        // smooth, display-link-paced steady-state animation; true only during a
+        // live-resize drag so the drawable lands in the resize's CATransaction
+        // (no squash/stretch flash). See #170/#181 and [[live-resize-pattern]].
         _ = msg(void, struct { CGSize }, layer, sel("setDrawableSize:"), .{.{ .width = @floatFromInt(width), .height = @floatFromInt(height) }});
         _ = msg(void, struct { bool }, view, sel("setWantsLayer:"), .{true});
         _ = msg(void, struct { id }, view, sel("setLayer:"), .{layer});
@@ -1484,7 +1484,15 @@ pub const MetalBackend = struct {
 
     /// Draw the offscreen RT into the layer's next drawable (RGBA→BGRA via the
     /// framebuffer store) and present it — the windowed GPU path (slice 7).
-    pub fn presentTo(self: *MetalBackend, layer: *MetalLayer) void {
+    /// Present the rendered frame. `synchronous` picks the present mode:
+    /// - false (steady state): async, display-link-paced via the layer's own
+    ///   vsync — smooth animation. This is the default.
+    /// - true (during a live-resize drag): a presentsWithTransaction present
+    ///   (commit → waitUntilScheduled → [drawable present]) so the new frame
+    ///   lands in the same CATransaction as the window resize, with no flash
+    ///   of the old-size drawable (#170/#181). The synchronous main-thread wait
+    ///   is what would make steady-state animation choppy, so it's resize-only.
+    pub fn presentTo(self: *MetalBackend, layer: *MetalLayer, synchronous: bool) void {
         if (self.target == null) return;
         if (self.present_pipeline == null) {
             self.present_pipeline = compilePipeline(self.ctx.device, present_shader, MTLPixelFormatBGRA8Unorm, false) catch return;
@@ -1508,13 +1516,21 @@ pub const MetalBackend = struct {
         _ = msg(void, struct { id, u64 }, enc, sel("setFragmentSamplerState:atIndex:"), .{ self.present_sampler, 0 });
         _ = msg(void, struct { u64, u64, u64 }, enc, sel("drawPrimitives:vertexStart:vertexCount:"), .{ MTLPrimitiveTypeTriangleStrip, 0, 4 });
         _ = msg(void, struct {}, enc, sel("endEncoding"), .{});
-        // presentsWithTransaction present: commit, wait until the GPU work is
-        // scheduled, then present the drawable synchronously on this (main)
-        // thread — so the new frame is committed in the same transaction as the
-        // window resize instead of one vblank behind it (#170, live-resize).
-        _ = msg(void, struct {}, cmdbuf, sel("commit"), .{});
-        _ = msg(void, struct {}, cmdbuf, sel("waitUntilScheduled"), .{});
-        _ = msg(void, struct {}, drawable, sel("present"), .{});
+        // Match the layer's present mode to how we're about to present.
+        _ = msg(void, struct { bool }, layer.layer, sel("setPresentsWithTransaction:"), .{synchronous});
+        if (synchronous) {
+            // Transaction-synced present (live resize): commit, wait until the
+            // GPU work is scheduled, then present on this (main) thread so the
+            // frame lands in the same CATransaction as the resize (#181).
+            _ = msg(void, struct {}, cmdbuf, sel("commit"), .{});
+            _ = msg(void, struct {}, cmdbuf, sel("waitUntilScheduled"), .{});
+            _ = msg(void, struct {}, drawable, sel("present"), .{});
+        } else {
+            // Async, display-link-paced present (steady state) — smooth, no
+            // main-thread wait.
+            _ = msg(void, struct { id }, cmdbuf, sel("presentDrawable:"), .{drawable});
+            _ = msg(void, struct {}, cmdbuf, sel("commit"), .{});
+        }
     }
 
     pub fn setFont(self: *MetalBackend, data: []const u8) !void {
