@@ -139,6 +139,7 @@ pub const RasterBackend = struct {
         .draw_rect = drawRect,
         .draw_text = drawText,
         .draw_image = drawImage,
+        .draw_image_uv = drawImageUv,
         .fill_path = fillPath,
         .stroke_path = strokePath,
         .push_clip = pushClip,
@@ -488,17 +489,23 @@ pub const RasterBackend = struct {
     }
 
     fn drawImage(ptr: *anyopaque, rect: Rect, texture: *Backend.Texture) void {
+        drawImageUv(ptr, rect, texture, .{ .x = 0, .y = 0, .width = 1, .height = 1 });
+    }
+
+    /// Draw the `src` UV sub-rect of the texture into `dst`, nearest sampling.
+    fn drawImageUv(ptr: *anyopaque, dst: Rect, texture: *Backend.Texture, src: Rect) void {
         const self = self_(ptr);
         const tex = self.textures.get(@intCast(@intFromPtr(texture))) orelse unreachable;
-        const bounds = IRect.fromRect(rect).intersect(self.currentClip());
+        const bounds = IRect.fromRect(dst).intersect(self.currentClip());
         if (bounds.isEmpty()) return;
-
         var y = bounds.y0;
         while (y < bounds.y1) : (y += 1) {
             var x = bounds.x0;
             while (x < bounds.x1) : (x += 1) {
-                const u = (@as(f32, @floatFromInt(x)) + 0.5 - rect.x) / rect.width;
-                const v = (@as(f32, @floatFromInt(y)) + 0.5 - rect.y) / rect.height;
+                const fx = (@as(f32, @floatFromInt(x)) + 0.5 - dst.x) / dst.width;
+                const fy = (@as(f32, @floatFromInt(y)) + 0.5 - dst.y) / dst.height;
+                const u = src.x + fx * src.width;
+                const v = src.y + fy * src.height;
                 const tx: u32 = @intFromFloat(std.math.clamp(u * @as(f32, @floatFromInt(tex.width)), 0, @as(f32, @floatFromInt(tex.width - 1))));
                 const ty: u32 = @intFromFloat(std.math.clamp(v * @as(f32, @floatFromInt(tex.height)), 0, @as(f32, @floatFromInt(tex.height - 1))));
                 const ti = (@as(usize, ty) * tex.width + tx) * 4;
