@@ -185,6 +185,16 @@ pub fn Driver(comptime Model: type, comptime Msg: type) type {
             return self.send(.{ .text = .{ .codepoint = codepoint } });
         }
 
+        /// Inject an IME pre-edit update (#19): the in-progress composition.
+        pub fn compose(self: *Self, preedit: []const u8) !Command {
+            return self.send(.{ .composition = .{ .phase = .update, .text = preedit, .caret = preedit.len } });
+        }
+
+        /// Inject an IME commit (#19): the finalized text to insert.
+        pub fn commit(self: *Self, finalized: []const u8) !Command {
+            return self.send(.{ .composition = .{ .phase = .commit, .text = finalized } });
+        }
+
         pub fn resize(self: *Self, w: f32, h: f32) !Command {
             self.viewport = .{ .width = w, .height = h };
             const cmd = try self.send(.{ .resized = .{ .size = .{ .width = w, .height = h } } });
@@ -233,6 +243,9 @@ const Toggle = struct {
     last_count: u8 = 0,
     drag_active: bool = false,
     dropped_files: usize = 0,
+    composing: bool = false,
+    preedit_len: usize = 0,
+    committed_len: usize = 0,
 
     const Msg = enum { tapped };
 
@@ -286,6 +299,17 @@ const Toggle = struct {
                 self.last_count = p.click_count;
             },
             .text => self.chars += 1,
+            .composition => |c| switch (c.phase) {
+                .update, .start => {
+                    self.composing = true;
+                    self.preedit_len = c.text.len;
+                },
+                .commit => {
+                    self.composing = false;
+                    self.committed_len += c.text.len;
+                },
+                .cancel => self.composing = false,
+            },
             .scroll => |s| {
                 // Clamp to a 0..100 content range — the typical app pattern.
                 self.scroll_y = std.math.clamp(self.scroll_y + s.dy * 10, 0, 100);
@@ -399,6 +423,18 @@ test "drag enter→over→drop delivers the payload, leave cancels (#128)" {
     _ = try d.dragDrop(30, 20, .{ .files = &paths });
     try testing.expect(!model.drag_active);
     try testing.expectEqual(@as(usize, 2), model.dropped_files);
+}
+
+test "IME composition: preedit then commit (#19)" {
+    var model: Toggle = .{};
+    var d = try Driver(Toggle, Toggle.Msg).init(testing.allocator, &model, .{ .width = 60, .height = 40 });
+    defer d.deinit();
+    _ = try d.compose("ni"); // pinyin in progress
+    try testing.expect(model.composing);
+    try testing.expectEqual(@as(usize, 2), model.preedit_len);
+    _ = try d.commit("你"); // commit the Han character (3 UTF-8 bytes)
+    try testing.expect(!model.composing);
+    try testing.expectEqual(@as(usize, 3), model.committed_len);
 }
 
 test "resize relays out to the new viewport" {

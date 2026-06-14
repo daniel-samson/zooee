@@ -38,6 +38,12 @@ const Demo = struct {
     /// over it and reports the last dropped item count.
     drag_over: bool = false,
     dropped: usize = 0,
+    /// IME composition (#19): the current pre-edit string + committed text,
+    /// shown live in a status label.
+    preedit: [64]u8 = undefined,
+    preedit_len: usize = 0,
+    committed: [128]u8 = undefined,
+    committed_len: usize = 0,
 
     pub fn view(self: *Demo, arena: std.mem.Allocator, scale: f32) !*const L.Element {
         const rows = try arena.alloc(L.Element, items.len);
@@ -342,6 +348,18 @@ const Demo = struct {
                 .corner_radius = .all(5 * scale),
             },
         };
+        // IME composition status (#19): "committed [preedit]" updates live as
+        // an input method composes. Empty until composition events arrive.
+        const ime_text = try std.fmt.allocPrint(arena, "IME: {s}[{s}]", .{
+            self.committed[0..self.committed_len],
+            self.preedit[0..self.preedit_len],
+        });
+        const ime_label = try arena.create(L.Element);
+        ime_label.* = .{
+            .margin = .{ .bottom = 8 * scale },
+            .text = ime_text,
+            .text_style = .{ .color = Color.rgb(110, 110, 130), .size = 13 * scale },
+        };
         // Unicode (#114): accents + em-dash exercise the dynamic glyph atlas.
         const uni = try arena.create(L.Element);
         uni.* = .{
@@ -359,7 +377,7 @@ const Demo = struct {
                 .border = .all(2 * scale, if (self.pointer_inside) Color.rgb(0, 120, 255) else Color.rgb(120, 120, 130)),
                 .corner_radius = .all(10 * scale),
             },
-            .children = try arena.dupe(*const L.Element, &.{ grad_bar, swatches, card_wrap, icons, button, scroller, paragraph, drop_zone, uni }),
+            .children = try arena.dupe(*const L.Element, &.{ grad_bar, swatches, card_wrap, icons, button, scroller, paragraph, drop_zone, ime_label, uni }),
         };
         return panel;
     }
@@ -432,6 +450,28 @@ const Demo = struct {
                     .unknown => 0,
                 };
                 return .redraw;
+            },
+            // IME composition (#19): mirror the pre-edit string; on commit,
+            // append the finalized text and clear the pre-edit.
+            .composition => |c| switch (c.phase) {
+                .start, .update => {
+                    const n = @min(c.text.len, self.preedit.len);
+                    @memcpy(self.preedit[0..n], c.text[0..n]);
+                    self.preedit_len = n;
+                    return .redraw;
+                },
+                .commit => {
+                    const room = self.committed.len - self.committed_len;
+                    const n = @min(c.text.len, room);
+                    @memcpy(self.committed[self.committed_len..][0..n], c.text[0..n]);
+                    self.committed_len += n;
+                    self.preedit_len = 0;
+                    return .redraw;
+                },
+                .cancel => {
+                    self.preedit_len = 0;
+                    return .redraw;
+                },
             },
             else => {},
         }
