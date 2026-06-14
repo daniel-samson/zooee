@@ -95,12 +95,17 @@ const Demo = struct {
     /// (#117), a half-opacity group (#121), and a Unicode string (#114).
     fn buildShowcase(self: *Demo, arena: std.mem.Allocator, scale: f32) !*const L.Element {
         _ = self;
-        // Gradient bar (#118): red → blue, no plain background.
+        // Gradient bar (#118): a 4-stop rainbow (multi-stop linear).
+        var rainbow: zooee.style.Gradient = .{ .axis = .horizontal, .stop_count = 4 };
+        rainbow.stops[0] = .{ .offset = 0.0, .color = Color.rgb(220, 40, 40) };
+        rainbow.stops[1] = .{ .offset = 0.33, .color = Color.rgb(230, 200, 40) };
+        rainbow.stops[2] = .{ .offset = 0.66, .color = Color.rgb(40, 180, 80) };
+        rainbow.stops[3] = .{ .offset = 1.0, .color = Color.rgb(40, 60, 220) };
         const grad_bar = try arena.create(L.Element);
         grad_bar.* = .{
             .width = 200 * scale,
             .height = 28 * scale,
-            .rect_style = .{ .gradient = .{ .axis = .horizontal, .from = Color.rgb(220, 40, 40), .to = Color.rgb(40, 60, 220) } },
+            .rect_style = .{ .gradient = rainbow },
         };
         // Rounded clip (#117): a SQUARE green fill clipped to round corners —
         // the corners are cut by the clip, not by a rounded-rect draw.
@@ -123,12 +128,25 @@ const Demo = struct {
             .opacity = 0.4,
             .children = try arena.dupe(*const L.Element, &.{op_fill}),
         };
+        // Radial gradient (#118) clipped to a circle (#117): a glowing orb.
+        var glow: zooee.style.Gradient = .{ .kind = .radial, .cx = 0.5, .cy = 0.5, .radius = 0.5, .stop_count = 2 };
+        glow.stops[0] = .{ .offset = 0, .color = Color.white };
+        glow.stops[1] = .{ .offset = 1, .color = Color.rgb(40, 60, 220) };
+        const orb_fill = try arena.create(L.Element);
+        orb_fill.* = .{ .grow = 1, .rect_style = .{ .gradient = glow } };
+        const orb = try arena.create(L.Element);
+        orb.* = .{
+            .width = 56 * scale,
+            .height = 56 * scale,
+            .clip_radius = .all(28 * scale),
+            .children = try arena.dupe(*const L.Element, &.{orb_fill}),
+        };
         const swatches = try arena.create(L.Element);
         swatches.* = .{
             .direction = .row,
             .gap = 16 * scale,
             .margin = .{ .top = 12 * scale, .bottom = 12 * scale },
-            .children = try arena.dupe(*const L.Element, &.{ clip_box, op_group }),
+            .children = try arena.dupe(*const L.Element, &.{ clip_box, op_group, orb }),
         };
         // Box shadow (#119): an elevated card floating on a soft blurred shadow.
         const card = try arena.create(L.Element);
