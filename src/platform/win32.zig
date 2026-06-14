@@ -95,6 +95,19 @@ extern "user32" fn PeekMessageW(*MSG, ?HWND, u32, u32, u32) callconv(WINAPI) win
 extern "user32" fn TranslateMessage(*const MSG) callconv(WINAPI) win.BOOL;
 extern "user32" fn DispatchMessageW(*const MSG) callconv(WINAPI) LRESULT;
 extern "user32" fn ShowWindow(HWND, i32) callconv(WINAPI) win.BOOL;
+// Window operations (#208).
+extern "user32" fn SetWindowTextW(HWND, [*:0]const u16) callconv(WINAPI) win.BOOL;
+extern "user32" fn IsIconic(HWND) callconv(WINAPI) win.BOOL;
+extern "user32" fn IsZoomed(HWND) callconv(WINAPI) win.BOOL;
+extern "user32" fn PostMessageW(HWND, u32, WPARAM, LPARAM) callconv(WINAPI) win.BOOL;
+extern "user32" fn AdjustWindowRectEx(*RECT, u32, win.BOOL, u32) callconv(WINAPI) win.BOOL;
+extern "user32" fn GetWindowLongW(HWND, i32) callconv(WINAPI) i32;
+const SW_MAXIMIZE = 3;
+const SW_MINIMIZE = 6;
+const SW_RESTORE = 9;
+const GWL_STYLE: i32 = -16;
+const GWL_EXSTYLE: i32 = -20;
+const SWP_NOMOVE: u32 = 0x0002;
 extern "user32" fn SetWindowLongPtrW(HWND, i32, isize) callconv(WINAPI) isize;
 extern "user32" fn GetWindowLongPtrW(HWND, i32) callconv(WINAPI) isize;
 extern "kernel32" fn GetModuleHandleW(?[*:0]const u16) callconv(WINAPI) HINSTANCE;
@@ -190,6 +203,52 @@ pub const Window = struct {
     pub fn setRedraw(self: *Window, ctx: ?*anyopaque, f: *const fn (?*anyopaque) void) void {
         self.redraw_ctx = ctx;
         self.redraw_fn = f;
+    }
+
+    // --- Window operations (#208) — mirror the macOS Window method set. ---
+
+    /// Resize the client area to `w`×`h` logical px (grows the window rect to
+    /// fit the frame). Position is preserved.
+    pub fn setSize(self: *Window, w: f32, h: f32) void {
+        var r: RECT = .{ .left = 0, .top = 0, .right = @intFromFloat(@max(1, w)), .bottom = @intFromFloat(@max(1, h)) };
+        const style: u32 = @bitCast(GetWindowLongW(self.hwnd, GWL_STYLE));
+        const exstyle: u32 = @bitCast(GetWindowLongW(self.hwnd, GWL_EXSTYLE));
+        _ = AdjustWindowRectEx(&r, style, .FALSE, exstyle);
+        _ = SetWindowPos(self.hwnd, null, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+
+    pub fn setTitle(self: *Window, title: [:0]const u8) void {
+        var buf: [256]u16 = undefined;
+        const n = std.unicode.utf8ToUtf16Le(&buf, title) catch return;
+        if (n >= buf.len) return;
+        buf[n] = 0;
+        _ = SetWindowTextW(self.hwnd, buf[0..n :0].ptr);
+    }
+
+    pub fn minimise(self: *Window) void {
+        _ = ShowWindow(self.hwnd, SW_MINIMIZE);
+    }
+
+    pub fn maximise(self: *Window) void {
+        _ = ShowWindow(self.hwnd, SW_MAXIMIZE);
+    }
+
+    pub fn restore(self: *Window) void {
+        _ = ShowWindow(self.hwnd, SW_RESTORE);
+    }
+
+    /// Post WM_CLOSE so the wndproc emits `close_requested` (the app decides
+    /// whether to actually destroy) — same contract as macOS performClose.
+    pub fn close(self: *Window) void {
+        _ = PostMessageW(self.hwnd, WM_CLOSE, 0, 0);
+    }
+
+    pub fn isMinimised(self: *Window) bool {
+        return IsIconic(self.hwnd) != 0;
+    }
+
+    pub fn isMaximised(self: *Window) bool {
+        return IsZoomed(self.hwnd) != 0;
     }
 
     const class_name = std.unicode.utf8ToUtf16LeStringLiteral("zooee_window");
