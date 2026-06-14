@@ -278,11 +278,35 @@ pub const RasterBackend = struct {
         }
     }
 
-    fn drawRect(ptr: *anyopaque, rect: Rect, rect_style: style.RectStyle) void {
-        const self = self_(ptr);
-        if (rect_style.shadow) |sh| self.drawShadow(rect, sh);
+    /// Paint an inset shadow (#119) on top of the rect, clipped to its rounded
+    /// shape: 1 − coverage of the inner box (style.BoxShadow.insetCoverage).
+    fn drawInsetShadow(self: *RasterBackend, rect: Rect, sh: style.BoxShadow, corner: style.CornerRadius) void {
         const bounds = IRect.fromRect(rect).intersect(self.currentClip());
         if (bounds.isEmpty()) return;
+        var y = bounds.y0;
+        while (y < bounds.y1) : (y += 1) {
+            var x = bounds.x0;
+            while (x < bounds.x1) : (x += 1) {
+                const px = @as(f32, @floatFromInt(x)) + 0.5;
+                const py = @as(f32, @floatFromInt(y)) + 0.5;
+                if (!insideRounded(rect, corner, px, py)) continue;
+                const cov = sh.insetCoverage(rect.x, rect.y, rect.width, rect.height, px, py);
+                const a: u8 = @intFromFloat(@round(cov * @as(f32, @floatFromInt(sh.color.a))));
+                if (a == 0) continue;
+                self.setPixel(x, y, .{ .r = sh.color.r, .g = sh.color.g, .b = sh.color.b, .a = a });
+            }
+        }
+    }
+
+    fn drawRect(ptr: *anyopaque, rect: Rect, rect_style: style.RectStyle) void {
+        const self = self_(ptr);
+        if (rect_style.shadow) |sh| if (!sh.inset) self.drawShadow(rect, sh);
+        const bounds = IRect.fromRect(rect).intersect(self.currentClip());
+        if (bounds.isEmpty()) {
+            // Even with no fill bounds, an inset shadow may still apply.
+            if (rect_style.shadow) |sh| if (sh.inset) self.drawInsetShadow(rect, sh, rect_style.corner_radius);
+            return;
+        }
 
         const b = rect_style.border;
         const has_border = !b.isNone();
@@ -317,6 +341,8 @@ pub const RasterBackend = struct {
                 }
             }
         }
+        // Inset shadow paints on top of the fill, clipped to the rounded shape.
+        if (rect_style.shadow) |sh| if (sh.inset) self.drawInsetShadow(rect, sh, rect_style.corner_radius);
     }
 
     /// Side attribution for a border pixel. Pixels in a rounded corner's
