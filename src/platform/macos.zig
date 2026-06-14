@@ -37,6 +37,13 @@ fn msg(comptime Ret: type, comptime Args: type, target: anytype, selector: SEL, 
         0 => *const fn (@TypeOf(target), SEL) callconv(.c) Ret,
         1 => *const fn (@TypeOf(target), SEL, @typeInfo(Args).@"struct".fields[0].type) callconv(.c) Ret,
         2 => *const fn (@TypeOf(target), SEL, @typeInfo(Args).@"struct".fields[0].type, @typeInfo(Args).@"struct".fields[1].type) callconv(.c) Ret,
+        3 => *const fn (
+            @TypeOf(target),
+            SEL,
+            @typeInfo(Args).@"struct".fields[0].type,
+            @typeInfo(Args).@"struct".fields[1].type,
+            @typeInfo(Args).@"struct".fields[2].type,
+        ) callconv(.c) Ret,
         4 => *const fn (
             @TypeOf(target),
             SEL,
@@ -52,6 +59,7 @@ fn msg(comptime Ret: type, comptime Args: type, target: anytype, selector: SEL, 
         0 => f(target, selector),
         1 => f(target, selector, @field(args, "0")),
         2 => f(target, selector, @field(args, "0"), @field(args, "1")),
+        3 => f(target, selector, @field(args, "0"), @field(args, "1"), @field(args, "2")),
         4 => f(target, selector, @field(args, "0"), @field(args, "1"), @field(args, "2"), @field(args, "3")),
         else => unreachable,
     };
@@ -117,6 +125,7 @@ pub const SystemClipboard = struct {
 const core_event = @import("../event.zig");
 const cursor_mod = @import("../cursor.zig");
 const window_mod = @import("../window.zig");
+const menu_mod = @import("../menu.zig");
 /// Native windows emit the same core events as the terminal session, so
 /// one app loop drives every surface (#5).
 pub const Event = core_event.Event;
@@ -348,6 +357,60 @@ fn enableTextInput(window: id, view: id, w: *Window) void {
     _ = msg(bool, struct { id }, window, sel("makeFirstResponder:"), .{view});
 }
 
+// --- native context menu (#129) ----------------------------------------------
+
+/// Set by the menu item action to the chosen item's tag (== model id) while a
+/// popup is up; read synchronously after popUpMenuPositioningItem returns. The
+/// popup runs a nested modal loop, so a single global is safe (one at a time).
+var menu_selected_id: u32 = 0;
+var menu_target: id = null;
+
+/// NSMenuItem action target: stash the sender's tag (the model id).
+fn onMenuAction(_: id, _: SEL, sender: id) callconv(.c) void {
+    const tag = msg(isize, struct {}, sender, sel("tag"), .{});
+    menu_selected_id = if (tag > 0) @intCast(tag) else 0;
+}
+
+/// A shared target instance whose `zooeeMenuAction:` records the selection.
+/// The class is registered once; the instance lives for the process.
+fn menuTarget() id {
+    if (menu_target) |t| return t;
+    const c = objc_allocateClassPair(cls("NSObject"), "ZooeeMenuTarget", 0);
+    _ = class_addMethod(c, sel("zooeeMenuAction:"), @ptrCast(&onMenuAction), "v@:@");
+    objc_registerClassPair(c);
+    menu_target = msg(id, struct {}, msg(id, struct {}, c, sel("alloc"), .{}), sel("init"), .{});
+    return menu_target;
+}
+
+/// Build an autoreleased NSMenu from the model, recursing into submenus.
+fn buildMenu(items: []const menu_mod.Item) id {
+    const m = msg(id, struct {}, msg(id, struct {}, cls("NSMenu"), sel("alloc"), .{}), sel("init"), .{});
+    // Honor our enabled flags instead of AppKit's automatic enabling.
+    _ = msg(void, struct { bool }, m, sel("setAutoenablesItems:"), .{false});
+    const target = menuTarget();
+    const empty = nsString("");
+    for (items) |it| {
+        if (it.separator) {
+            const sep = msg(id, struct {}, cls("NSMenuItem"), sel("separatorItem"), .{});
+            _ = msg(void, struct { id }, m, sel("addItem:"), .{sep});
+            continue;
+        }
+        const alloc_item = msg(id, struct {}, cls("NSMenuItem"), sel("alloc"), .{});
+        const action: SEL = if (it.submenu.len > 0) null else sel("zooeeMenuAction:");
+        const item = msg(id, struct { id, SEL, id }, alloc_item, sel("initWithTitle:action:keyEquivalent:"), .{ nsString(it.label), action, empty });
+        if (it.submenu.len > 0) {
+            _ = msg(void, struct { id }, item, sel("setSubmenu:"), .{buildMenu(it.submenu)});
+        } else {
+            _ = msg(void, struct { id }, item, sel("setTarget:"), .{target});
+            _ = msg(void, struct { isize }, item, sel("setTag:"), .{@as(isize, @intCast(it.id))});
+            _ = msg(void, struct { bool }, item, sel("setEnabled:"), .{it.enabled});
+            if (it.checked) _ = msg(void, struct { isize }, item, sel("setState:"), .{1}); // NSControlStateValueOn
+        }
+        _ = msg(void, struct { id }, m, sel("addItem:"), .{item});
+    }
+    return m;
+}
+
 // --- window ----------------------------------------------------------------
 
 const NSWindowStyleMask = struct {
@@ -482,6 +545,21 @@ pub const Window = struct {
 
     pub fn setTitle(self: *Window, title: [:0]const u8) void {
         _ = msg(void, struct { id }, self.ns_window, sel("setTitle:"), .{nsString(title)});
+    }
+
+    /// Pop up `items` as a native NSMenu context menu at client-area point
+    /// (x, y) — y measured top-down to match the rest of zooee — and block
+    /// until the user chooses or dismisses (#129). Returns the chosen item id,
+    /// or null on dismiss.
+    pub fn popupMenu(self: *Window, items: []const menu_mod.Item, x: f64, y: f64) ?u32 {
+        menu_selected_id = 0;
+        const m = buildMenu(items);
+        const view = msg(id, struct {}, self.ns_window, sel("contentView"), .{});
+        // AppKit view coords are bottom-up; flip y against the view height.
+        const bounds = msg(NSRect, struct {}, view, sel("bounds"), .{});
+        const loc: NSPoint = .{ .x = x, .y = bounds.h - y };
+        _ = msg(bool, struct { id, NSPoint, id }, m, sel("popUpMenuPositioningItem:atLocation:inView:"), .{ null, loc, view });
+        return if (menu_selected_id == 0) null else menu_selected_id;
     }
 
     pub fn minimise(self: *Window) void {
