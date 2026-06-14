@@ -1367,6 +1367,10 @@ pub const MetalBackend = struct {
     rclip: MetalRoundClipCompositor,
     glyphs: std.AutoHashMapUnmanaged(u16, MetalGlyphRenderer) = .empty,
     clips: std.ArrayList(ScissorRect) = .empty,
+    /// Content translation for scroll viewports (#96): added to draw coords and
+    /// pushed scissor rects so a clipped subtree pans within a viewport.
+    translate: geometry.Point = .{ .x = 0, .y = 0 },
+    translate_stack: std.ArrayList(geometry.Point) = .empty,
     /// Active group-opacity layers (#121) and the offscreen textures awaiting
     /// release once the frame's command buffer completes.
     layers: std.ArrayList(LayerState) = .empty,
@@ -1433,6 +1437,7 @@ pub const MetalBackend = struct {
         while (it.next()) |g| g.deinit();
         self.glyphs.deinit(self.gpa);
         self.clips.deinit(self.gpa);
+        self.translate_stack.deinit(self.gpa);
         for (self.layers.items) |l| release(l.layer);
         self.layers.deinit(self.gpa);
         for (self.pending_tex.items) |t| release(t);
@@ -1513,6 +1518,8 @@ pub const MetalBackend = struct {
         .stroke_path = strokePath,
         .push_clip = pushClip,
         .pop_clip = popClip,
+        .push_translate = pushTranslate,
+        .pop_translate = popTranslate,
         .push_clip_rounded = pushClipRounded,
         .push_layer = pushLayer,
         .pop_layer = popLayer,
@@ -1615,8 +1622,21 @@ pub const MetalBackend = struct {
         self.enc = null;
     }
 
-    fn drawRect(ptr: *anyopaque, rect: geometry.Rect, rs: style.RectStyle) void {
+    /// Shift a rect by the active content translation (#96).
+    fn offRect(self: *const MetalBackend, r: geometry.Rect) geometry.Rect {
+        return .{ .x = r.x + self.translate.x, .y = r.y + self.translate.y, .width = r.width, .height = r.height };
+    }
+
+    /// Copy `points` shifted by the content translation into `buf` (#96).
+    fn offPoints(self: *const MetalBackend, points: []const geometry.Point, buf: []geometry.Point) []geometry.Point {
+        const n = @min(points.len, buf.len);
+        for (0..n) |k| buf[k] = .{ .x = points[k].x + self.translate.x, .y = points[k].y + self.translate.y };
+        return buf[0..n];
+    }
+
+    fn drawRect(ptr: *anyopaque, rect_in: geometry.Rect, rs: style.RectStyle) void {
         const self = self_(ptr);
+        const rect = self.offRect(rect_in);
         const rrect: [4]f32 = .{ rect.x, rect.y, rect.width, rect.height };
         const shc: [4]f32 = if (rs.shadow) |sh| .{ sh.dx, sh.dy, sh.blur, sh.spread } else undefined;
         // Outer shadow paints behind the fill.
@@ -1663,17 +1683,19 @@ pub const MetalBackend = struct {
         gr.vh = @floatFromInt(self.height);
         const color = ts.color orelse style.Color.black;
         _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{gr.pipeline});
-        gr.drawText(self.gpa, origin.x, origin.y, text, col4(color)) catch {};
+        gr.drawText(self.gpa, origin.x + self.translate.x, origin.y + self.translate.y, text, col4(color)) catch {};
     }
 
-    fn drawImage(ptr: *anyopaque, rect: geometry.Rect, texture: *Backend.Texture) void {
+    fn drawImage(ptr: *anyopaque, rect_in: geometry.Rect, texture: *Backend.Texture) void {
         const self = self_(ptr);
+        const rect = self.offRect(rect_in);
         _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{self.image.pipeline});
         self.image.draw(rect.x, rect.y, rect.width, rect.height, @ptrCast(texture));
     }
 
-    fn drawImageUv(ptr: *anyopaque, dst: geometry.Rect, texture: *Backend.Texture, src: geometry.Rect, sampling: Backend.Sampling) void {
+    fn drawImageUv(ptr: *anyopaque, dst_in: geometry.Rect, texture: *Backend.Texture, src: geometry.Rect, sampling: Backend.Sampling) void {
         const self = self_(ptr);
+        const dst = self.offRect(dst_in);
         _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{self.image.pipeline});
         self.image.drawUv(dst.x, dst.y, dst.width, dst.height, .{ src.x, src.y, src.width, src.height }, @ptrCast(texture), sampling);
     }
@@ -1681,13 +1703,15 @@ pub const MetalBackend = struct {
     fn fillPath(ptr: *anyopaque, points: []const geometry.Point, color: style.Color) void {
         const self = self_(ptr);
         _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{self.path.pipeline});
-        self.path.fill(points, col4(color));
+        var buf: [256]geometry.Point = undefined;
+        self.path.fill(self.offPoints(points, &buf), col4(color));
     }
 
     fn strokePath(ptr: *anyopaque, points: []const geometry.Point, width: f32, color: style.Color, closed: bool) void {
         const self = self_(ptr);
         _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{self.stroke.pipeline});
-        self.stroke.stroke(points, width * 0.5, col4(color), closed);
+        var buf: [256]geometry.Point = undefined;
+        self.stroke.stroke(self.offPoints(points, &buf), width * 0.5, col4(color), closed);
     }
 
     fn applyScissor(self: *MetalBackend) void {
@@ -1706,8 +1730,9 @@ pub const MetalBackend = struct {
         _ = msg(void, struct { MTLScissorRect }, self.enc, sel("setScissorRect:"), .{r});
     }
 
-    fn pushClip(ptr: *anyopaque, rect: geometry.Rect) void {
+    fn pushClip(ptr: *anyopaque, rect_in: geometry.Rect) void {
         const self = self_(ptr);
+        const rect = self.offRect(rect_in);
         self.clips.append(self.gpa, .{
             .x0 = @intFromFloat(@round(rect.x)),
             .y0 = @intFromFloat(@round(rect.y)),
@@ -1718,11 +1743,24 @@ pub const MetalBackend = struct {
         self.applyScissor();
     }
 
+    fn pushTranslate(ptr: *anyopaque, dx: f32, dy: f32) void {
+        const self = self_(ptr);
+        self.translate_stack.append(self.gpa, self.translate) catch return;
+        self.translate.x += dx;
+        self.translate.y += dy;
+    }
+
+    fn popTranslate(ptr: *anyopaque) void {
+        const self = self_(ptr);
+        if (self.translate_stack.pop()) |prev| self.translate = prev;
+    }
+
     /// Rounded clip (#117): redirect draws into an offscreen layer (like
     /// pushLayer); popClip composites it back masked to the rounded rect.
-    fn pushClipRounded(ptr: *anyopaque, rect: geometry.Rect, radius: style.CornerRadius) void {
+    fn pushClipRounded(ptr: *anyopaque, rect_in: geometry.Rect, radius: style.CornerRadius) void {
         const self = self_(ptr);
-        if (radius.isNone()) return pushClip(ptr, rect);
+        if (radius.isNone()) return pushClip(ptr, rect_in);
+        const rect = self.offRect(rect_in);
         const layer_tex = makeTexture(self.ctx.device, self.width, self.height, MTLPixelFormatRGBA8Unorm) catch return;
         self.rounds.append(self.gpa, .{ .parent = self.target, .layer = layer_tex, .rect = rect, .radius = radius }) catch {
             release(layer_tex);

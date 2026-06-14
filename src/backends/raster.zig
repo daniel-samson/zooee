@@ -31,6 +31,11 @@ pub const RasterBackend = struct {
     /// RGBA8, row-major.
     pixels: []u8 = &.{},
     clip_stack: std.ArrayList(Clip) = .empty,
+    /// Accumulated content translation for scroll viewports (#96). Pushed clips
+    /// are stored device-absolute (offset by this); setPixel adds it; iteration
+    /// clips are returned in local space (currentClip subtracts it).
+    translate: geometry.Point = .{ .x = 0, .y = 0 },
+    translate_stack: std.ArrayList(geometry.Point) = .empty,
     /// Count of clip entries with a corner radius (#117); the per-pixel rounded
     /// test in setPixel is skipped entirely when zero.
     rounded_clips: usize = 0,
@@ -86,6 +91,10 @@ pub const RasterBackend = struct {
         fn isEmpty(self: IRect) bool {
             return self.x1 <= self.x0 or self.y1 <= self.y0;
         }
+
+        fn offset(self: IRect, dx: i32, dy: i32) IRect {
+            return .{ .x0 = self.x0 + dx, .y0 = self.y0 + dy, .x1 = self.x1 + dx, .y1 = self.y1 + dy };
+        }
     };
 
     /// A clip-stack entry: an integer bounds rect plus, for rounded clips
@@ -104,6 +113,7 @@ pub const RasterBackend = struct {
         for (self.layers.items) |layer| self.gpa.free(layer.parent);
         self.layers.deinit(self.gpa);
         self.clip_stack.deinit(self.gpa);
+        self.translate_stack.deinit(self.gpa);
         var it = self.textures.valueIterator();
         while (it.next()) |tex| self.gpa.free(tex.rgba);
         self.textures.deinit(self.gpa);
@@ -144,6 +154,8 @@ pub const RasterBackend = struct {
         .stroke_path = strokePath,
         .push_clip = pushClip,
         .pop_clip = popClip,
+        .push_translate = pushTranslate,
+        .pop_translate = popTranslate,
         .push_clip_rounded = pushClipRounded,
         .push_layer = pushLayer,
         .pop_layer = popLayer,
@@ -162,7 +174,18 @@ pub const RasterBackend = struct {
         return .{ .r = self.pixels[i], .g = self.pixels[i + 1], .b = self.pixels[i + 2], .a = self.pixels[i + 3] };
     }
 
-    fn setPixel(self: *RasterBackend, x: i32, y: i32, color: Color) void {
+    /// Integer content translation (#96): scroll offsets are pixel-snapped.
+    fn transX(self: *const RasterBackend) i32 {
+        return @intFromFloat(@round(self.translate.x));
+    }
+    fn transY(self: *const RasterBackend) i32 {
+        return @intFromFloat(@round(self.translate.y));
+    }
+
+    fn setPixel(self: *RasterBackend, lx: i32, ly: i32, color: Color) void {
+        // Local → device: shift by the accumulated content translation.
+        const x = lx + self.transX();
+        const y = ly + self.transY();
         if (self.rounded_clips > 0) {
             const px = @as(f32, @floatFromInt(x)) + 0.5;
             const py = @as(f32, @floatFromInt(y)) + 0.5;
@@ -193,10 +216,13 @@ pub const RasterBackend = struct {
         return .{ .x0 = 0, .y0 = 0, .x1 = @intCast(self.width), .y1 = @intCast(self.height) };
     }
 
+    /// The active clip in LOCAL coordinates: the device-absolute clip stack
+    /// (intersected with the screen) shifted back by the content translation,
+    /// so primitives can iterate in their own coordinate space (#96).
     fn currentClip(self: *const RasterBackend) IRect {
         var clip = self.screenRect();
         for (self.clip_stack.items) |c| clip = clip.intersect(c.bounds);
-        return clip;
+        return clip.offset(-self.transX(), -self.transY());
     }
 
     fn beginFrame(ptr: *anyopaque, viewport: geometry.Size) Backend.Error!void {
@@ -224,6 +250,7 @@ pub const RasterBackend = struct {
         const self = self_(ptr);
         std.debug.assert(self.in_frame);
         std.debug.assert(self.clip_stack.items.len == 0);
+        std.debug.assert(self.translate_stack.items.len == 0);
         std.debug.assert(self.layers.items.len == 0);
         self.in_frame = false;
     }
@@ -567,19 +594,26 @@ pub const RasterBackend = struct {
         return @intFromFloat(@round(top + (bot - top) * fy));
     }
 
+    /// Shift a local rect into device space by the content translation (#96).
+    fn deviceRect(self: *const RasterBackend, rect: Rect) Rect {
+        return .{ .x = rect.x + self.translate.x, .y = rect.y + self.translate.y, .width = rect.width, .height = rect.height };
+    }
+
     fn pushClip(ptr: *anyopaque, rect: Rect) void {
         const self = self_(ptr);
-        self.clip_stack.append(self.gpa, .{ .bounds = IRect.fromRect(rect) }) catch {};
+        self.clip_stack.append(self.gpa, .{ .bounds = IRect.fromRect(self.deviceRect(rect)) }) catch {};
     }
 
     /// Rounded clip (#117): the bounds rect still bounds iteration; the
-    /// per-corner radii are enforced per-pixel in setPixel.
+    /// per-corner radii are enforced per-pixel in setPixel. Stored device-
+    /// absolute so it composes with the content translation (#96).
     fn pushClipRounded(ptr: *anyopaque, rect: Rect, radius: style.CornerRadius) void {
         const self = self_(ptr);
         if (radius.isNone()) return pushClip(ptr, rect);
+        const dr = self.deviceRect(rect);
         self.clip_stack.append(self.gpa, .{
-            .bounds = IRect.fromRect(rect),
-            .round = .{ .rect = rect, .radius = radius },
+            .bounds = IRect.fromRect(dr),
+            .round = .{ .rect = dr, .radius = radius },
         }) catch return;
         self.rounded_clips += 1;
     }
@@ -589,6 +623,19 @@ pub const RasterBackend = struct {
         std.debug.assert(self.clip_stack.items.len > 0);
         const c = self.clip_stack.pop().?;
         if (c.round != null) self.rounded_clips -= 1;
+    }
+
+    fn pushTranslate(ptr: *anyopaque, dx: f32, dy: f32) void {
+        const self = self_(ptr);
+        self.translate_stack.append(self.gpa, self.translate) catch return;
+        self.translate.x += dx;
+        self.translate.y += dy;
+    }
+
+    fn popTranslate(ptr: *anyopaque) void {
+        const self = self_(ptr);
+        std.debug.assert(self.translate_stack.items.len > 0);
+        self.translate = self.translate_stack.pop().?;
     }
 
     /// Redirect draws into a fresh transparent buffer (#121). The buffer is

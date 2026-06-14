@@ -2286,6 +2286,10 @@ pub const D3dBackend = struct {
     font: ?ttf.Font = null,
     glyphs: std.AutoHashMapUnmanaged(u32, D3dGlyphRenderer) = .empty,
     clips: std.ArrayList(ScissorRect) = .empty,
+    /// Content translation for scroll viewports (#96): added to draw coords and
+    /// pushed scissor rects so a clipped subtree pans within a viewport.
+    translate: geometry.Point = .{ .x = 0, .y = 0 },
+    translate_stack: std.ArrayList(geometry.Point) = .empty,
     /// The render target current draws go to: the frame RT, or a layer's RT
     /// while a group-opacity layer (#121) is active.
     cur_rtv: ?*IRtv = null,
@@ -2369,6 +2373,7 @@ pub const D3dBackend = struct {
         while (it.next()) |g| g.deinit();
         self.glyphs.deinit(self.gpa);
         self.clips.deinit(self.gpa);
+        self.translate_stack.deinit(self.gpa);
         for (self.layers.items) |l| {
             release(l.srv);
             release(l.rtv);
@@ -2417,6 +2422,8 @@ pub const D3dBackend = struct {
         .fill_path = fillPath,
         .stroke_path = strokePath,
         .push_clip = pushClip,
+        .push_translate = pushTranslate,
+        .pop_translate = popTranslate,
         .pop_clip = popClip,
         .push_clip_rounded = pushClipRounded,
         .push_layer = pushLayer,
@@ -2452,8 +2459,21 @@ pub const D3dBackend = struct {
         _ = self_(ptr);
     }
 
-    fn drawRect(ptr: *anyopaque, rect: geometry.Rect, rs: style.RectStyle) void {
+    /// Shift a rect by the active content translation (#96).
+    fn offRect(self: *const D3dBackend, r: geometry.Rect) geometry.Rect {
+        return .{ .x = r.x + self.translate.x, .y = r.y + self.translate.y, .width = r.width, .height = r.height };
+    }
+
+    /// Copy `points` shifted by the content translation into `buf` (#96).
+    fn offPoints(self: *const D3dBackend, points: []const geometry.Point, buf: []geometry.Point) []geometry.Point {
+        const n = @min(points.len, buf.len);
+        for (0..n) |k| buf[k] = .{ .x = points[k].x + self.translate.x, .y = points[k].y + self.translate.y };
+        return buf[0..n];
+    }
+
+    fn drawRect(ptr: *anyopaque, rect_in: geometry.Rect, rs: style.RectStyle) void {
         const self = self_(ptr);
+        const rect = self.offRect(rect_in);
         const w: f32 = @floatFromInt(self.off.width);
         const h: f32 = @floatFromInt(self.off.height);
         const rrect: [4]f32 = .{ rect.x, rect.y, rect.width, rect.height };
@@ -2494,19 +2514,21 @@ pub const D3dBackend = struct {
         const w: f32 = @floatFromInt(self.off.width);
         const h: f32 = @floatFromInt(self.off.height);
         const color = ts.color orelse style.Color.black;
-        gr.drawText(self.gpa, self.target(), w, h, origin.x, origin.y, text, col(color)) catch {};
+        gr.drawText(self.gpa, self.target(), w, h, origin.x + self.translate.x, origin.y + self.translate.y, text, col(color)) catch {};
     }
 
-    fn drawImage(ptr: *anyopaque, rect: geometry.Rect, texture: *Backend.Texture) void {
+    fn drawImage(ptr: *anyopaque, rect_in: geometry.Rect, texture: *Backend.Texture) void {
         const self = self_(ptr);
+        const rect = self.offRect(rect_in);
         const w: f32 = @floatFromInt(self.off.width);
         const h: f32 = @floatFromInt(self.off.height);
         const srv: *ISrv = @ptrCast(@alignCast(texture));
         self.image.draw(self.target(), w, h, rect, srv) catch {};
     }
 
-    fn drawImageUv(ptr: *anyopaque, dst: geometry.Rect, texture: *Backend.Texture, src: geometry.Rect, sampling: Backend.Sampling) void {
+    fn drawImageUv(ptr: *anyopaque, dst_in: geometry.Rect, texture: *Backend.Texture, src: geometry.Rect, sampling: Backend.Sampling) void {
         const self = self_(ptr);
+        const dst = self.offRect(dst_in);
         const w: f32 = @floatFromInt(self.off.width);
         const h: f32 = @floatFromInt(self.off.height);
         const srv: *ISrv = @ptrCast(@alignCast(texture));
@@ -2517,14 +2539,16 @@ pub const D3dBackend = struct {
         const self = self_(ptr);
         const w: f32 = @floatFromInt(self.off.width);
         const h: f32 = @floatFromInt(self.off.height);
-        self.path.fill(self.target(), w, h, points, col(color)) catch {};
+        var buf: [256]geometry.Point = undefined;
+        self.path.fill(self.target(), w, h, self.offPoints(points, &buf), col(color)) catch {};
     }
 
     fn strokePath(ptr: *anyopaque, points: []const geometry.Point, width: f32, color: style.Color, closed: bool) void {
         const self = self_(ptr);
         const w: f32 = @floatFromInt(self.off.width);
         const h: f32 = @floatFromInt(self.off.height);
-        self.stroke.stroke(self.target(), w, h, points, width * 0.5, col(color), closed) catch {};
+        var buf: [256]geometry.Point = undefined;
+        self.stroke.stroke(self.target(), w, h, self.offPoints(points, &buf), width * 0.5, col(color), closed) catch {};
     }
 
     fn applyScissor(self: *D3dBackend) void {
@@ -2540,8 +2564,9 @@ pub const D3dBackend = struct {
         self.off.context.vtbl.RSSetScissorRects(self.off.context, 1, &r);
     }
 
-    fn pushClip(ptr: *anyopaque, rect: geometry.Rect) void {
+    fn pushClip(ptr: *anyopaque, rect_in: geometry.Rect) void {
         const self = self_(ptr);
+        const rect = self.offRect(rect_in);
         self.clips.append(self.gpa, .{
             .x0 = @intFromFloat(@round(rect.x)),
             .y0 = @intFromFloat(@round(rect.y)),
@@ -2552,11 +2577,24 @@ pub const D3dBackend = struct {
         self.applyScissor();
     }
 
+    fn pushTranslate(ptr: *anyopaque, dx: f32, dy: f32) void {
+        const self = self_(ptr);
+        self.translate_stack.append(self.gpa, self.translate) catch return;
+        self.translate.x += dx;
+        self.translate.y += dy;
+    }
+
+    fn popTranslate(ptr: *anyopaque) void {
+        const self = self_(ptr);
+        if (self.translate_stack.pop()) |prev| self.translate = prev;
+    }
+
     /// Rounded clip (#117): redirect draws into an offscreen layer (like
     /// pushLayer); popClip composites it back masked to the rounded rect.
-    fn pushClipRounded(ptr: *anyopaque, rect: geometry.Rect, radius: style.CornerRadius) void {
+    fn pushClipRounded(ptr: *anyopaque, rect_in: geometry.Rect, radius: style.CornerRadius) void {
         const self = self_(ptr);
-        if (radius.isNone()) return pushClip(ptr, rect);
+        if (radius.isNone()) return pushClip(ptr, rect_in);
+        const rect = self.offRect(rect_in);
         const l = self.createLayer() catch return;
         self.rounds.append(self.gpa, .{ .parent_rtv = self.target(), .tex = l.tex, .rtv = l.rtv, .srv = l.srv, .rect = rect, .radius = radius }) catch {
             release(l.srv);

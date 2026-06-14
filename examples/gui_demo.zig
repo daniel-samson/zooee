@@ -271,6 +271,39 @@ const Demo = struct {
             .image_h = 8,
             .image_nine = .{ .l = 2, .t = 2, .r = 2, .b = 2 },
         };
+        // Scroll viewport (#96): a tall column of rows clipped to a short box
+        // and panned down — content above the fold is clipped, the rest visible.
+        const row_count = 8;
+        const scroll_rows = try arena.alloc(L.Element, row_count);
+        const scroll_row_ptrs = try arena.alloc(*const L.Element, row_count);
+        const row_colors = [_]Color{
+            Color.rgb(230, 120, 120), Color.rgb(230, 175, 110), Color.rgb(220, 215, 110),
+            Color.rgb(130, 205, 130), Color.rgb(110, 185, 220), Color.rgb(140, 140, 225),
+            Color.rgb(190, 130, 215), Color.rgb(225, 130, 180),
+        };
+        for (0..row_count) |ri| {
+            scroll_rows[ri] = .{
+                .height = 22 * scale,
+                .margin = .{ .bottom = 4 * scale },
+                .rect_style = .{ .background = row_colors[ri], .corner_radius = .all(4 * scale) },
+            };
+            scroll_row_ptrs[ri] = &scroll_rows[ri];
+        }
+        const scroll_content = try arena.create(L.Element);
+        scroll_content.* = .{
+            .direction = .column,
+            .children = scroll_row_ptrs,
+        };
+        const scroller = try arena.create(L.Element);
+        scroller.* = .{
+            .height = 70 * scale,
+            .padding = .all(4 * scale),
+            .margin = .{ .bottom = 12 * scale },
+            .rect_style = .{ .background = Color.rgb(245, 245, 248), .border = .all(1 * scale, Color.rgb(150, 150, 160)), .corner_radius = .all(6 * scale) },
+            .scroll = true,
+            .scroll_y = 40 * scale,
+            .children = try arena.dupe(*const L.Element, &.{scroll_content}),
+        };
         // Unicode (#114): accents + em-dash exercise the dynamic glyph atlas.
         const uni = try arena.create(L.Element);
         uni.* = .{
@@ -287,7 +320,7 @@ const Demo = struct {
                 .border = .all(2 * scale, Color.rgb(120, 120, 130)),
                 .corner_radius = .all(10 * scale),
             },
-            .children = try arena.dupe(*const L.Element, &.{ grad_bar, swatches, card_wrap, icons, button, uni }),
+            .children = try arena.dupe(*const L.Element, &.{ grad_bar, swatches, card_wrap, icons, button, scroller, uni }),
         };
         return panel;
     }

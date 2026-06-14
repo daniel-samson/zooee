@@ -103,6 +103,15 @@ pub const Element = struct {
     /// Clip this element's subtree to a rounded rect with these per-corner
     /// radii (#117); the element's border-box is the clip rect.
     clip_radius: ?style.CornerRadius = null,
+    /// Scroll viewport (#96): clip the subtree to this element's border-box and
+    /// translate its children by `(-scroll_x, -scroll_y)`, so content taller or
+    /// wider than the box pans within it. Children lay out at their natural
+    /// positions; the offset just shifts what's visible.
+    scroll_x: f32 = 0,
+    scroll_y: f32 = 0,
+    /// True if this element is a scroll viewport (enables the clip+translate
+    /// even at offset 0, and marks it for hit-testing/wheel routing).
+    scroll: bool = false,
 
     // Interaction messages (#4): dispatched by the app loop when the
     // pointer hits this element. Values are app-defined (enum ints).
@@ -191,7 +200,19 @@ fn renderNode(b: Backend, placements: []const Placement, i: *usize) void {
         const inner = contentBox(el, p.rect);
         b.drawText(inner.origin(), t, el.text_style);
     }
+
+    // Scroll viewport (#96): clip children to the content box and pan them by
+    // the scroll offset. The element's own frame above is drawn unscrolled.
+    const scrolling = el.scroll or el.scroll_x != 0 or el.scroll_y != 0;
+    if (scrolling) {
+        b.pushClip(contentBox(el, p.rect));
+        b.pushTranslate(-el.scroll_x, -el.scroll_y);
+    }
     for (el.children) |_| renderNode(b, placements, i);
+    if (scrolling) {
+        b.popTranslate();
+        b.popClip();
+    }
 
     if (clipped) b.popClip();
     if (layered) b.popLayer();

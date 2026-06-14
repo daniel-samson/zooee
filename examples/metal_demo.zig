@@ -188,6 +188,9 @@ pub fn main(init: std.process.Init) !void {
         // 9-slice (#122): bordered button stretched; nearest patches (exact).
         const nine_slice_scene: zooee.fixtures.Scene = .{ .name = "nine_slice", .width = 14, .height = 7, .draw = zooee.fixtures.drawNineSlice };
         if (!(try compareScene(gpa, out, &mb, nine_slice_scene, false))) backend_ok = false;
+        // Scroll viewport (#96): clip + content translation; hard edges (exact).
+        const scroll_scene: zooee.fixtures.Scene = .{ .name = "scroll", .width = 12, .height = 8, .draw = zooee.fixtures.drawScroll };
+        if (!(try compareScene(gpa, out, &mb, scroll_scene, false))) backend_ok = false;
         // Rounded clip (#117): content masked to a rounded rect must match
         // raster's hard-edged per-pixel clip (corners cut, 0.03).
         const rounded_clip_scene: zooee.fixtures.Scene = .{ .name = "rounded_clip", .width = 10, .height = 10, .draw = zooee.fixtures.drawRoundedClip };
