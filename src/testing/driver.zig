@@ -151,6 +151,32 @@ pub fn Driver(comptime Model: type, comptime Msg: type) type {
             return self.send(.{ .pointer_enter = .{ .position = .{ .x = x, .y = y } } });
         }
 
+        // --- Drag-and-drop (#128): fake the OS drag sequence headlessly ----
+
+        pub fn dragEnter(self: *Self, x: f32, y: f32, data: event_mod.DragData) !Command {
+            return self.send(.{ .drag_enter = .{ .position = .{ .x = x, .y = y }, .data = data } });
+        }
+
+        pub fn dragOver(self: *Self, x: f32, y: f32, data: event_mod.DragData) !Command {
+            return self.send(.{ .drag_over = .{ .position = .{ .x = x, .y = y }, .data = data } });
+        }
+
+        pub fn dragLeave(self: *Self) !Command {
+            return self.send(.{ .drag_leave = .{ .position = .{ .x = 0, .y = 0 } } });
+        }
+
+        pub fn drop(self: *Self, x: f32, y: f32, data: event_mod.DragData) !Command {
+            return self.send(.{ .drop = .{ .position = .{ .x = x, .y = y }, .data = data } });
+        }
+
+        /// Replay a full enter→over→drop sequence with one payload — the
+        /// canned native-DnD flow apps are tested against (#128/#130).
+        pub fn dragDrop(self: *Self, x: f32, y: f32, data: event_mod.DragData) !Command {
+            _ = try self.dragEnter(x, y, data);
+            _ = try self.dragOver(x, y, data);
+            return self.drop(x, y, data);
+        }
+
         pub fn pointerLeave(self: *Self, x: f32, y: f32) !Command {
             return self.send(.{ .pointer_leave = .{ .position = .{ .x = x, .y = y } } });
         }
@@ -205,6 +231,8 @@ const Toggle = struct {
     entered: bool = false,
     last_mods: event_mod.Modifiers = .{},
     last_count: u8 = 0,
+    drag_active: bool = false,
+    dropped_files: usize = 0,
 
     const Msg = enum { tapped };
 
@@ -240,6 +268,19 @@ const Toggle = struct {
             .key_up => self.key_ups += 1,
             .pointer_enter => self.entered = true,
             .pointer_leave => self.entered = false,
+            .drag_enter, .drag_over => {
+                self.drag_active = true;
+                return .redraw;
+            },
+            .drag_leave => {
+                self.drag_active = false;
+                return .redraw;
+            },
+            .drop => |dd| {
+                self.drag_active = false;
+                if (dd.data == .files) self.dropped_files = dd.data.files.len;
+                return .redraw;
+            },
             .pointer_down => |p| {
                 self.last_mods = p.mods;
                 self.last_count = p.click_count;
@@ -344,6 +385,20 @@ test "modifiers and click-count reach the model (#127)" {
     try testing.expect(model.last_mods.shift and model.last_mods.super);
     _ = try d.clickN(55, 35, 2);
     try testing.expectEqual(@as(u8, 2), model.last_count);
+}
+
+test "drag enter→over→drop delivers the payload, leave cancels (#128)" {
+    var model: Toggle = .{};
+    var d = try Driver(Toggle, Toggle.Msg).init(testing.allocator, &model, .{ .width = 60, .height = 40 });
+    defer d.deinit();
+    const paths = [_][]const u8{ "/a/one.png", "/a/two.png" };
+    _ = try d.dragEnter(30, 20, .unknown);
+    try testing.expect(model.drag_active); // hover-accept feedback on
+    _ = try d.dragLeave();
+    try testing.expect(!model.drag_active); // cancel clears it
+    _ = try d.dragDrop(30, 20, .{ .files = &paths });
+    try testing.expect(!model.drag_active);
+    try testing.expectEqual(@as(usize, 2), model.dropped_files);
 }
 
 test "resize relays out to the new viewport" {
