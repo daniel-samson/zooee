@@ -716,17 +716,43 @@ fn runWindowD3d(
             }
             frame.draw();
             dirty = false;
-            // GPU device-lost (#25): present reported the device was removed/
-            // reset. Recreating the whole D3D device + atlas + textures is a
-            // follow-up; for now exit the GPU loop cleanly rather than spin on
-            // blank presents (the app can relaunch / fall back to raster).
-            if (swapchain.isLost()) break :loop;
+            // GPU device-lost recovery (#25): present reported the device was
+            // removed/reset (driver upgrade, TDR, GPU eviction). Rebuild the
+            // whole D3D device + swapchain and every device-bound resource
+            // (backend renderers + glyph atlas + textures), then redraw — the
+            // app/model code never sees it. If the rebuild itself fails (e.g.
+            // the GPU is gone for good), exit the GPU loop cleanly.
+            if (swapchain.isLost()) {
+                d3dRecover(&db, swapchain, theme, gpa, io) catch break :loop;
+                dirty = true;
+            }
         }
 
         // Re-pace if the window moved to a different-refresh monitor (#27).
         if (fl.shouldRetune()) fl.retune(platform.refreshHz(window));
         try fl.pace(io);
     }
+}
+
+/// GPU device-lost recovery (#25): rebuild the D3D device + swapchain and the
+/// whole backend (renderers + glyph atlas + textures) in place, on the same
+/// window, then reload the system font. `db` is mutated in place so the
+/// Backend interface pointer the loop holds stays valid. Errors propagate so
+/// the caller can exit the GPU loop (the GPU is gone for good / no fallback).
+fn d3dRecover(
+    db: *d3d_backend.D3dBackend,
+    swapchain: anytype,
+    theme: Theme,
+    gpa: std.mem.Allocator,
+    io: std.Io,
+) !void {
+    std.log.scoped(.d3d11).warn("device lost — recovering", .{});
+    try swapchain.recreate(); // new device + context + swapchain (same window)
+    db.deinit(); // release renderers/atlas/textures bound to the dead device
+    db.* = try d3d_backend.D3dBackend.initOnDevice(gpa, swapchain.device, swapchain.context);
+    db.clear_color = theme.clearRgba();
+    if (system_font.loadFontSet(gpa, io)) |set| db.setFontSet(set);
+    std.log.scoped(.d3d11).info("device recovered", .{});
 }
 
 /// Minimal P6 (binary RGB) PPM writer for the ZOOEE_CAPTURE hook on Windows
