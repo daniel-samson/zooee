@@ -157,6 +157,30 @@ pub fn drawNineSlice(b: Backend, s: f32) !void {
     b.drawImageNine(.{ .x = 1 * s, .y = 1 * s, .width = 12 * s, .height = 5 * s }, tex, 8, 8, .{ .l = 2, .t = 2, .r = 2, .b = 2 });
 }
 
+/// Scroll viewport (#96): a tall list of colored rows inside a short clipped
+/// window, panned by a scroll offset. The clip cuts the rows that fall outside
+/// the viewport (including partially-visible top/bottom rows); the translate
+/// pans the content. Exercises clip+translate composition. Not in `all`.
+pub fn drawScroll(b: Backend, s: f32) !void {
+    const colors = [_]Color{
+        Color.rgb(220, 60, 60),  Color.rgb(220, 150, 40), Color.rgb(220, 210, 40),
+        Color.rgb(60, 190, 80),  Color.rgb(40, 160, 210), Color.rgb(70, 80, 220),
+        Color.rgb(160, 70, 200), Color.rgb(210, 70, 150),
+    };
+    // Viewport: a 10×6 window with a 1px frame, scrolled down by 3 units.
+    const vp: geometry.Rect = .{ .x = 1 * s, .y = 1 * s, .width = 10 * s, .height = 6 * s };
+    b.drawRect(vp, .{ .border = .all(1, Color.rgb(80, 80, 80)) });
+    b.pushClip(.{ .x = 1 * s + s, .y = 1 * s + s, .width = 10 * s - 2 * s, .height = 6 * s - 2 * s });
+    b.pushTranslate(0, -3 * s);
+    var i: usize = 0;
+    while (i < colors.len) : (i += 1) {
+        const y = 1 * s + s + @as(f32, @floatFromInt(i)) * (2 * s);
+        b.drawRect(.{ .x = 1 * s + s, .y = y, .width = 8 * s, .height = 1.6 * s }, .{ .background = colors[i] });
+    }
+    b.popTranslate();
+    b.popClip();
+}
+
 /// Real text rendering (#10): glyphs on raster (font set by the
 /// harness), plain characters on the terminal.
 fn drawHelloText(b: Backend, s: f32) !void {
