@@ -141,6 +141,15 @@ extern "shell32" fn DragAcceptFiles(HWND, win.BOOL) callconv(WINAPI) void;
 extern "shell32" fn DragQueryFileW(?*anyopaque, u32, ?[*]u16, u32) callconv(WINAPI) u32;
 extern "shell32" fn DragQueryPoint(?*anyopaque, *POINT) callconv(WINAPI) win.BOOL;
 extern "shell32" fn DragFinish(?*anyopaque) callconv(WINAPI) void;
+// IME composition (#213).
+const WM_IME_STARTCOMPOSITION = 0x010D;
+const WM_IME_ENDCOMPOSITION = 0x010E;
+const WM_IME_COMPOSITION = 0x010F;
+const GCS_COMPSTR: usize = 0x0008;
+const GCS_RESULTSTR: usize = 0x0800;
+extern "imm32" fn ImmGetContext(HWND) callconv(WINAPI) ?*anyopaque;
+extern "imm32" fn ImmReleaseContext(HWND, ?*anyopaque) callconv(WINAPI) win.BOOL;
+extern "imm32" fn ImmGetCompositionStringW(?*anyopaque, u32, ?*anyopaque, u32) callconv(WINAPI) i32;
 
 /// System clipboard backed by the Win32 clipboard (#209). Implements the core
 /// `Clipboard` interface, mirroring the macOS `SystemClipboard`. Cross-app
@@ -307,6 +316,18 @@ pub const Window = struct {
             .wait => IDC_WAIT,
         };
         _ = SetCursor(LoadCursorW(null, @ptrFromInt(self.cursor_idc)));
+    }
+
+    /// Read an IME composition/result string (UTF-16→UTF-8) into the per-frame
+    /// arena (#213). `index` is GCS_COMPSTR or GCS_RESULTSTR.
+    fn imeString(self: *Window, himc: ?*anyopaque, index: u32) ?[]const u8 {
+        const bytes = ImmGetCompositionStringW(himc, index, null, 0);
+        if (bytes <= 0) return null;
+        const a = self.drop_arena.allocator();
+        const wlen: usize = @as(usize, @intCast(bytes)) / 2;
+        const wbuf = a.alloc(u16, wlen) catch return null;
+        _ = ImmGetCompositionStringW(himc, index, wbuf.ptr, @intCast(bytes));
+        return std.unicode.utf16LeToUtf8Alloc(a, wbuf[0..wlen]) catch null;
     }
 
     /// Register the live-resize redraw callback (mirrors macos/x11 setRedraw).
@@ -603,6 +624,31 @@ pub const Window = struct {
                 if (ch >= 0x20 and ch != 0x7F) {
                     self.queue.append(self.gpa, .{ .text = .{ .codepoint = ch } }) catch {};
                 }
+            },
+            WM_IME_STARTCOMPOSITION => {
+                self.queue.append(self.gpa, .{ .composition = .{ .phase = .start } }) catch {};
+                return DefWindowProcW(hwnd, msg, wparam, lparam); // keep the default IME UI
+            },
+            WM_IME_COMPOSITION => {
+                // Pre-edit (GCS_COMPSTR → update) and/or commit (GCS_RESULTSTR).
+                const himc = ImmGetContext(hwnd);
+                defer _ = ImmReleaseContext(hwnd, himc);
+                const flags: usize = @bitCast(lparam);
+                if (flags & GCS_RESULTSTR != 0) {
+                    if (self.imeString(himc, @intCast(GCS_RESULTSTR))) |t| {
+                        self.queue.append(self.gpa, .{ .composition = .{ .phase = .commit, .text = t } }) catch {};
+                    }
+                }
+                if (flags & GCS_COMPSTR != 0) {
+                    if (self.imeString(himc, @intCast(GCS_COMPSTR))) |t| {
+                        self.queue.append(self.gpa, .{ .composition = .{ .phase = .update, .text = t, .caret = t.len } }) catch {};
+                    }
+                }
+                return DefWindowProcW(hwnd, msg, wparam, lparam);
+            },
+            WM_IME_ENDCOMPOSITION => {
+                self.queue.append(self.gpa, .{ .composition = .{ .phase = .cancel } }) catch {};
+                return DefWindowProcW(hwnd, msg, wparam, lparam);
             },
             // Swallow background erase: the renderer owns every client pixel.
             // Without this the OS would erase (white/gray) over the swapchain.
