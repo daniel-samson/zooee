@@ -61,6 +61,7 @@ pub const Tty = struct {
         raw.cc[@intFromEnum(posix.V.MIN)] = 0;
         raw.cc[@intFromEnum(posix.V.TIME)] = 0;
         try posix.tcsetattr(self.fd, .NOW, raw);
+        installSignalHandlers(); // restore on SIGINT/SIGTERM/SIGHUP (#25)
     }
 
     pub fn deinit(self: *Tty) void {
@@ -122,6 +123,33 @@ pub fn restoreNow() void {
         const out: []const u8 = "\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[0m\x1b[?25h\x1b[?1049l";
         _ = posix.system.write(posix.STDOUT_FILENO, out.ptr, out.len);
     }
+}
+
+/// Restore the terminal then die with the signal's default disposition (#25),
+/// so a `kill`/SIGHUP/SIGTERM doesn't leave the shell in raw + alt-screen mode.
+/// Async-signal-safe: restoreNow uses only raw syscalls.
+fn onTerminate(_: c_int) callconv(.c) void {
+    restoreNow();
+    std.c._exit(130); // shell is restored; raw _exit (async-signal-safe)
+}
+
+/// Install SIGINT/SIGTERM/SIGHUP handlers that restore the terminal (#25).
+/// Ctrl-C in raw mode arrives as a byte event (ISIG off), so these fire for
+/// external `kill`s and hangups. Called from `enableRaw`. The handler fn is
+/// `@ptrCast` because the signal-number param type is platform-specific
+/// (c_int on Linux, an enum in macOS's libc bindings).
+pub fn installSignalHandlers() void {
+    const act: posix.Sigaction = .{ .handler = .{ .handler = @ptrCast(&onTerminate) }, .mask = std.mem.zeroes(posix.sigset_t), .flags = 0 };
+    posix.sigaction(posix.SIG.INT, &act, null);
+    posix.sigaction(posix.SIG.TERM, &act, null);
+    posix.sigaction(posix.SIG.HUP, &act, null);
+}
+
+test "restoreNow is idempotent with no saved terminal" {
+    saved_termios = null;
+    restoreNow(); // must not touch the tty / crash when nothing was entered
+    restoreNow();
+    try std.testing.expect(saved_termios == null);
 }
 
 pub const vt_input = @import("vt_input.zig");
