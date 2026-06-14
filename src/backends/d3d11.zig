@@ -2526,6 +2526,21 @@ pub const D3dBackend = struct {
         const h: f32 = @floatFromInt(self.off.height);
         const color = ts.color orelse style.Color.black;
         gr.drawText(self.gpa, self.target(), w, h, origin.x + self.translate.x, origin.y + self.translate.y, text, col(color), .{ .bold = ts.bold, .italic = ts.italic }) catch {};
+        // Text decorations (#191): a filled line, same geometry as raster.
+        if (ts.underline or ts.strikethrough) {
+            const rw = self.fonts.?.measure(text, ts.size, .{ .bold = ts.bold, .italic = ts.italic }).width;
+            const bx = origin.x + self.translate.x;
+            const baseline = origin.y + self.translate.y + gr.atlas.ascent;
+            const c = col(color);
+            if (ts.underline) {
+                const r = style.TextDecoration.underlineRect(bx, baseline, rw, ts.size);
+                self.rect.fillRect(self.target(), w, h, r.x, r.y, r.width, r.height, c) catch {};
+            }
+            if (ts.strikethrough) {
+                const r = style.TextDecoration.strikeRect(bx, baseline, rw, ts.size);
+                self.rect.fillRect(self.target(), w, h, r.x, r.y, r.width, r.height, c) catch {};
+            }
+        }
     }
 
     fn drawImage(ptr: *anyopaque, rect_in: geometry.Rect, texture: *Backend.Texture) void {

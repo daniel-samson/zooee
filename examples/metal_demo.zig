@@ -196,6 +196,9 @@ pub fn main(init: std.process.Init) !void {
         // Text layout (#115): wrapped paragraph + aligned line (text AA, 0.05).
         const text_layout_scene: zooee.fixtures.Scene = .{ .name = "text_layout", .width = 24, .height = 12, .draw = zooee.fixtures.drawTextLayout };
         if (!(try compareScene(gpa, out, &mb, text_layout_scene, true))) backend_ok = false;
+        // Text decorations (#191): underline + strikethrough (text AA, 0.05).
+        const text_deco_scene: zooee.fixtures.Scene = .{ .name = "text_decoration", .width = 18, .height = 9, .draw = zooee.fixtures.drawTextDecoration };
+        if (!(try compareScene(gpa, out, &mb, text_deco_scene, true))) backend_ok = false;
         // Rounded clip (#117): content masked to a rounded rect must match
         // raster's hard-edged per-pixel clip (corners cut, 0.03).
         const rounded_clip_scene: zooee.fixtures.Scene = .{ .name = "rounded_clip", .width = 10, .height = 10, .draw = zooee.fixtures.drawRoundedClip };

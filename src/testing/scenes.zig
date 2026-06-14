@@ -219,6 +219,15 @@ pub fn drawTextLayout(b: Backend, s: f32) !void {
     }
 }
 
+/// Text decorations (#191): underlined and struck-through text. The glyphs are
+/// AA; the decoration lines are hard-edged rects positioned by the shared
+/// formula, so the GPU backends match the raster reference within the text
+/// tolerance. Not in `all`.
+pub fn drawTextDecoration(b: Backend, s: f32) !void {
+    b.drawText(.{ .x = 1 * s, .y = 1 * s }, "Under", .{ .size = 2.5 * s, .underline = true, .color = Color.rgb(30, 30, 40) });
+    b.drawText(.{ .x = 1 * s, .y = 5 * s }, "Strike", .{ .size = 2.5 * s, .strikethrough = true, .color = Color.rgb(180, 40, 40) });
+}
+
 /// Real text rendering (#10): glyphs on raster (font set by the
 /// harness), plain characters on the terminal.
 fn drawHelloText(b: Backend, s: f32) !void {
