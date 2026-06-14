@@ -28,6 +28,9 @@ pub const fixtures = @import("testing/scenes.zig");
 /// OFL test font (tests/goldens only — runtime apps use OS fonts, #10).
 pub const test_font_ttf = @embedFile("poppins");
 pub const app_fixtures = @import("testing/app_fixture.zig");
+/// Synthetic-event test harness (#130): drive a Model with scripted events.
+pub const Driver = @import("testing/driver.zig").Driver;
+pub const driver = @import("testing/driver.zig");
 
 pub const event = @import("event.zig");
 pub const anim = @import("anim.zig");

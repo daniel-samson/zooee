@@ -645,6 +645,19 @@ pub fn renderOffscreen(
     return result;
 }
 
+/// Drive a Model with one event exactly as the production loops do — the
+/// seam the synthetic-event harness (#130) uses to self-verify interaction
+/// without a real window. `placements` is the current layout result.
+pub fn dispatchEvent(
+    comptime Model: type,
+    comptime Msg: type,
+    model: *Model,
+    ev: event_mod.Event,
+    placements: []const layout_mod.Placement,
+) Command {
+    return dispatch(Model, Msg, model, ev, placements);
+}
+
 /// Map one event to a Command, dispatching interaction messages through
 /// the model. Shared by the terminal and GUI loops.
 fn dispatch(
