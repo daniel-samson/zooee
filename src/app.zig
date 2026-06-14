@@ -23,6 +23,8 @@ const raster_mod = @import("backends/raster.zig");
 const system_font = @import("font/system.zig");
 const geometry = @import("geometry.zig");
 const display = @import("display.zig");
+const theme_mod = @import("theme.zig");
+pub const Theme = theme_mod.Theme;
 
 pub const Command = enum { none, redraw, quit };
 
@@ -231,7 +233,7 @@ pub fn runWindow(
     // If Metal is unavailable, fall through to the CPU raster path below.
     if (comptime builtin.os.tag == .macos) {
         if (want_gpu) {
-            if (runWindowMetal(Model, Msg, model, window, init)) {
+            if (runWindowMetal(Model, Msg, model, window, init, opts.theme)) {
                 return;
             } else |_| {}
         }
@@ -240,7 +242,7 @@ pub fn runWindow(
     // GL window + current context succeeded → drive the GPU-present loop.
     // Otherwise fall through to the CPU raster + OS blit path below.
     if (comptime has_gl_window) {
-        if (window.gl_ctx != null) return runWindowGl(Model, Msg, model, window, init);
+        if (window.gl_ctx != null) return runWindowGl(Model, Msg, model, window, init, opts.theme);
     }
 
     // Windows: try a D3D11 swapchain on the HWND (#12). Needs the interactive
@@ -251,7 +253,7 @@ pub fn runWindow(
             if (d3d_backend.D3dSwapchain.create(window.hwnd, @intCast(px0.width), @intCast(px0.height))) |sc| {
                 winlog(init, "path=d3d swapchain=ok size={d}x{d}", .{ px0.width, px0.height });
                 var swapchain = sc;
-                return runWindowD3d(Model, Msg, model, window, &swapchain, init);
+                return runWindowD3d(Model, Msg, model, window, &swapchain, init, opts.theme);
             } else |err| {
                 winlog(init, "path=raster swapchain_err={t} size={d}x{d}", .{ err, px0.width, px0.height });
             }
@@ -261,6 +263,7 @@ pub fn runWindow(
     }
 
     var raster = raster_mod.RasterBackend.init(gpa);
+    raster.clear_color = opts.theme.background; // theme backdrop (theming)
     defer raster.deinit();
     _ = system_font.loadInto(gpa, io, &raster); // placeholder blocks if none found
     const b = raster.interface();
@@ -338,6 +341,7 @@ fn runWindowGl(
     model: *Model,
     window: anytype,
     init: std.process.Init,
+    theme: Theme,
 ) !void {
     const platform = WindowPlatform;
     const gpa = init.arena.allocator();
@@ -350,6 +354,7 @@ fn runWindowGl(
     const capture_path = init.environ_map.get("ZOOEE_CAPTURE");
 
     var glb = try gl_backend.GlBackend.initOnCurrent(gpa);
+    glb.clear_color = theme.clearRgba(); // theme backdrop (theming)
     defer glb.deinit();
     if (system_font.loadBytes(gpa, io)) |data| glb.setFont(data) catch {};
     const b = glb.interface();
@@ -450,6 +455,7 @@ fn runWindowMetal(
     model: *Model,
     window: anytype,
     init: std.process.Init,
+    theme: Theme,
 ) !void {
     const platform = WindowPlatform;
     const gpa = init.arena.allocator();
@@ -462,6 +468,7 @@ fn runWindowMetal(
     var layer = try metal_backend.MetalLayer.createOnView(ctx.device, window.contentView(), @intCast(px0.width), @intCast(px0.height));
 
     var mb = try metal_backend.MetalBackend.initOn(gpa, ctx.device, ctx.queue);
+    mb.clear_color = theme.clearRgba(); // theme backdrop (theming)
     defer mb.deinit();
     if (system_font.loadBytes(gpa, io)) |data| mb.setFont(data) catch {};
     const b = mb.interface();
@@ -555,6 +562,7 @@ fn runWindowD3d(
     window: anytype,
     swapchain: anytype,
     init: std.process.Init,
+    theme: Theme,
 ) !void {
     const platform = WindowPlatform;
     const gpa = init.arena.allocator();
@@ -564,6 +572,7 @@ fn runWindowD3d(
     const capture_path = init.environ_map.get("ZOOEE_CAPTURE");
 
     var db = try d3d_backend.D3dBackend.initOnDevice(gpa, swapchain.device, swapchain.context);
+    db.clear_color = theme.clearRgba(); // theme backdrop (theming)
     defer db.deinit();
     if (system_font.loadBytes(gpa, io)) |data| db.setFont(data) catch {};
     const b = db.interface();
@@ -681,6 +690,10 @@ pub const WindowOptions = struct {
     /// (same effect as the ZOOEE_SOFTWARE env var). Lets a build bake the
     /// renderer choice in — e.g. separate GL and raster demo apps.
     force_software: bool = false,
+    /// Theme tokens (theming). `background` becomes every backend's clear
+    /// color, so the window backdrop and the area exposed during a resize-grow
+    /// match the app's content instead of a hard-coded white.
+    theme: Theme = Theme.light,
 };
 
 /// Render a Model's view into `b` once, offscreen — no window, no event

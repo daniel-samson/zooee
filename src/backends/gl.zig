@@ -1932,6 +1932,10 @@ pub const GlBackend = struct {
     width: u32 = 0,
     height: u32 = 0,
     clips: std.ArrayList(ScissorRect) = .empty,
+    /// Window clear color (theming, #170 follow-up). Defaults to white so the
+    /// offscreen golden path is unchanged; the windowed app sets it from the
+    /// theme background. Only the default-framebuffer (present) path uses it.
+    clear_color: [4]f32 = .{ 1, 1, 1, 1 },
     /// Content translation for scroll viewports (#96): added to draw coords and
     /// pushed scissor rects so a clipped subtree pans within a viewport.
     translate: geometry.Point = .{ .x = 0, .y = 0 },
@@ -2052,7 +2056,7 @@ pub const GlBackend = struct {
             self.bound_fbo = 0;
             glViewport(0, 0, w, h);
             glDisable(GL_SCISSOR_TEST);
-            glClearColor(1, 1, 1, 1); // match raster's white clear
+            glClearColor(self.clear_color[0], self.clear_color[1], self.clear_color[2], self.clear_color[3]);
             glClear(GL_COLOR_BUFFER_BIT);
             enableBlend();
             self.clips.clearRetainingCapacity();
