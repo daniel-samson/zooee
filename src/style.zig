@@ -292,6 +292,25 @@ pub const RectStyle = struct {
     shadow: ?BoxShadow = null,
 };
 
+/// Numeric font weight (#191), CSS-style. v1 maps to the regular/bold faces
+/// (`>= semibold` → the bold face); true per-weight faces arrive with the
+/// font-family registry (#204).
+pub const Weight = enum(u16) {
+    thin = 100,
+    extra_light = 200,
+    light = 300,
+    normal = 400,
+    medium = 500,
+    semibold = 600,
+    bold = 700,
+    extra_bold = 800,
+    black = 900,
+
+    pub fn isBold(self: Weight) bool {
+        return @intFromEnum(self) >= @intFromEnum(Weight.semibold);
+    }
+};
+
 pub const TextStyle = struct {
     /// null = the backend default (terminal theme foreground; black on raster).
     color: ?Color = null,
@@ -300,10 +319,20 @@ pub const TextStyle = struct {
     size: f32 = 16,
     bold: bool = false,
     italic: bool = false,
+    /// Numeric weight (#191). Composes with `bold`: either makes text bold.
+    weight: Weight = .normal,
+    /// Font family name (#191). A hint for face selection once the family
+    /// registry exists (#204); ignored today (the one loaded family is used).
+    font_family: ?[]const u8 = null,
     /// Text decorations (#191), rendered per backend: terminal applies the
     /// native SGR attribute (underline/strike); GPU/raster draw a line.
     underline: bool = false,
     strikethrough: bool = false,
+
+    /// Whether to use the bold face: the `bold` flag or a weight `>= semibold`.
+    pub fn effectiveBold(self: TextStyle) bool {
+        return self.bold or self.weight.isBold();
+    }
 };
 
 /// Decoration line rects (#191), shared so every backend draws the underline /
@@ -322,3 +351,15 @@ pub const TextDecoration = struct {
         return .{ .x = x, .y = @round(baseline - size * 0.28), .width = width, .height = t };
     }
 };
+
+test "weight maps to bold face at semibold and above (#191)" {
+    const std = @import("std");
+    try std.testing.expect(!Weight.normal.isBold());
+    try std.testing.expect(!Weight.medium.isBold());
+    try std.testing.expect(Weight.semibold.isBold());
+    try std.testing.expect(Weight.black.isBold());
+    // effectiveBold composes the bool flag and the weight.
+    try std.testing.expect((TextStyle{ .weight = .bold }).effectiveBold());
+    try std.testing.expect((TextStyle{ .bold = true }).effectiveBold());
+    try std.testing.expect(!(TextStyle{}).effectiveBold());
+}
