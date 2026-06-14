@@ -36,6 +36,7 @@ pub const event = @import("event.zig");
 pub const anim = @import("anim.zig");
 pub const text = @import("text.zig");
 pub const clipboard = @import("clipboard.zig");
+pub const display = @import("display.zig");
 pub const font = struct {
     pub const ttf = @import("font/ttf.zig");
     pub const raster = @import("font/raster.zig");
