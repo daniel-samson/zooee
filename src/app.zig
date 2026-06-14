@@ -26,6 +26,7 @@ const display = @import("display.zig");
 const theme_mod = @import("theme.zig");
 const style_mod = @import("style.zig");
 const cursor_mod = @import("cursor.zig");
+const window_mod = @import("window.zig");
 pub const Theme = theme_mod.Theme;
 
 /// The Model's current backend clear color, if it exposes an optional
@@ -257,7 +258,7 @@ pub fn runWindow(
 
     // Only Linux carries a GL context on the window (macOS=Metal, Windows=D3D).
     const want_gl_ctx = want_gpu and builtin.os.tag == .linux;
-    const window = try platform.Window.create(gpa, .{ .title = opts.title, .width = opts.width, .height = opts.height, .gl = want_gl_ctx });
+    const window = try platform.Window.create(gpa, .{ .title = opts.title, .width = opts.width, .height = opts.height, .gl = want_gl_ctx, .titlebar = opts.titlebar });
     defer window.destroy();
 
     // macOS: Metal is the primary GPU path (display-synced → lag-free resize).
@@ -758,6 +759,9 @@ pub const WindowOptions = struct {
     /// color, so the window backdrop and the area exposed during a resize-grow
     /// match the app's content instead of a hard-coded white.
     theme: Theme = Theme.light,
+    /// Title-bar presentation (#64): `.native` (default), `.integrated`
+    /// (content under a transparent title bar), or `.headless`.
+    titlebar: window_mod.TitlebarMode = .native,
 };
 
 /// Render a Model's view into `b` once, offscreen — no window, no event
