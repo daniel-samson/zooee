@@ -43,6 +43,8 @@ pub const Cursor = cursor.Cursor;
 pub const unicode_width = @import("unicode_width.zig");
 /// Developer tools (#26): tree/layout dumps + a widget-bounds overlay.
 pub const devtools = @import("devtools.zig");
+/// Windowing types (#64): TitlebarMode (native/integrated/headless).
+pub const window = @import("window.zig");
 pub const text = @import("text.zig");
 pub const clipboard = @import("clipboard.zig");
 pub const display = @import("display.zig");
