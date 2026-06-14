@@ -249,6 +249,104 @@ fn onWindowDidResize(_: id, _: SEL, _: id) callconv(.c) void {
     if (live_resize_window) |w| if (w.redraw_fn) |f| f(w.redraw_ctx);
 }
 
+// --- IME / text input (#213) ------------------------------------------------
+// Bridge AppKit's NSTextInputClient to our pull-based loop: keyDown events are
+// routed through the view's inputContext (in pumpEvents), which calls these
+// IMPs added to the content view's class. insertText: → committed .text;
+// setMarkedText: → .composition pre-edit. Single-window via `ime_window`.
+
+const NSRange = extern struct { location: u64, length: u64 };
+const ns_not_found: u64 = 0x7FFFFFFFFFFFFFFF; // NSNotFound
+
+var ime_window: ?*Window = null;
+var ime_methods_added = false;
+var ime_has_marked = false;
+
+/// Get an NSString from an insertText:/setMarkedText: arg (NSString or
+/// NSAttributedString) and emit its codepoints / pre-edit.
+fn imeStringPtr(s: id) ?[*:0]const u8 {
+    if (s == null) return null;
+    const str = if (msg(bool, struct { SEL }, s, sel("respondsToSelector:"), .{sel("string")}))
+        msg(id, struct {}, s, sel("string"), .{})
+    else
+        s;
+    if (str == null) return null;
+    return msg([*:0]const u8, struct {}, str, sel("UTF8String"), .{});
+}
+
+fn onInsertText(_: id, _: SEL, s: id, _: NSRange) callconv(.c) void {
+    ime_has_marked = false;
+    const w = ime_window orelse return;
+    const utf8 = imeStringPtr(s) orelse return;
+    var it = std.unicode.Utf8View.initUnchecked(std.mem.span(utf8)).iterator();
+    while (it.nextCodepoint()) |cp| {
+        if (cp >= 0x20 and cp != 0x7f) w.queue.append(w.gpa, .{ .text = .{ .codepoint = cp } }) catch {};
+    }
+}
+
+fn onSetMarkedText(_: id, _: SEL, s: id, _: NSRange, _: NSRange) callconv(.c) void {
+    const w = ime_window orelse return;
+    const utf8 = imeStringPtr(s) orelse return;
+    const text = std.mem.span(utf8);
+    ime_has_marked = text.len > 0;
+    const a = w.drop_arena.allocator();
+    const copy = a.dupe(u8, text) catch return;
+    w.queue.append(w.gpa, .{ .composition = .{ .phase = if (text.len == 0) .cancel else .update, .text = copy, .caret = copy.len } }) catch {};
+}
+
+fn onUnmarkText(_: id, _: SEL) callconv(.c) void {
+    ime_has_marked = false;
+}
+fn onHasMarkedText(_: id, _: SEL) callconv(.c) bool {
+    return ime_has_marked;
+}
+fn onMarkedRange(_: id, _: SEL) callconv(.c) NSRange {
+    return if (ime_has_marked) .{ .location = 0, .length = 0 } else .{ .location = ns_not_found, .length = 0 };
+}
+fn onSelectedRange(_: id, _: SEL) callconv(.c) NSRange {
+    return .{ .location = 0, .length = 0 };
+}
+fn onValidAttributes(_: id, _: SEL) callconv(.c) id {
+    return msg(id, struct {}, cls("NSArray"), sel("array"), .{});
+}
+fn onAttributedSubstring(_: id, _: SEL, _: NSRange, _: ?*NSRange) callconv(.c) id {
+    return null;
+}
+fn onFirstRect(_: id, _: SEL, _: NSRange, _: ?*NSRange) callconv(.c) NSRect {
+    return .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+}
+fn onCharIndexForPoint(_: id, _: SEL, _: NSPoint) callconv(.c) u64 {
+    return ns_not_found;
+}
+fn onDoCommand(_: id, _: SEL, _: SEL) callconv(.c) void {}
+fn onAcceptsFirstResponder(_: id, _: SEL) callconv(.c) bool {
+    return true;
+}
+
+/// Add NSTextInputClient (+ acceptsFirstResponder) to the content view's class
+/// once, route `w` as the IME target, and make the view first responder so its
+/// inputContext is live.
+fn enableTextInput(window: id, view: id, w: *Window) void {
+    ime_window = w;
+    if (!ime_methods_added) {
+        const c = object_getClass(view);
+        _ = class_addMethod(c, sel("acceptsFirstResponder"), @ptrCast(&onAcceptsFirstResponder), "c@:");
+        _ = class_addMethod(c, sel("insertText:replacementRange:"), @ptrCast(&onInsertText), "v@:@{_NSRange=QQ}");
+        _ = class_addMethod(c, sel("setMarkedText:selectedRange:replacementRange:"), @ptrCast(&onSetMarkedText), "v@:@{_NSRange=QQ}{_NSRange=QQ}");
+        _ = class_addMethod(c, sel("unmarkText"), @ptrCast(&onUnmarkText), "v@:");
+        _ = class_addMethod(c, sel("hasMarkedText"), @ptrCast(&onHasMarkedText), "c@:");
+        _ = class_addMethod(c, sel("markedRange"), @ptrCast(&onMarkedRange), "{_NSRange=QQ}@:");
+        _ = class_addMethod(c, sel("selectedRange"), @ptrCast(&onSelectedRange), "{_NSRange=QQ}@:");
+        _ = class_addMethod(c, sel("validAttributesForMarkedText"), @ptrCast(&onValidAttributes), "@@:");
+        _ = class_addMethod(c, sel("attributedSubstringForProposedRange:actualRange:"), @ptrCast(&onAttributedSubstring), "@@:{_NSRange=QQ}^{_NSRange=QQ}");
+        _ = class_addMethod(c, sel("firstRectForCharacterRange:actualRange:"), @ptrCast(&onFirstRect), "{CGRect={CGPoint=dd}{CGSize=dd}}@:{_NSRange=QQ}^{_NSRange=QQ}");
+        _ = class_addMethod(c, sel("characterIndexForPoint:"), @ptrCast(&onCharIndexForPoint), "Q@:{CGPoint=dd}");
+        _ = class_addMethod(c, sel("doCommandBySelector:"), @ptrCast(&onDoCommand), "v@::");
+        ime_methods_added = true;
+    }
+    _ = msg(bool, struct { id }, window, sel("makeFirstResponder:"), .{view});
+}
+
 // --- window ----------------------------------------------------------------
 
 const NSWindowStyleMask = struct {
@@ -336,9 +434,10 @@ pub const Window = struct {
 
         const self = try gpa.create(Window);
         self.* = .{ .ns_window = window, .gpa = gpa, .last_size = frame, .gl_ctx = gl_ctx, .drop_arena = std.heap.ArenaAllocator.init(gpa) };
-        // Accept file drops on the content view (#212).
+        // Accept file drops (#212) + IME text input (#213) on the content view.
         const cv = msg(id, struct {}, window, sel("contentView"), .{});
         enableDrop(cv, self);
+        enableTextInput(window, cv, self);
         return self;
     }
 
@@ -348,6 +447,7 @@ pub const Window = struct {
         }
         _ = msg(void, struct {}, self.ns_window, sel("close"), .{});
         if (drag_window == self) drag_window = null;
+        if (ime_window == self) ime_window = null;
         self.queue.deinit(self.gpa);
         self.drop_arena.deinit();
         self.gpa.destroy(self);
@@ -503,13 +603,22 @@ pub const Window = struct {
                         const kflags = msg(u64, struct {}, ev, sel("modifierFlags"), .{});
                         self.queue.append(self.gpa, .{ .key_down = .{ .key = k, .mods = modsFromFlags(kflags) } }) catch {};
                     } else {
-                        const chars = msg(id, struct {}, ev, sel("characters"), .{});
-                        if (chars != null) {
-                            const utf8 = msg([*:0]const u8, struct {}, chars, sel("UTF8String"), .{});
-                            var it = std.unicode.Utf8View.initUnchecked(std.mem.span(utf8)).iterator();
-                            while (it.nextCodepoint()) |cp| {
-                                if (cp >= 0x20 and cp < 0xF700) {
-                                    self.queue.append(self.gpa, .{ .text = .{ .codepoint = cp } }) catch {};
+                        // Route through the view's input context so IME
+                        // composition works (#213); insertText:/setMarkedText:
+                        // enqueue the resulting .text / .composition. Fall back to
+                        // raw characters if the context didn't consume it.
+                        const input_view = msg(id, struct {}, self.ns_window, sel("contentView"), .{});
+                        const ic = msg(id, struct {}, input_view, sel("inputContext"), .{});
+                        const handled = ic != null and msg(bool, struct { id }, ic, sel("handleEvent:"), .{ev});
+                        if (!handled) {
+                            const chars = msg(id, struct {}, ev, sel("characters"), .{});
+                            if (chars != null) {
+                                const utf8 = msg([*:0]const u8, struct {}, chars, sel("UTF8String"), .{});
+                                var it = std.unicode.Utf8View.initUnchecked(std.mem.span(utf8)).iterator();
+                                while (it.nextCodepoint()) |cp| {
+                                    if (cp >= 0x20 and cp < 0xF700) {
+                                        self.queue.append(self.gpa, .{ .text = .{ .codepoint = cp } }) catch {};
+                                    }
                                 }
                             }
                         }
