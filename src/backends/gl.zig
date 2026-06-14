@@ -262,6 +262,8 @@ const Gl = struct {
     uniform2f: *const fn (GLint, f32, f32) callconv(.c) void,
     uniform4f: *const fn (GLint, f32, f32, f32, f32) callconv(.c) void,
     uniform2fv: *const fn (GLint, GLsizei, [*]const f32) callconv(.c) void,
+    uniform1fv: *const fn (GLint, GLsizei, [*]const f32) callconv(.c) void,
+    uniform4fv: *const fn (GLint, GLsizei, [*]const f32) callconv(.c) void,
     getAttribLocation: *const fn (GLuint, [*:0]const u8) callconv(.c) GLint,
 
     fn load() Error!Gl {
@@ -521,15 +523,26 @@ const grad_vert: [*:0]const u8 =
 ;
 const grad_frag: [*:0]const u8 =
     \\#version 120
-    \\uniform vec4 rect;   // x,y,w,h
-    \\uniform float axis;  // 0 = horizontal, 1 = vertical
-    \\uniform vec4 c0;
-    \\uniform vec4 c1;
+    \\uniform vec4 rect;     // x,y,w,h
+    \\uniform float kind;    // 0=linear, 1=radial
+    \\uniform float axis;    // linear: 0=h, 1=v
+    \\uniform int count;     // stop count
+    \\uniform vec4 radial;   // cx, cy, radius, 0
+    \\uniform float offsets[8];
+    \\uniform vec4 colors[8];
     \\varying vec2 v_px;
     \\void main() {
-    \\  float t = (axis < 0.5) ? (v_px.x - rect.x) / rect.z : (v_px.y - rect.y) / rect.w;
+    \\  float t;
+    \\  if (kind < 0.5) { t = (axis < 0.5) ? (v_px.x - rect.x) / rect.z : (v_px.y - rect.y) / rect.w; }
+    \\  else { float cx = rect.x + radial.x*rect.z; float cy = rect.y + radial.y*rect.w; float rr = radial.z*max(rect.z,rect.w); float dx=v_px.x-cx, dy=v_px.y-cy; t = (rr>0.0) ? sqrt(dx*dx+dy*dy)/rr : 0.0; }
     \\  t = clamp(t, 0.0, 1.0);
-    \\  gl_FragColor = mix(c0, c1, t);
+    \\  if (t <= offsets[0]) { gl_FragColor = colors[0]; return; }
+    \\  vec4 col = colors[count-1];
+    \\  for (int i = 1; i < 8; i++) {
+    \\    if (i >= count) break;
+    \\    if (t <= offsets[i]) { float span = offsets[i]-offsets[i-1]; float f = (span>0.0) ? (t-offsets[i-1])/span : 0.0; col = mix(colors[i-1], colors[i], f); break; }
+    \\  }
+    \\  gl_FragColor = col;
     \\}
 ;
 
@@ -541,9 +554,12 @@ pub const GradientRenderer = struct {
     pos_loc: GLuint,
     u_viewport: GLint,
     u_rect: GLint,
+    u_kind: GLint,
     u_axis: GLint,
-    u_c0: GLint,
-    u_c1: GLint,
+    u_count: GLint,
+    u_radial: GLint,
+    u_offsets: GLint,
+    u_colors: GLint,
     vw: f32 = 0,
     vh: f32 = 0,
 
@@ -570,22 +586,39 @@ pub const GradientRenderer = struct {
             .pos_loc = @intCast(gl.getAttribLocation(prog, "pos")),
             .u_viewport = gl.getUniformLocation(prog, "viewport"),
             .u_rect = gl.getUniformLocation(prog, "rect"),
+            .u_kind = gl.getUniformLocation(prog, "kind"),
             .u_axis = gl.getUniformLocation(prog, "axis"),
-            .u_c0 = gl.getUniformLocation(prog, "c0"),
-            .u_c1 = gl.getUniformLocation(prog, "c1"),
+            .u_count = gl.getUniformLocation(prog, "count"),
+            .u_radial = gl.getUniformLocation(prog, "radial"),
+            .u_offsets = gl.getUniformLocation(prog, "offsets"),
+            .u_colors = gl.getUniformLocation(prog, "colors"),
         };
     }
 
-    /// Fill a pixel-space rect with a two-stop linear gradient (axis 0=h, 1=v).
-    pub fn fill(self: *GradientRenderer, x: f32, y: f32, w: f32, h: f32, axis: f32, c0: [4]f32, c1: [4]f32) void {
+    /// Fill a pixel-space rect with a linear or radial N-stop gradient (#118).
+    pub fn fill(self: *GradientRenderer, rect: geometry.Rect, g: style.Gradient) void {
         const gl = self.gl;
+        var buf: [style.Gradient.max_stops]style.Gradient.Stop = undefined;
+        const ss = g.resolved(&buf);
+        var offsets: [8]f32 = .{0} ** 8;
+        var colors: [32]f32 = .{0} ** 32;
+        for (ss, 0..) |s, i| {
+            offsets[i] = s.offset;
+            colors[i * 4] = @as(f32, @floatFromInt(s.color.r)) / 255;
+            colors[i * 4 + 1] = @as(f32, @floatFromInt(s.color.g)) / 255;
+            colors[i * 4 + 2] = @as(f32, @floatFromInt(s.color.b)) / 255;
+            colors[i * 4 + 3] = @as(f32, @floatFromInt(s.color.a)) / 255;
+        }
         gl.useProgram(self.program);
         gl.uniform2f(self.u_viewport, self.vw, self.vh);
-        gl.uniform4f(self.u_rect, x, y, w, h);
-        gl.uniform1f(self.u_axis, axis);
-        gl.uniform4f(self.u_c0, c0[0], c0[1], c0[2], c0[3]);
-        gl.uniform4f(self.u_c1, c1[0], c1[1], c1[2], c1[3]);
-        const verts = [_]f32{ x, y, x + w, y, x, y + h, x + w, y + h };
+        gl.uniform4f(self.u_rect, rect.x, rect.y, rect.width, rect.height);
+        gl.uniform1f(self.u_kind, @floatFromInt(@intFromEnum(g.kind)));
+        gl.uniform1f(self.u_axis, if (g.axis == .vertical) 1 else 0);
+        gl.uniform1i(self.u_count, @intCast(ss.len));
+        gl.uniform4f(self.u_radial, g.cx, g.cy, g.radius, 0);
+        gl.uniform1fv(self.u_offsets, 8, &offsets);
+        gl.uniform4fv(self.u_colors, 8, &colors);
+        const verts = [_]f32{ rect.x, rect.y, rect.x + rect.width, rect.y, rect.x, rect.y + rect.height, rect.x + rect.width, rect.y + rect.height };
         gl.bindVertexArray(self.vao);
         gl.bindBuffer(GL_ARRAY_BUFFER, self.vbo);
         gl.bufferData(GL_ARRAY_BUFFER, @sizeOf(@TypeOf(verts)), &verts, GL_STATIC_DRAW);
@@ -2030,7 +2063,7 @@ pub const GlBackend = struct {
             enableBlend();
             self.grad.vw = w;
             self.grad.vh = h;
-            self.grad.fill(rect.x, rect.y, rect.width, rect.height, if (g.axis == .vertical) 1 else 0, col(g.from), col(g.to));
+            self.grad.fill(rect, g);
             return;
         }
         if (rs.corner_radius.isNone() and rs.border.isNone()) {
