@@ -9,6 +9,42 @@ const raster = @import("../backends/raster.zig");
 const ttf = @import("ttf.zig");
 const fontset = @import("fontset.zig");
 
+const log = std.log.scoped(.font);
+
+// --- macOS CoreText system-font discovery (#204) ----------------------------
+// The C CoreText/CoreFoundation API (no Objective-C): ask for the system UI
+// font and copy its file URL → POSIX path. This yields the *real* system font
+// (San Francisco, #205) regardless of where the OS version keeps it, instead
+// of guessing a hardcoded path.
+const ct = if (builtin.os.tag == .macos) struct {
+    const kCTFontUIFontSystem: u32 = 2;
+    const kCFURLPOSIXPathStyle: c_long = 0;
+    const kCFStringEncodingUTF8: u32 = 0x08000100;
+    extern "c" fn CTFontCreateUIFontForLanguage(uiType: u32, size: f64, language: ?*anyopaque) ?*anyopaque;
+    extern "c" fn CTFontCopyFontDescriptor(font: ?*anyopaque) ?*anyopaque;
+    extern "c" fn CTFontDescriptorCopyAttribute(desc: ?*anyopaque, attr: ?*anyopaque) ?*anyopaque;
+    extern "c" fn CFURLCopyFileSystemPath(url: ?*anyopaque, style: c_long) ?*anyopaque;
+    extern "c" fn CFStringGetCString(str: ?*anyopaque, buf: [*]u8, len: c_long, encoding: u32) bool;
+    extern "c" fn CFRelease(cf: ?*anyopaque) void;
+    extern const kCTFontURLAttribute: ?*anyopaque; // CFStringRef
+} else struct {};
+
+/// The macOS system UI font's file path (#204/#205), written into `buf`.
+/// Null if CoreText is unavailable or the lookup fails.
+fn macSystemFontPath(buf: []u8) ?[]const u8 {
+    if (builtin.os.tag != .macos) return null;
+    const font = ct.CTFontCreateUIFontForLanguage(ct.kCTFontUIFontSystem, 13.0, null) orelse return null;
+    defer ct.CFRelease(font);
+    const desc = ct.CTFontCopyFontDescriptor(font) orelse return null;
+    defer ct.CFRelease(desc);
+    const url = ct.CTFontDescriptorCopyAttribute(desc, ct.kCTFontURLAttribute) orelse return null;
+    defer ct.CFRelease(url);
+    const cfpath = ct.CFURLCopyFileSystemPath(url, ct.kCFURLPOSIXPathStyle) orelse return null;
+    defer ct.CFRelease(cfpath);
+    if (!ct.CFStringGetCString(cfpath, buf.ptr, @intCast(buf.len), ct.kCFStringEncodingUTF8)) return null;
+    return std.mem.sliceTo(buf, 0);
+}
+
 /// Default UI-font candidates, most-preferred first.
 pub const candidates: []const []const u8 = switch (builtin.os.tag) {
     .macos => &.{
@@ -85,6 +121,27 @@ fn parsed(gpa: std.mem.Allocator, io: std.Io, path: ?[]const u8) ?ttf.Font {
 pub fn loadFontSet(gpa: std.mem.Allocator, io: std.Io) ?fontset.FontSet {
     var set: fontset.FontSet = .{};
     var have_primary = false;
+
+    // Native discovery first (#204): the OS's real system font, wherever it
+    // lives this OS version (San Francisco on macOS, #205). Bold/italic still
+    // come from the family list below until per-weight discovery lands.
+    if (builtin.os.tag == .macos) {
+        var path_buf: [1024]u8 = undefined;
+        if (macSystemFontPath(&path_buf)) |p| {
+            if (parsed(gpa, io, p)) |reg| {
+                set.setFace(fontset.FontSet.regular, reg);
+                have_primary = true;
+                // Bold/italic from the first family until SF's weight axis is
+                // instanced (#205) — a known regular-SF + bold-Arial mix.
+                if (families.len > 0) {
+                    if (parsed(gpa, io, families[0].bold)) |f| set.setFace(fontset.FontSet.bold_slot, f);
+                    if (parsed(gpa, io, families[0].italic)) |f| set.setFace(fontset.FontSet.italic_slot, f);
+                    if (parsed(gpa, io, families[0].bold_italic)) |f| set.setFace(fontset.FontSet.bold_italic_slot, f);
+                }
+            } else log.warn("CoreText system font at '{s}' failed to parse; using fallbacks", .{p});
+        }
+    }
+
     for (families) |fam| {
         if (!have_primary) {
             const reg = parsed(gpa, io, fam.regular) orelse continue;
@@ -97,7 +154,13 @@ pub fn loadFontSet(gpa: std.mem.Allocator, io: std.Io) ?fontset.FontSet {
             if (parsed(gpa, io, fam.regular)) |f| set.addFallback(f);
         }
     }
-    return if (have_primary) set else null;
+    if (!have_primary) {
+        // Non-silent failure (#204): the app renders placeholder blocks, so say
+        // why instead of degrading quietly.
+        log.warn("no system font found (tried CoreText + {d} candidate families) — text will use placeholder glyphs", .{families.len});
+        return null;
+    }
+    return set;
 }
 
 /// Read the first existing candidate font file's bytes (caller owns).
