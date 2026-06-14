@@ -523,13 +523,15 @@ pub const Window = struct {
             .window = self.handle,
             .message_type = XInternAtom(self.display, "_NET_WM_STATE", 0),
             .format = 32,
-            .data = .{ .l = .{
-                action,
-                @bitCast(@as(c_ulong, XInternAtom(self.display, a1, 0))),
-                @bitCast(@as(c_ulong, XInternAtom(self.display, a2, 0))),
-                1, // source: application
-                0,
-            } },
+            .data = .{
+                .l = .{
+                    action,
+                    @bitCast(@as(c_ulong, XInternAtom(self.display, a1, 0))),
+                    @bitCast(@as(c_ulong, XInternAtom(self.display, a2, 0))),
+                    1, // source: application
+                    0,
+                },
+            },
         };
         _ = XSendEvent(self.display, root, 0, SubstructureMask, &ev);
         _ = XFlush(self.display);
@@ -544,7 +546,11 @@ pub const Window = struct {
         var after: c_ulong = 0;
         var data: ?[*]u8 = null;
         if (XGetWindowProperty(self.display, self.handle, prop, 0, 2, 0, 0, &atype, &afmt, &nitems, &after, &data) != 0) return -1;
-        defer { if (data) |d| { _ = XFree(d); } }
+        defer {
+            if (data) |d| {
+                _ = XFree(d);
+            }
+        }
         if (data == null or afmt != 32 or nitems == 0) return -1;
         const vals: [*]const c_ulong = @ptrCast(@alignCast(data.?));
         return @bitCast(@as(c_ulong, vals[0]));
@@ -560,7 +566,11 @@ pub const Window = struct {
         var after: c_ulong = 0;
         var data: ?[*]u8 = null;
         if (XGetWindowProperty(self.display, self.handle, prop, 0, 32, 0, 0, &atype, &afmt, &nitems, &after, &data) != 0) return false;
-        defer { if (data) |d| { _ = XFree(d); } }
+        defer {
+            if (data) |d| {
+                _ = XFree(d);
+            }
+        }
         if (data == null or afmt != 32) return false;
         const atoms: [*]const c_ulong = @ptrCast(@alignCast(data.?));
         var i: usize = 0;
