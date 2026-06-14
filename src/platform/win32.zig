@@ -147,6 +147,12 @@ extern "user32" fn AppendMenuW(*anyopaque, u32, usize, ?[*:0]const u16) callconv
 extern "user32" fn TrackPopupMenu(*anyopaque, u32, i32, i32, i32, HWND, ?*const anyopaque) callconv(WINAPI) i32;
 extern "user32" fn ClientToScreen(HWND, *POINT) callconv(WINAPI) win.BOOL;
 extern "user32" fn SetForegroundWindow(HWND) callconv(WINAPI) win.BOOL;
+// App menu bar (#129): a top-level HMENU set on the window; selections arrive
+// as WM_COMMAND with the item id in the low word of wParam.
+const WM_COMMAND: u32 = 0x0111;
+extern "user32" fn CreateMenu() callconv(WINAPI) ?*anyopaque;
+extern "user32" fn SetMenu(HWND, ?*anyopaque) callconv(WINAPI) win.BOOL;
+extern "user32" fn DrawMenuBar(HWND) callconv(WINAPI) win.BOOL;
 
 // Integrated title bar (#64): extend the DWM "sheet of glass" into the client
 // area so the app draws its own chrome (tabs/toolbar) in the top strip while
@@ -336,6 +342,8 @@ pub const Window = struct {
     /// and stay valid until the next pumpEvents resets it (matching DragData's
     /// "valid only during dispatch" contract).
     drop_arena: std.heap.ArenaAllocator,
+    /// Last menu-bar command id (#129), drained by takeMenuCommand. 0 = none.
+    menu_command: u32 = 0,
 
     /// Apply a pointer cursor shape (#123). Stores the system-cursor id and
     /// applies it now; the wndproc re-applies it on WM_SETCURSOR (Windows
@@ -429,6 +437,34 @@ pub const Window = struct {
         const chosen = TrackPopupMenu(hmenu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN, pt.x, pt.y, 0, self.hwnd, null);
         if (chosen == 0) return null;
         return @intCast(chosen);
+    }
+
+    /// Install `items` as the window's menu bar (#129). Each top-level item
+    /// should carry a submenu (File, Edit, …). Selections are reported via
+    /// `takeMenuCommand`.
+    pub fn setMenuBar(self: *Window, items: []const menu_mod.Item) void {
+        const bar = CreateMenu() orelse return;
+        for (items) |it| {
+            if (it.separator) continue;
+            var buf: [256]u16 = undefined;
+            const label = labelToUtf16(&buf, it.label, "") orelse continue;
+            if (it.submenu.len > 0) {
+                const sub = buildPopupMenu(self.gpa, it.submenu) orelse continue;
+                _ = AppendMenuW(bar, MF_POPUP | MF_STRING, @intFromPtr(sub), label);
+            } else {
+                _ = AppendMenuW(bar, MF_STRING, it.id, label);
+            }
+        }
+        _ = SetMenu(self.hwnd, bar);
+        _ = DrawMenuBar(self.hwnd);
+    }
+
+    /// Drain the most recent menu-bar selection (#129): returns the chosen
+    /// item id once, then null until the next selection. Poll each frame.
+    pub fn takeMenuCommand(self: *Window) ?u32 {
+        const r = self.menu_command;
+        self.menu_command = 0;
+        return if (r == 0) null else r;
     }
 
     pub fn isMinimised(self: *Window) bool {
@@ -575,6 +611,15 @@ pub const Window = struct {
             WM_CLOSE => {
                 self.queue.append(self.gpa, .{ .close_requested = core_event.main_window }) catch {};
                 return 0; // app decides whether to destroy
+            },
+            WM_COMMAND => {
+                // Menu-bar selection (#129): id is the low word of wParam, and
+                // the high word is 0 for menus (1 = accelerator). Drained by
+                // takeMenuCommand.
+                if (wparam >> 16 == 0) {
+                    self.menu_command = @intCast(wparam & 0xFFFF);
+                    return 0;
+                }
             },
             WM_SIZE => {
                 const dims: usize = @bitCast(lparam);
