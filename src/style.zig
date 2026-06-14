@@ -7,6 +7,8 @@
 //! Border and corner radius are per-side/per-corner, CSS-style, with
 //! uniform shorthands as the ergonomic default.
 
+const geometry = @import("geometry.zig");
+
 pub const Color = struct {
     r: u8,
     g: u8,
@@ -298,4 +300,25 @@ pub const TextStyle = struct {
     size: f32 = 16,
     bold: bool = false,
     italic: bool = false,
+    /// Text decorations (#191), rendered per backend: terminal applies the
+    /// native SGR attribute (underline/strike); GPU/raster draw a line.
+    underline: bool = false,
+    strikethrough: bool = false,
+};
+
+/// Decoration line rects (#191), shared so every backend draws the underline /
+/// strikethrough in the same place at pixel-exact agreement. `baseline` is the
+/// text baseline (origin.y + ascent); the line spans `x..x+width`.
+pub const TextDecoration = struct {
+    pub fn thickness(size: f32) f32 {
+        return @max(1, @round(size * 0.06));
+    }
+    pub fn underlineRect(x: f32, baseline: f32, width: f32, size: f32) geometry.Rect {
+        const t = thickness(size);
+        return .{ .x = x, .y = @round(baseline + size * 0.12), .width = width, .height = t };
+    }
+    pub fn strikeRect(x: f32, baseline: f32, width: f32, size: f32) geometry.Rect {
+        const t = thickness(size);
+        return .{ .x = x, .y = @round(baseline - size * 0.28), .width = width, .height = t };
+    }
 };

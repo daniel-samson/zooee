@@ -459,6 +459,13 @@ const Demo = struct {
             .text = "café · Ελληνικά · Привет · ½→∞ · «—»",
             .text_style = .{ .color = self.theme.text, .size = 16 * scale },
         };
+        // Text decorations (#191): underline + strikethrough as TextStyle flags.
+        const underlined = try arena.create(L.Element);
+        underlined.* = .{ .text = "underline", .text_style = .{ .color = self.theme.accent, .size = 15 * scale, .underline = true } };
+        const struck = try arena.create(L.Element);
+        struck.* = .{ .text = "strikethrough", .text_style = .{ .color = self.theme.text_muted, .size = 15 * scale, .strikethrough = true } };
+        const deco = try arena.create(L.Element);
+        deco.* = .{ .direction = .row, .gap = 14 * scale, .margin = .{ .top = 8 * scale }, .children = try arena.dupe(*const L.Element, &.{ underlined, struck }) };
 
         const panel = try arena.create(L.Element);
         panel.* = .{
@@ -470,7 +477,7 @@ const Demo = struct {
                 .border = .all(2 * scale, if (self.pointer_inside) self.theme.accent else self.theme.border),
                 .corner_radius = .all(10 * scale),
             },
-            .children = try arena.dupe(*const L.Element, &.{ grad_bar, track, swatches, layers, card_wrap, icons, button, scroller, paragraph, drop_zone, ime_label, uni }),
+            .children = try arena.dupe(*const L.Element, &.{ grad_bar, track, swatches, layers, card_wrap, icons, button, scroller, paragraph, drop_zone, ime_label, uni, deco }),
         };
         return panel;
     }
@@ -602,5 +609,5 @@ pub fn main(init: std.process.Init) !void {
     const title: [:0]const u8 = if (force_software) "zooee - raster" else "zooee - GPU";
     // Pass the same theme the UI is built from, so the backend clear color
     // (window backdrop + resize-exposed regions) matches the content.
-    try zooee.app.runWindow(Demo, Msg, &demo, init, .{ .title = title, .width = 760, .height = 720, .force_software = force_software, .theme = demo.theme });
+    try zooee.app.runWindow(Demo, Msg, &demo, init, .{ .title = title, .width = 760, .height = 760, .force_software = force_software, .theme = demo.theme });
 }

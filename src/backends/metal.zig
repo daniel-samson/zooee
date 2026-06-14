@@ -1734,6 +1734,22 @@ pub const MetalBackend = struct {
         const color = ts.color orelse style.Color.black;
         _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{gr.pipeline});
         gr.drawText(self.gpa, origin.x + self.translate.x, origin.y + self.translate.y, text, col4(color), .{ .bold = ts.bold, .italic = ts.italic }) catch {};
+        // Text decorations (#191): a filled line, same geometry as raster.
+        if (ts.underline or ts.strikethrough) {
+            const rw = self.fonts.?.measure(text, ts.size, .{ .bold = ts.bold, .italic = ts.italic }).width;
+            const bx = origin.x + self.translate.x;
+            const baseline = origin.y + self.translate.y + gr.atlas.ascent;
+            const c4 = col4(color);
+            _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{self.rect.pipeline});
+            if (ts.underline) {
+                const r = style.TextDecoration.underlineRect(bx, baseline, rw, ts.size);
+                self.rect.fillRect(r.x, r.y, r.width, r.height, c4);
+            }
+            if (ts.strikethrough) {
+                const r = style.TextDecoration.strikeRect(bx, baseline, rw, ts.size);
+                self.rect.fillRect(r.x, r.y, r.width, r.height, c4);
+            }
+        }
     }
 
     fn drawImage(ptr: *anyopaque, rect_in: geometry.Rect, texture: *Backend.Texture) void {

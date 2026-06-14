@@ -471,6 +471,25 @@ pub const RasterBackend = struct {
             }
             pen_x += @as(f32, @floatFromInt(metrics.advance)) * fscale;
         }
+
+        // Text decorations (#191): a filled line across the run, positioned by
+        // the shared formula so GPU backends match.
+        if (text_style.underline or text_style.strikethrough) {
+            const run_w = pen_x - origin.x;
+            if (text_style.underline) self.fillRunRect(style.TextDecoration.underlineRect(origin.x, baseline, run_w, text_style.size), color, clip);
+            if (text_style.strikethrough) self.fillRunRect(style.TextDecoration.strikeRect(origin.x, baseline, run_w, text_style.size), color, clip);
+        }
+    }
+
+    /// Fill a decoration line rect (local coords) within `clip`, via setPixel so
+    /// it honors the content translation + rounded clip (#191).
+    fn fillRunRect(self: *RasterBackend, rect: Rect, color: Color, clip: IRect) void {
+        const r = IRect.fromRect(rect).intersect(clip);
+        var y = r.y0;
+        while (y < r.y1) : (y += 1) {
+            var x = r.x0;
+            while (x < r.x1) : (x += 1) self.setPixel(x, y, color);
+        }
     }
 
     /// Fill a closed polygon (#120) with the even-odd rule
