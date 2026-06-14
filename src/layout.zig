@@ -78,6 +78,11 @@ pub const Element = struct {
     // (relative to its border-box origin), filled with `path_color` (even-odd).
     path: ?[]const geometry.Point = null,
     path_color: style.Color = .black,
+    // Stroked polyline (#120), local coords; round caps/joins.
+    stroke: ?[]const geometry.Point = null,
+    stroke_color: style.Color = .black,
+    stroke_width: f32 = 1,
+    stroke_closed: bool = false,
 
     // Effects (#117/#121): wrap this element's subtree when set.
     /// Group opacity 0..1: the subtree renders into an isolated layer
@@ -153,6 +158,12 @@ fn renderNode(b: Backend, placements: []const Placement, i: *usize) void {
         const n = @min(pts.len, buf.len);
         for (0..n) |k| buf[k] = .{ .x = p.rect.x + pts[k].x, .y = p.rect.y + pts[k].y };
         b.fillPath(buf[0..n], el.path_color);
+    }
+    if (el.stroke) |pts| {
+        var buf: [64]geometry.Point = undefined;
+        const n = @min(pts.len, buf.len);
+        for (0..n) |k| buf[k] = .{ .x = p.rect.x + pts[k].x, .y = p.rect.y + pts[k].y };
+        b.strokePath(buf[0..n], el.stroke_width, el.stroke_color, el.stroke_closed);
     }
     if (el.text) |t| {
         const inner = contentBox(el, p.rect);

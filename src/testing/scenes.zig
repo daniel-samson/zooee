@@ -173,6 +173,15 @@ pub fn drawPath(b: Backend, s: f32) !void {
     b.fillPath(&pts, Color.rgb(230, 170, 30));
 }
 
+/// Stroked polyline (#120): an open checkmark plus a closed triangle ring,
+/// exercising round caps/joins and the closed flag. Not in `all`.
+pub fn drawStroke(b: Backend, s: f32) !void {
+    const check = [_]geometry.Point{ .{ .x = 1.5 * s, .y = 5 * s }, .{ .x = 3.5 * s, .y = 7 * s }, .{ .x = 7.5 * s, .y = 2.5 * s } };
+    b.strokePath(&check, 1.3 * s, Color.rgb(40, 160, 70), false);
+    const tri = [_]geometry.Point{ .{ .x = 5 * s, .y = 8 * s }, .{ .x = 9 * s, .y = 8 * s }, .{ .x = 7 * s, .y = 9.5 * s } };
+    b.strokePath(&tri, 1.0 * s, Color.rgb(60, 90, 220), true);
+}
+
 /// Box shadow (#119): a filled rect with an offset, blurred shadow behind it.
 /// Not in `all` (cross-harness goldens); the GPU checks build a local Scene and
 /// compare the analytic shadow coverage vs the raster reference.

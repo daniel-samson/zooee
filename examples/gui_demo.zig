@@ -161,9 +161,29 @@ const Demo = struct {
         star.* = .{
             .width = 40 * scale,
             .height = 40 * scale,
-            .margin = .{ .bottom = 12 * scale },
             .path = star_pts,
             .path_color = Color.rgb(230, 170, 30),
+        };
+        // Stroked polyline (#120): a green checkmark next to the star.
+        const check_pts = try arena.dupe(zooee.Point, &.{
+            .{ .x = 4 * scale, .y = 20 * scale },
+            .{ .x = 15 * scale, .y = 32 * scale },
+            .{ .x = 36 * scale, .y = 6 * scale },
+        });
+        const check = try arena.create(L.Element);
+        check.* = .{
+            .width = 40 * scale,
+            .height = 40 * scale,
+            .stroke = check_pts,
+            .stroke_color = Color.rgb(40, 170, 70),
+            .stroke_width = 5 * scale,
+        };
+        const icons = try arena.create(L.Element);
+        icons.* = .{
+            .direction = .row,
+            .gap = 12 * scale,
+            .margin = .{ .bottom = 12 * scale },
+            .children = try arena.dupe(*const L.Element, &.{ star, check }),
         };
         // Unicode (#114): accents + em-dash exercise the dynamic glyph atlas.
         const uni = try arena.create(L.Element);
@@ -181,7 +201,7 @@ const Demo = struct {
                 .border = .all(2 * scale, Color.rgb(120, 120, 130)),
                 .corner_radius = .all(10 * scale),
             },
-            .children = try arena.dupe(*const L.Element, &.{ grad_bar, swatches, card_wrap, star, uni }),
+            .children = try arena.dupe(*const L.Element, &.{ grad_bar, swatches, card_wrap, icons, uni }),
         };
         return panel;
     }

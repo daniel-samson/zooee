@@ -49,6 +49,11 @@ pub const Backend = struct {
         // backends that can't (terminal) leave it null and `fillPath` no-ops.
         fill_path: ?*const fn (ptr: *anyopaque, points: []const Point, color: style.Color) void = null,
 
+        // Stroked path / polyline (#120): stroke the polyline `points` with
+        // `width` (round caps/joins) in `color`; `closed` joins last→first.
+        // Optional — degrades to no-op (terminal).
+        stroke_path: ?*const fn (ptr: *anyopaque, points: []const Point, width: f32, color: style.Color, closed: bool) void = null,
+
         push_clip: *const fn (ptr: *anyopaque, rect: Rect) void,
         pop_clip: *const fn (ptr: *anyopaque) void,
 
@@ -98,6 +103,12 @@ pub const Backend = struct {
     /// without path support (terminal) no-op.
     pub fn fillPath(self: Backend, points: []const Point, color: style.Color) void {
         if (self.vtable.fill_path) |f| f(self.ptr, points, color);
+    }
+
+    /// Stroke a polyline (#120) with `width` (round caps/joins) in `color`;
+    /// `closed` joins the last point back to the first. Backends without it no-op.
+    pub fn strokePath(self: Backend, points: []const Point, width: f32, color: style.Color, closed: bool) void {
+        if (self.vtable.stroke_path) |f| f(self.ptr, points, width, color, closed);
     }
 
     pub fn pushClip(self: Backend, rect: Rect) void {

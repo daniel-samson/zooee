@@ -1058,6 +1058,90 @@ pub const MetalPathRenderer = struct {
     }
 };
 
+// Stroke uniform (#120). meta = {count, hw2, closed, 0}.
+const StrokeUniform = extern struct {
+    quad: [4]f32,
+    color: [4]f32,
+    vp: [4]f32,
+    meta: [4]f32,
+    pts: [max_path_pts][2]f32,
+};
+
+/// Strokes a polyline (#120) — the GPU port of geometry.pointNearPolyline: a
+/// fragment is kept if its squared distance to any segment is ≤ hw².
+pub const MetalStrokeRenderer = struct {
+    device: id,
+    queue: id,
+    pipeline: id,
+    enc: id = null,
+    vw: f32 = 0,
+    vh: f32 = 0,
+
+    const shader =
+        \\#include <metal_stdlib>
+        \\using namespace metal;
+        \\struct StrokeU { float4 quad; float4 color; float4 vp; float4 meta; float2 pts[64]; };
+        \\vertex float4 v_main(uint vid [[vertex_id]], constant StrokeU& u [[buffer(0)]]) {
+        \\    float2 corner[4] = { float2(0,0), float2(1,0), float2(0,1), float2(1,1) };
+        \\    float2 px = u.quad.xy + corner[vid] * u.quad.zw;
+        \\    return float4(px.x / u.vp.x * 2.0 - 1.0, 1.0 - px.y / u.vp.y * 2.0, 0, 1);
+        \\}
+        \\static float segd2(float2 a, float2 b, float2 p) {
+        \\    float2 v = b - a; float2 w = p - a; float vv = dot(v, v);
+        \\    float t = (vv > 0.0) ? clamp(dot(w, v) / vv, 0.0, 1.0) : 0.0;
+        \\    float2 d = a + t * v - p; return dot(d, d);
+        \\}
+        \\fragment float4 f_main(float4 fp [[position]], constant StrokeU& u [[buffer(0)]]) {
+        \\    float2 p = fp.xy;
+        \\    int n = int(u.meta.x); float hw2 = u.meta.y; bool closed = u.meta.z > 0.5;
+        \\    int last = closed ? n : n - 1;
+        \\    bool hit = false;
+        \\    for (int i = 0; i < 64; i++) {
+        \\        if (i >= last) break;
+        \\        float2 a = u.pts[i]; float2 b = u.pts[(i + 1) % n];
+        \\        if (segd2(a, b, p) <= hw2) { hit = true; break; }
+        \\    }
+        \\    if (!hit) discard_fragment();
+        \\    return u.color;
+        \\}
+    ;
+
+    pub fn init(device: id, queue: id) Error!MetalStrokeRenderer {
+        const pipeline = try compilePipeline(device, shader, MTLPixelFormatRGBA8Unorm, true);
+        return .{ .device = device, .queue = queue, .pipeline = pipeline };
+    }
+
+    pub fn deinit(self: *MetalStrokeRenderer) void {
+        release(self.pipeline);
+    }
+
+    pub fn stroke(self: *MetalStrokeRenderer, points: []const geometry.Point, hw: f32, color: [4]f32, closed: bool) void {
+        if (points.len < 2) return;
+        const n = @min(points.len, max_path_pts);
+        var minx = points[0].x;
+        var miny = points[0].y;
+        var maxx = points[0].x;
+        var maxy = points[0].y;
+        for (points[1..n]) |p| {
+            minx = @min(minx, p.x);
+            miny = @min(miny, p.y);
+            maxx = @max(maxx, p.x);
+            maxy = @max(maxy, p.y);
+        }
+        var u: StrokeUniform = .{
+            .quad = .{ minx - hw, miny - hw, (maxx - minx) + 2 * hw, (maxy - miny) + 2 * hw },
+            .color = color,
+            .vp = .{ self.vw, self.vh, 0, 0 },
+            .meta = .{ @floatFromInt(n), hw * hw, if (closed) 1 else 0, 0 },
+            .pts = undefined,
+        };
+        for (0..n) |i| u.pts[i] = .{ points[i].x, points[i].y };
+        _ = msg(void, struct { *const StrokeUniform, u64, u64 }, self.enc, sel("setVertexBytes:length:atIndex:"), .{ &u, @as(u64, @sizeOf(StrokeUniform)), 0 });
+        _ = msg(void, struct { *const StrokeUniform, u64, u64 }, self.enc, sel("setFragmentBytes:length:atIndex:"), .{ &u, @as(u64, @sizeOf(StrokeUniform)), 0 });
+        _ = msg(void, struct { u64, u64, u64 }, self.enc, sel("drawPrimitives:vertexStart:vertexCount:"), .{ MTLPrimitiveTypeTriangleStrip, 0, 4 });
+    }
+};
+
 // Compositor uniform. vp_op = {vw, vh, opacity, 0}.
 const CompUniform = extern struct { rect: [4]f32, vp_op: [4]f32 };
 
@@ -1209,6 +1293,7 @@ pub const MetalBackend = struct {
     grad: MetalGradientRenderer,
     shadow: MetalShadowRenderer,
     path: MetalPathRenderer,
+    stroke: MetalStrokeRenderer,
     comp: MetalLayerCompositor,
     rclip: MetalRoundClipCompositor,
     glyphs: std.AutoHashMapUnmanaged(u16, MetalGlyphRenderer) = .empty,
@@ -1268,6 +1353,7 @@ pub const MetalBackend = struct {
             .grad = try MetalGradientRenderer.init(ctx.device, ctx.queue),
             .shadow = try MetalShadowRenderer.init(ctx.device, ctx.queue),
             .path = try MetalPathRenderer.init(ctx.device, ctx.queue),
+            .stroke = try MetalStrokeRenderer.init(ctx.device, ctx.queue),
             .comp = try MetalLayerCompositor.init(ctx.device, ctx.queue),
             .rclip = try MetalRoundClipCompositor.init(ctx.device, ctx.queue),
         };
@@ -1291,6 +1377,7 @@ pub const MetalBackend = struct {
         self.grad.deinit();
         self.shadow.deinit();
         self.path.deinit();
+        self.stroke.deinit();
         self.comp.deinit();
         self.rclip.deinit();
         if (self.present_sampler != null) release(self.present_sampler);
@@ -1353,6 +1440,7 @@ pub const MetalBackend = struct {
         .draw_text = drawText,
         .draw_image = drawImage,
         .fill_path = fillPath,
+        .stroke_path = strokePath,
         .push_clip = pushClip,
         .pop_clip = popClip,
         .push_clip_rounded = pushClipRounded,
@@ -1387,6 +1475,9 @@ pub const MetalBackend = struct {
         self.path.enc = enc;
         self.path.vw = w;
         self.path.vh = h;
+        self.stroke.enc = enc;
+        self.stroke.vw = w;
+        self.stroke.vh = h;
         self.comp.enc = enc;
         self.comp.vw = w;
         self.comp.vh = h;
@@ -1513,6 +1604,12 @@ pub const MetalBackend = struct {
         const self = self_(ptr);
         _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{self.path.pipeline});
         self.path.fill(points, col4(color));
+    }
+
+    fn strokePath(ptr: *anyopaque, points: []const geometry.Point, width: f32, color: style.Color, closed: bool) void {
+        const self = self_(ptr);
+        _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{self.stroke.pipeline});
+        self.stroke.stroke(points, width * 0.5, col4(color), closed);
     }
 
     fn applyScissor(self: *MetalBackend) void {
