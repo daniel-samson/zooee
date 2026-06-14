@@ -92,6 +92,9 @@ pub const Element = struct {
     image_h: u32 = 0,
     image_fit: Backend.ImageFit = .stretch,
     image_sampling: Backend.Sampling = .nearest,
+    /// When set, the image is drawn 9-slice (#122) with these source-pixel
+    /// border insets instead of `image_fit` — for resizable button/panel art.
+    image_nine: ?Backend.NineSlice = null,
 
     // Effects (#117/#121): wrap this element's subtree when set.
     /// Group opacity 0..1: the subtree renders into an isolated layer
@@ -177,7 +180,11 @@ fn renderNode(b: Backend, placements: []const Placement, i: *usize) void {
     if (el.image_rgba) |rgba| {
         if (b.createTexture(el.image_w, el.image_h, rgba)) |tex| {
             defer b.destroyTexture(tex);
-            b.drawImageFit(p.rect, tex, @floatFromInt(el.image_w), @floatFromInt(el.image_h), el.image_fit, el.image_sampling);
+            if (el.image_nine) |ins| {
+                b.drawImageNine(p.rect, tex, @floatFromInt(el.image_w), @floatFromInt(el.image_h), ins);
+            } else {
+                b.drawImageFit(p.rect, tex, @floatFromInt(el.image_w), @floatFromInt(el.image_h), el.image_fit, el.image_sampling);
+            }
         } else |_| {}
     }
     if (el.text) |t| {

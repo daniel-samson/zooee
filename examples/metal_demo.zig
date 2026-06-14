@@ -185,6 +185,9 @@ pub fn main(init: std.process.Init) !void {
         // Bilinear (#122): smooth 2×2 upscale; CPU/GPU agree within tolerance.
         const image_bilinear_scene: zooee.fixtures.Scene = .{ .name = "image_bilinear", .width = 10, .height = 10, .draw = zooee.fixtures.drawImageBilinear };
         if (!(try compareScene(gpa, out, &mb, image_bilinear_scene, true))) backend_ok = false;
+        // 9-slice (#122): bordered button stretched; nearest patches (exact).
+        const nine_slice_scene: zooee.fixtures.Scene = .{ .name = "nine_slice", .width = 14, .height = 7, .draw = zooee.fixtures.drawNineSlice };
+        if (!(try compareScene(gpa, out, &mb, nine_slice_scene, false))) backend_ok = false;
         // Rounded clip (#117): content masked to a rounded rect must match
         // raster's hard-edged per-pixel clip (corners cut, 0.03).
         const rounded_clip_scene: zooee.fixtures.Scene = .{ .name = "rounded_clip", .width = 10, .height = 10, .draw = zooee.fixtures.drawRoundedClip };

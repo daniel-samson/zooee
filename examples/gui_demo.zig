@@ -244,6 +244,33 @@ const Demo = struct {
             .margin = .{ .bottom = 12 * scale },
             .children = try arena.dupe(*const L.Element, &.{ star, check, img, img_smooth }),
         };
+        // 9-slice (#122): an 8×8 bordered texture stretched into a wide button
+        // background — corners stay sharp, edges/center stretch.
+        const btn_px = try arena.alloc(u8, 8 * 8 * 4);
+        {
+            var bi: usize = 0;
+            while (bi < 8) : (bi += 1) {
+                var bj: usize = 0;
+                while (bj < 8) : (bj += 1) {
+                    const is_border = bi < 2 or bi >= 6 or bj < 2 or bj >= 6;
+                    const o = (bi * 8 + bj) * 4;
+                    btn_px[o + 0] = if (is_border) 60 else 90;
+                    btn_px[o + 1] = if (is_border) 90 else 150;
+                    btn_px[o + 2] = if (is_border) 200 else 240;
+                    btn_px[o + 3] = 255;
+                }
+            }
+        }
+        const button = try arena.create(L.Element);
+        button.* = .{
+            .width = 180 * scale,
+            .height = 32 * scale,
+            .margin = .{ .bottom = 12 * scale },
+            .image_rgba = btn_px,
+            .image_w = 8,
+            .image_h = 8,
+            .image_nine = .{ .l = 2, .t = 2, .r = 2, .b = 2 },
+        };
         // Unicode (#114): accents + em-dash exercise the dynamic glyph atlas.
         const uni = try arena.create(L.Element);
         uni.* = .{
@@ -260,7 +287,7 @@ const Demo = struct {
                 .border = .all(2 * scale, Color.rgb(120, 120, 130)),
                 .corner_radius = .all(10 * scale),
             },
-            .children = try arena.dupe(*const L.Element, &.{ grad_bar, swatches, card_wrap, icons, uni }),
+            .children = try arena.dupe(*const L.Element, &.{ grad_bar, swatches, card_wrap, icons, button, uni }),
         };
         return panel;
     }

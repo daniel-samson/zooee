@@ -146,6 +146,49 @@ pub const Backend = struct {
         }
     }
 
+    /// Source-pixel insets for 9-slice scaling (#122): the border thickness
+    /// that stays unscaled. `l`/`t`/`r`/`b` are measured from each edge.
+    pub const NineSlice = struct { l: f32, t: f32, r: f32, b: f32 };
+
+    /// 9-slice an `src_w`×`src_h` image into `dst` (#122): the 4 corners draw
+    /// at their source pixel size, the 4 edges stretch along one axis, and the
+    /// center stretches both — the canonical resizable-button/panel technique.
+    /// Issues 9 `drawImageUv` calls (nearest), so it's pixel-exact everywhere.
+    pub fn drawImageNine(self: Backend, dst: Rect, texture: *Texture, src_w: f32, src_h: f32, ins: NineSlice) void {
+        // Destination column/row edges: corners keep their source size.
+        const dx0 = dst.x;
+        const dx1 = dst.x + ins.l;
+        const dx2 = dst.x + dst.width - ins.r;
+        const dx3 = dst.x + dst.width;
+        const dy0 = dst.y;
+        const dy1 = dst.y + ins.t;
+        const dy2 = dst.y + dst.height - ins.b;
+        const dy3 = dst.y + dst.height;
+        // Source UV edges.
+        const ux0: f32 = 0;
+        const ux1 = ins.l / src_w;
+        const ux2 = (src_w - ins.r) / src_w;
+        const ux3: f32 = 1;
+        const uy0: f32 = 0;
+        const uy1 = ins.t / src_h;
+        const uy2 = (src_h - ins.b) / src_h;
+        const uy3: f32 = 1;
+        const dxs = [4]f32{ dx0, dx1, dx2, dx3 };
+        const dys = [4]f32{ dy0, dy1, dy2, dy3 };
+        const uxs = [4]f32{ ux0, ux1, ux2, ux3 };
+        const uys = [4]f32{ uy0, uy1, uy2, uy3 };
+        var row: usize = 0;
+        while (row < 3) : (row += 1) {
+            var col: usize = 0;
+            while (col < 3) : (col += 1) {
+                const d: Rect = .{ .x = dxs[col], .y = dys[row], .width = dxs[col + 1] - dxs[col], .height = dys[row + 1] - dys[row] };
+                if (d.width <= 0 or d.height <= 0) continue;
+                const s: Rect = .{ .x = uxs[col], .y = uys[row], .width = uxs[col + 1] - uxs[col], .height = uys[row + 1] - uys[row] };
+                self.drawImageUv(d, texture, s, .nearest);
+            }
+        }
+    }
+
     /// Fill a closed polygon (#120) with `color`, even-odd rule. Backends
     /// without path support (terminal) no-op.
     pub fn fillPath(self: Backend, points: []const Point, color: style.Color) void {
