@@ -84,6 +84,14 @@ pub const Element = struct {
     stroke_width: f32 = 1,
     stroke_closed: bool = false,
 
+    // Image fill (#122): raw RGBA pixels (`image_w`×`image_h`) drawn into the
+    // element's border-box with `image_fit`. The texture is created and freed
+    // per frame in `renderNode` (which holds the backend); view() can't.
+    image_rgba: ?[]const u8 = null,
+    image_w: u32 = 0,
+    image_h: u32 = 0,
+    image_fit: Backend.ImageFit = .stretch,
+
     // Effects (#117/#121): wrap this element's subtree when set.
     /// Group opacity 0..1: the subtree renders into an isolated layer
     /// composited back at this alpha (#121).
@@ -164,6 +172,12 @@ fn renderNode(b: Backend, placements: []const Placement, i: *usize) void {
         const n = @min(pts.len, buf.len);
         for (0..n) |k| buf[k] = .{ .x = p.rect.x + pts[k].x, .y = p.rect.y + pts[k].y };
         b.strokePath(buf[0..n], el.stroke_width, el.stroke_color, el.stroke_closed);
+    }
+    if (el.image_rgba) |rgba| {
+        if (b.createTexture(el.image_w, el.image_h, rgba)) |tex| {
+            defer b.destroyTexture(tex);
+            b.drawImageFit(p.rect, tex, @floatFromInt(el.image_w), @floatFromInt(el.image_h), el.image_fit);
+        } else |_| {}
     }
     if (el.text) |t| {
         const inner = contentBox(el, p.rect);

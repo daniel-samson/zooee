@@ -208,12 +208,28 @@ const Demo = struct {
             .stroke_color = Color.rgb(40, 170, 70),
             .stroke_width = 5 * scale,
         };
+        // Image fit (#122): a wide 4×2 swatch drawn COVER into a square tile —
+        // the texture is uploaded/drawn per frame in layout.renderNode.
+        const img_px = try arena.dupe(u8, &.{
+            255, 0,   0,   255, 0,   255, 0,   255, 0,   0,   255, 255, 255, 255, 0,   255,
+            0,   255, 255, 255, 255, 0,   255, 255, 255, 255, 255, 255, 128, 128, 128, 255,
+        });
+        const img = try arena.create(L.Element);
+        img.* = .{
+            .width = 40 * scale,
+            .height = 40 * scale,
+            .image_rgba = img_px,
+            .image_w = 4,
+            .image_h = 2,
+            .image_fit = .cover,
+            .clip_radius = .all(6 * scale),
+        };
         const icons = try arena.create(L.Element);
         icons.* = .{
             .direction = .row,
             .gap = 12 * scale,
             .margin = .{ .bottom = 12 * scale },
-            .children = try arena.dupe(*const L.Element, &.{ star, check }),
+            .children = try arena.dupe(*const L.Element, &.{ star, check, img }),
         };
         // Unicode (#114): accents + em-dash exercise the dynamic glyph atlas.
         const uni = try arena.create(L.Element);

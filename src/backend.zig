@@ -44,6 +44,11 @@ pub const Backend = struct {
         draw_text: *const fn (ptr: *anyopaque, origin: Point, text: []const u8, text_style: TextStyle) void,
         draw_image: *const fn (ptr: *anyopaque, rect: Rect, texture: *Texture) void,
 
+        // Image with an explicit source sub-rect in UV space (#122): samples
+        // only `src` (uv 0..1) of the texture into `dst`. Powers fit modes and
+        // 9-slice. Optional — degrades to a full-texture `draw_image`.
+        draw_image_uv: ?*const fn (ptr: *anyopaque, dst: Rect, texture: *Texture, src: Rect) void = null,
+
         // Filled arbitrary path (#120): fill the closed polygon `points` with
         // `color` using the even-odd rule (geometry.pointInPolygon). Optional —
         // backends that can't (terminal) leave it null and `fillPath` no-ops.
@@ -97,6 +102,42 @@ pub const Backend = struct {
 
     pub fn drawImage(self: Backend, rect: Rect, texture: *Texture) void {
         self.vtable.draw_image(self.ptr, rect, texture);
+    }
+
+    /// How an image is scaled into its destination rect (#122).
+    pub const ImageFit = enum {
+        /// Fill the rect, ignoring aspect ratio (the legacy behaviour).
+        stretch,
+        /// Scale to fit inside, preserving aspect; letterboxed/centered.
+        contain,
+        /// Scale to fill, preserving aspect; the overflow is cropped.
+        cover,
+    };
+
+    /// Draw `texture` into `dst`, sampling only its `src` UV sub-rect.
+    pub fn drawImageUv(self: Backend, dst: Rect, texture: *Texture, src: Rect) void {
+        if (self.vtable.draw_image_uv) |f| f(self.ptr, dst, texture, src) else self.vtable.draw_image(self.ptr, dst, texture);
+    }
+
+    /// Draw a `src_w`×`src_h` image into `dst` honoring the `fit` mode (#122):
+    /// `contain` shrinks the destination sub-rect, `cover` crops the source.
+    pub fn drawImageFit(self: Backend, dst: Rect, texture: *Texture, src_w: f32, src_h: f32, fit: ImageFit) void {
+        switch (fit) {
+            .stretch => self.drawImageUv(dst, texture, .{ .x = 0, .y = 0, .width = 1, .height = 1 }),
+            .contain => {
+                const scale = @min(dst.width / src_w, dst.height / src_h);
+                const dw = src_w * scale;
+                const dh = src_h * scale;
+                const inner: Rect = .{ .x = dst.x + (dst.width - dw) * 0.5, .y = dst.y + (dst.height - dh) * 0.5, .width = dw, .height = dh };
+                self.drawImageUv(inner, texture, .{ .x = 0, .y = 0, .width = 1, .height = 1 });
+            },
+            .cover => {
+                const scale = @max(dst.width / src_w, dst.height / src_h);
+                const uw = dst.width / (src_w * scale); // visible fraction of u
+                const vh = dst.height / (src_h * scale);
+                self.drawImageUv(dst, texture, .{ .x = (1 - uw) * 0.5, .y = (1 - vh) * 0.5, .width = uw, .height = vh });
+            },
+        }
     }
 
     /// Fill a closed polygon (#120) with `color`, even-odd rule. Backends

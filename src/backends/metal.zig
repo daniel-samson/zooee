@@ -837,13 +837,13 @@ pub const MetalImageRenderer = struct {
     const shader =
         \\#include <metal_stdlib>
         \\using namespace metal;
-        \\struct RectU { float4 rect; float2 viewport; };
+        \\struct ImgU { float4 rect; float4 src; float4 vp; };
         \\struct VOut { float4 pos [[position]]; float2 uv; };
-        \\vertex VOut v_main(uint vid [[vertex_id]], constant RectU& u [[buffer(0)]]) {
+        \\vertex VOut v_main(uint vid [[vertex_id]], constant ImgU& u [[buffer(0)]]) {
         \\    float2 corner[4] = { float2(0,0), float2(1,0), float2(0,1), float2(1,1) };
         \\    float2 c = corner[vid];
         \\    float2 px = u.rect.xy + c * u.rect.zw;
-        \\    VOut o; o.pos = float4(px.x / u.viewport.x * 2.0 - 1.0, 1.0 - px.y / u.viewport.y * 2.0, 0, 1); o.uv = c; return o;
+        \\    VOut o; o.pos = float4(px.x / u.vp.x * 2.0 - 1.0, 1.0 - px.y / u.vp.y * 2.0, 0, 1); o.uv = u.src.xy + c * u.src.zw; return o;
         \\}
         \\fragment float4 f_main(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]], sampler s [[sampler(0)]]) {
         \\    return tex.sample(s, in.uv);
@@ -862,8 +862,14 @@ pub const MetalImageRenderer = struct {
     }
 
     pub fn draw(self: *MetalImageRenderer, x: f32, y: f32, w: f32, h: f32, tex: id) void {
-        var u: RectUniform = .{ .rect = .{ x, y, w, h }, .viewport = .{ self.vw, self.vh } };
-        _ = msg(void, struct { *const RectUniform, u64, u64 }, self.enc, sel("setVertexBytes:length:atIndex:"), .{ &u, @as(u64, @sizeOf(RectUniform)), 0 });
+        self.drawUv(x, y, w, h, .{ 0, 0, 1, 1 }, tex);
+    }
+
+    /// Draw the `src` UV sub-rect into the dst rect.
+    pub fn drawUv(self: *MetalImageRenderer, x: f32, y: f32, w: f32, h: f32, src: [4]f32, tex: id) void {
+        const ImgUniform = extern struct { rect: [4]f32, src: [4]f32, vp: [4]f32 };
+        var u: ImgUniform = .{ .rect = .{ x, y, w, h }, .src = src, .vp = .{ self.vw, self.vh, 0, 0 } };
+        _ = msg(void, struct { *const ImgUniform, u64, u64 }, self.enc, sel("setVertexBytes:length:atIndex:"), .{ &u, @as(u64, @sizeOf(ImgUniform)), 0 });
         _ = msg(void, struct { id, u64 }, self.enc, sel("setFragmentTexture:atIndex:"), .{ tex, 0 });
         _ = msg(void, struct { id, u64 }, self.enc, sel("setFragmentSamplerState:atIndex:"), .{ self.sampler, 0 });
         _ = msg(void, struct { u64, u64, u64 }, self.enc, sel("drawPrimitives:vertexStart:vertexCount:"), .{ MTLPrimitiveTypeTriangleStrip, 0, 4 });
@@ -1490,6 +1496,7 @@ pub const MetalBackend = struct {
         .draw_rect = drawRect,
         .draw_text = drawText,
         .draw_image = drawImage,
+        .draw_image_uv = drawImageUv,
         .fill_path = fillPath,
         .stroke_path = strokePath,
         .push_clip = pushClip,
@@ -1651,6 +1658,12 @@ pub const MetalBackend = struct {
         const self = self_(ptr);
         _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{self.image.pipeline});
         self.image.draw(rect.x, rect.y, rect.width, rect.height, @ptrCast(texture));
+    }
+
+    fn drawImageUv(ptr: *anyopaque, dst: geometry.Rect, texture: *Backend.Texture, src: geometry.Rect) void {
+        const self = self_(ptr);
+        _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{self.image.pipeline});
+        self.image.drawUv(dst.x, dst.y, dst.width, dst.height, .{ src.x, src.y, src.width, src.height }, @ptrCast(texture));
     }
 
     fn fillPath(ptr: *anyopaque, points: []const geometry.Point, color: style.Color) void {

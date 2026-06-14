@@ -1601,17 +1601,26 @@ pub const ImageRenderer = struct {
     /// Draw texture `tex` into pixel-space `rect`. `vw`/`vh` are the
     /// framebuffer size.
     pub fn draw(self: *ImageRenderer, vw: f32, vh: f32, rect: geometry.Rect, tex: GLuint) void {
+        self.drawUv(vw, vh, rect, .{ .x = 0, .y = 0, .width = 1, .height = 1 }, tex);
+    }
+
+    /// Draw the `src` UV sub-rect of `tex` into pixel-space `dst` (#122 fit).
+    pub fn drawUv(self: *ImageRenderer, vw: f32, vh: f32, dst: geometry.Rect, src: geometry.Rect, tex: GLuint) void {
         const gl = self.gl;
-        const x0 = rect.x;
-        const y0 = rect.y;
-        const x1 = rect.x + rect.width;
-        const y1 = rect.y + rect.height;
+        const x0 = dst.x;
+        const y0 = dst.y;
+        const x1 = dst.x + dst.width;
+        const y1 = dst.y + dst.height;
+        const tx0 = src.x;
+        const ty0 = src.y;
+        const tx1 = src.x + src.width;
+        const ty1 = src.y + src.height;
         // Interleaved pos.xy, uv.xy. uv.t = 0 at the rect top (texel row 0).
         const verts = [_]f32{
-            x0, y0, 0, 0,
-            x1, y0, 1, 0,
-            x0, y1, 0, 1,
-            x1, y1, 1, 1,
+            x0, y0, tx0, ty0,
+            x1, y0, tx1, ty0,
+            x0, y1, tx0, ty1,
+            x1, y1, tx1, ty1,
         };
         gl.useProgram(self.program);
         gl.uniform2f(self.u_viewport, vw, vh);
@@ -1997,6 +2006,7 @@ pub const GlBackend = struct {
         .draw_rect = drawRect,
         .draw_text = drawText,
         .draw_image = drawImage,
+        .draw_image_uv = drawImageUv,
         .fill_path = fillPath,
         .stroke_path = strokePath,
         .push_clip = pushClip,
@@ -2141,6 +2151,12 @@ pub const GlBackend = struct {
         const self = self_(ptr);
         enableBlend();
         self.image.draw(@floatFromInt(self.width), @floatFromInt(self.height), rect, @intCast(@intFromPtr(texture)));
+    }
+
+    fn drawImageUv(ptr: *anyopaque, dst: geometry.Rect, texture: *Backend.Texture, src: geometry.Rect) void {
+        const self = self_(ptr);
+        enableBlend();
+        self.image.drawUv(@floatFromInt(self.width), @floatFromInt(self.height), dst, src, @intCast(@intFromPtr(texture)));
     }
 
     fn fillPath(ptr: *anyopaque, points: []const geometry.Point, color: style.Color) void {
