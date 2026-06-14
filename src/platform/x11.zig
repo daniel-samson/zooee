@@ -193,6 +193,38 @@ const XEvent = extern union {
     pad: [24]c_long,
 };
 
+/// Decode one `file://` URI line from an XDND text/uri-list into a filesystem
+/// path (#212): strips the scheme + optional host and percent-decodes. Returns
+/// null for non-file URIs. Allocated in `a`.
+fn decodeFileUri(a: std.mem.Allocator, line: []const u8) ?[]const u8 {
+    const prefix = "file://";
+    if (!std.mem.startsWith(u8, line, prefix)) return null;
+    var rest = line[prefix.len..];
+    // file://host/path → skip the host up to the next '/'; file:///path → '/...'.
+    if (rest.len > 0 and rest[0] != '/') {
+        if (std.mem.indexOfScalar(u8, rest, '/')) |slash| rest = rest[slash..] else return null;
+    }
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        if (rest[i] == '%' and i + 2 < rest.len) {
+            const hi = std.fmt.charToDigit(rest[i + 1], 16) catch {
+                out.append(a, rest[i]) catch return null;
+                continue;
+            };
+            const lo = std.fmt.charToDigit(rest[i + 2], 16) catch {
+                out.append(a, rest[i]) catch return null;
+                continue;
+            };
+            out.append(a, hi * 16 + lo) catch return null;
+            i += 2;
+        } else {
+            out.append(a, rest[i]) catch return null;
+        }
+    }
+    return out.items;
+}
+
 /// Core modifiers from an X event `state` mask (#211): Shift/Control/Mod1(Alt)/
 /// Mod4(Super).
 fn x11Mods(state: c_uint) core_event.Modifiers {
@@ -469,6 +501,10 @@ pub const Window = struct {
     /// CLIPBOARD selection contents we own (#209), served to other apps on
     /// SelectionRequest. Owned by `gpa`; freed in destroy.
     clipboard_text: ?[]u8 = null,
+    /// XDND drag source during a drag-over (#212); 0 = no drag in progress.
+    xdnd_source: Window_ = 0,
+    /// Drop arena (#212): dropped paths live here until the next pumpEvents.
+    drop_arena: std.heap.ArenaAllocator = undefined,
 
     pub const CreateOptions = struct {
         title: [:0]const u8 = "zooee",
@@ -539,6 +575,10 @@ pub const Window = struct {
         var wm_delete = XInternAtom(display, "WM_DELETE_WINDOW", 0);
         _ = XSetWMProtocols(display, handle, &wm_delete, 1);
 
+        // Advertise XDND v5 so other apps can drop files on us (#212).
+        var xdnd_version: Atom = 5;
+        _ = XChangeProperty(display, handle, XInternAtom(display, "XdndAware", 0), 4, 32, 0, @ptrCast(&xdnd_version), 1); // XA_ATOM=4
+
         const gc = XCreateGC(display, handle, 0, null) orelse return error.BackendFailure;
         if (opts.visible) _ = XMapWindow(display, handle);
         _ = XFlush(display);
@@ -551,6 +591,7 @@ pub const Window = struct {
             .visual = if (gl_visual) |v| v else XDefaultVisual(display, screen),
             .depth = if (gl_depth != 0) gl_depth else @intCast(XDefaultDepth(display, screen)),
             .wm_delete = wm_delete,
+            .drop_arena = std.heap.ArenaAllocator.init(gpa),
             .gpa = gpa,
             .width = opts.width,
             .height = opts.height,
@@ -722,6 +763,109 @@ pub const Window = struct {
         return false;
     }
 
+    // --- XDND drop target (#212) ------------------------------------------
+
+    /// Handle an XDND client message (Enter/Position/Leave/Drop). Returns true
+    /// if it was an XDND message.
+    fn handleXdnd(self: *Window, cm: *const XClientMessageEvent) bool {
+        const d = self.display;
+        const mt = cm.message_type;
+        if (mt == XInternAtom(d, "XdndEnter", 0)) {
+            self.xdnd_source = @bitCast(cm.data.l[0]);
+            return true;
+        } else if (mt == XInternAtom(d, "XdndPosition", 0)) {
+            self.sendXdndStatus(@bitCast(cm.data.l[0]));
+            return true;
+        } else if (mt == XInternAtom(d, "XdndLeave", 0)) {
+            self.xdnd_source = 0;
+            return true;
+        } else if (mt == XInternAtom(d, "XdndDrop", 0)) {
+            const src: Window_ = @bitCast(cm.data.l[0]);
+            const time: Time = @bitCast(cm.data.l[2]);
+            self.xdnd_source = src;
+            _ = XConvertSelection(d, XInternAtom(d, "XdndSelection", 0), XInternAtom(d, "text/uri-list", 0), XInternAtom(d, "XdndTarget", 0), self.handle, time);
+            _ = XFlush(d);
+            return true; // data arrives via SelectionNotify
+        }
+        return false;
+    }
+
+    fn sendXdndStatus(self: *Window, source: Window_) void {
+        const d = self.display;
+        var ev: XEvent = undefined;
+        ev.xclient = .{
+            .type = ClientMessage,
+            .serial = 0,
+            .send_event = 1,
+            .display = d,
+            .window = source,
+            .message_type = XInternAtom(d, "XdndStatus", 0),
+            .format = 32,
+            .data = .{
+                .l = .{
+                    @bitCast(@as(c_ulong, self.handle)),
+                    1, // accept
+                    0, // empty rect → re-ask each move
+                    0,
+                    @bitCast(@as(c_ulong, XInternAtom(d, "XdndActionCopy", 0))),
+                },
+            },
+        };
+        _ = XSendEvent(d, source, 0, 0, &ev);
+        _ = XFlush(d);
+    }
+
+    fn sendXdndFinished(self: *Window) void {
+        if (self.xdnd_source == 0) return;
+        const d = self.display;
+        var ev: XEvent = undefined;
+        ev.xclient = .{
+            .type = ClientMessage,
+            .serial = 0,
+            .send_event = 1,
+            .display = d,
+            .window = self.xdnd_source,
+            .message_type = XInternAtom(d, "XdndFinished", 0),
+            .format = 32,
+            .data = .{ .l = .{ @bitCast(@as(c_ulong, self.handle)), 1, @bitCast(@as(c_ulong, XInternAtom(d, "XdndActionCopy", 0))), 0, 0 } },
+        };
+        _ = XSendEvent(d, self.xdnd_source, 0, 0, &ev);
+        _ = XFlush(d);
+        self.xdnd_source = 0;
+    }
+
+    /// Read the dropped text/uri-list property, enqueue a .drop, ack the source.
+    fn readXdndDrop(self: *Window) void {
+        const d = self.display;
+        const prop = XInternAtom(d, "XdndTarget", 0);
+        var atype: Atom = 0;
+        var afmt: c_int = 0;
+        var nitems: c_ulong = 0;
+        var after: c_ulong = 0;
+        var data: ?[*]u8 = null;
+        if (XGetWindowProperty(d, self.handle, prop, 0, 1 << 24, 0, 0, &atype, &afmt, &nitems, &after, &data) == 0) {
+            defer {
+                if (data) |dd| _ = XFree(dd);
+            }
+            if (data != null and nitems > 0) {
+                const a = self.drop_arena.allocator();
+                var paths: std.ArrayList([]const u8) = .empty;
+                var it = std.mem.splitAny(u8, data.?[0..nitems], "\r\n");
+                while (it.next()) |line| {
+                    if (line.len == 0 or line[0] == '#') continue;
+                    if (decodeFileUri(a, line)) |p| paths.append(a, p) catch {};
+                }
+                self.queue.append(self.gpa, .{ .drop = .{
+                    .position = .{ .x = 0, .y = 0 },
+                    .data = .{ .files = paths.items },
+                    .operation = .copy,
+                } }) catch {};
+            }
+        }
+        _ = XDeleteProperty(d, self.handle, prop);
+        self.sendXdndFinished();
+    }
+
     /// Set the window's background to `(r,g,b)` (#182). The server fills any
     /// region exposed by a resize-grow with this — the theme background —
     /// instead of black, until the client repaints. Assumes a TrueColor visual
@@ -747,6 +891,7 @@ pub const Window = struct {
             _ = XFreeCursor(self.display, c);
         };
         if (self.clipboard_text) |t| self.gpa.free(t);
+        self.drop_arena.deinit();
         self.bgra.deinit(self.gpa);
         self.queue.deinit(self.gpa);
         _ = XDestroyWindow(self.display, self.handle);
@@ -756,6 +901,7 @@ pub const Window = struct {
 
     pub fn pumpEvents(self: *Window) []const Event {
         self.queue.clearRetainingCapacity();
+        _ = self.drop_arena.reset(.retain_capacity); // free last frame's drop paths (#212)
         while (XPending(self.display) > 0) {
             var ev: XEvent = undefined;
             _ = XNextEvent(self.display, &ev);
@@ -763,6 +909,15 @@ pub const Window = struct {
                 ClientMessage => {
                     if (@as(Atom, @bitCast(ev.xclient.data.l[0])) == self.wm_delete) {
                         self.queue.append(self.gpa, .{ .close_requested = core_event.main_window }) catch {};
+                    } else {
+                        _ = self.handleXdnd(&ev.xclient); // #212
+                    }
+                },
+                SelectionNotify => {
+                    // XDND drop data arrived (#212); clipboard's SelectionNotify
+                    // is consumed synchronously elsewhere (distinct property).
+                    if (ev.xselection.property == XInternAtom(self.display, "XdndTarget", 0)) {
+                        self.readXdndDrop();
                     }
                 },
                 ConfigureNotify => {
