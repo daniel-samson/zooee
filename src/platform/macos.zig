@@ -332,6 +332,13 @@ pub const Window = struct {
         return msg(bool, struct {}, self.ns_window, sel("isZoomed"), .{});
     }
 
+    /// True while the user is dragging a resize edge (#170/#181): the present
+    /// loop uses a transaction-synced present then, async (vsync-paced) otherwise.
+    pub fn inLiveResize(self: *Window) bool {
+        const view = msg(id, struct {}, self.ns_window, sel("contentView"), .{});
+        return msg(bool, struct {}, view, sel("inLiveResize"), .{});
+    }
+
     /// The window's content NSView (id) — where the Metal layer (#101) or GL
     /// context attaches.
     pub fn contentView(self: *Window) ?*anyopaque {
