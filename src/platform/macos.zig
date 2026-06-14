@@ -28,6 +28,7 @@ extern "objc" fn objc_msgSend() void;
 extern "objc" fn objc_allocateClassPair(Class, [*:0]const u8, usize) Class;
 extern "objc" fn objc_registerClassPair(Class) void;
 extern "objc" fn class_addMethod(Class, SEL, *const anyopaque, [*:0]const u8) bool;
+extern "objc" fn object_getClass(id) Class;
 
 const NSRect = extern struct { x: f64, y: f64, w: f64, h: f64 };
 
@@ -173,6 +174,63 @@ fn keyCodeToKey(kc: u16) ?core_event.Key {
 var live_resize_window: ?*Window = null;
 var delegate_instance: id = null;
 
+// --- drag-and-drop destination (#212) ---------------------------------------
+// Single-window: the dragging IMPs enqueue onto this Window. The destination
+// methods are added once to the contentView's class; registerForDraggedTypes:
+// activates them only on our registered view.
+var drag_window: ?*Window = null;
+var drag_methods_added = false;
+
+const NSDragOperationCopy: u64 = 1;
+const ns_filenames_type = "NSFilenamesPboardType";
+
+/// IMP for `draggingEntered:`/`draggingUpdated:` — accept as a copy.
+fn onDraggingEntered(_: id, _: SEL, _: id) callconv(.c) u64 {
+    return NSDragOperationCopy;
+}
+
+/// IMP for `performDragOperation:` — read the dropped file paths off the drag
+/// pasteboard and enqueue a core `.drop` event.
+fn onPerformDrag(_: id, _: SEL, sender: id) callconv(.c) bool {
+    const w = drag_window orelse return false;
+    const pb = msg(id, struct {}, sender, sel("draggingPasteboard"), .{});
+    const list = msg(id, struct { id }, pb, sel("propertyListForType:"), .{nsString(ns_filenames_type)});
+    if (list == null) return false;
+    const count = msg(u64, struct {}, list, sel("count"), .{});
+    const a = w.drop_arena.allocator();
+    const paths = a.alloc([]const u8, count) catch return false;
+    var n: usize = 0;
+    var i: u64 = 0;
+    while (i < count) : (i += 1) {
+        const s = msg(id, struct { u64 }, list, sel("objectAtIndex:"), .{i});
+        const c = msg([*:0]const u8, struct {}, s, sel("UTF8String"), .{});
+        paths[n] = a.dupe(u8, std.mem.span(c)) catch continue;
+        n += 1;
+    }
+    const loc = msg(NSPoint, struct {}, sender, sel("draggingLocation"), .{});
+    w.queue.append(w.gpa, .{ .drop = .{
+        .position = .{ .x = @floatCast(loc.x), .y = @floatCast(loc.y) },
+        .data = .{ .files = paths[0..n] },
+        .operation = .copy,
+    } }) catch {};
+    return true;
+}
+
+/// Register the drag-destination methods on the contentView's class (once) and
+/// accept filename drops on `view`.
+fn enableDrop(view: id, w: *Window) void {
+    drag_window = w;
+    if (!drag_methods_added) {
+        const c = object_getClass(view);
+        _ = class_addMethod(c, sel("draggingEntered:"), @ptrCast(&onDraggingEntered), "Q@:@");
+        _ = class_addMethod(c, sel("draggingUpdated:"), @ptrCast(&onDraggingEntered), "Q@:@");
+        _ = class_addMethod(c, sel("performDragOperation:"), @ptrCast(&onPerformDrag), "c@:@");
+        drag_methods_added = true;
+    }
+    const arr = msg(id, struct { id }, cls("NSArray"), sel("arrayWithObject:"), .{nsString(ns_filenames_type)});
+    _ = msg(void, struct { id }, view, sel("registerForDraggedTypes:"), .{arr});
+}
+
 fn resizeDelegate() id {
     if (delegate_instance) |d| return d;
     const class = objc_allocateClassPair(cls("NSObject"), "ZooeeWindowDelegate", 0);
@@ -218,6 +276,9 @@ pub const Window = struct {
     /// delegate calls this to redraw live. See [[fix-live-resize]].
     redraw_ctx: ?*anyopaque = null,
     redraw_fn: ?*const fn (?*anyopaque) void = null,
+    /// Scratch for drop payloads (#212): dropped paths live here until the next
+    /// pumpEvents resets it (DragData is "valid only during dispatch").
+    drop_arena: std.heap.ArenaAllocator,
 
     pub const CreateOptions = struct {
         title: [:0]const u8 = "zooee",
@@ -274,7 +335,10 @@ pub const Window = struct {
         if (opts.gl) gl_ctx = createGlContext(window);
 
         const self = try gpa.create(Window);
-        self.* = .{ .ns_window = window, .gpa = gpa, .last_size = frame, .gl_ctx = gl_ctx };
+        self.* = .{ .ns_window = window, .gpa = gpa, .last_size = frame, .gl_ctx = gl_ctx, .drop_arena = std.heap.ArenaAllocator.init(gpa) };
+        // Accept file drops on the content view (#212).
+        const cv = msg(id, struct {}, window, sel("contentView"), .{});
+        enableDrop(cv, self);
         return self;
     }
 
@@ -283,7 +347,9 @@ pub const Window = struct {
             _ = msg(void, struct {}, self.gl_ctx, sel("clearDrawable"), .{});
         }
         _ = msg(void, struct {}, self.ns_window, sel("close"), .{});
+        if (drag_window == self) drag_window = null;
         self.queue.deinit(self.gpa);
+        self.drop_arena.deinit();
         self.gpa.destroy(self);
     }
 
@@ -388,6 +454,7 @@ pub const Window = struct {
     /// Drain pending AppKit events; non-blocking (#5 drivable loop).
     pub fn pumpEvents(self: *Window) []const Event {
         self.queue.clearRetainingCapacity();
+        _ = self.drop_arena.reset(.retain_capacity); // free last frame's drop paths (#212)
         // Drain the NSEvents (and other autoreleased objc objects) this pump
         // creates, every call — otherwise a continuously-redrawing app leaks
         // them each frame and eventually crashes. The returned queue holds our
