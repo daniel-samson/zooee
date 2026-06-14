@@ -87,12 +87,48 @@ pub const ResizeEvent = struct {
     size: geometry.Size,
 };
 
+/// Scroll / wheel input (#126). A pointer-anchored delta: `dx`/`dy` are the
+/// scroll amount (positive `dy` scrolls content toward its start / the view
+/// downward, after platform normalization). `unit` distinguishes discrete
+/// wheel lines from smooth pixel deltas (trackpads), and `phase` exposes the
+/// trackpad gesture lifecycle (incl. momentum) for inertial scrolling later.
+pub const ScrollEvent = struct {
+    window: WindowId = main_window,
+    /// Pointer position when the scroll occurred (for hit-testing the target).
+    position: geometry.Point,
+    dx: f32 = 0,
+    dy: f32 = 0,
+    unit: ScrollUnit = .line,
+    phase: ScrollPhase = .continue_,
+    mods: Modifiers = .{},
+};
+
+pub const ScrollUnit = enum {
+    /// Discrete wheel notches (mouse). One step is `dy = ±1` line.
+    line,
+    /// Smooth pixel deltas (trackpad, high-resolution wheel).
+    pixel,
+};
+
+/// Trackpad gesture lifecycle (mouse wheels only ever emit `.continue_`).
+pub const ScrollPhase = enum {
+    /// Fingers touched down / gesture began.
+    begin,
+    /// An ongoing scroll update.
+    continue_,
+    /// Fingers lifted; the user-driven part ended.
+    end,
+    /// Inertial momentum frames after `end` (macOS); decays to a stop.
+    momentum,
+};
+
 pub const Event = union(enum) {
     key_down: KeyEvent,
     text: TextEvent,
     pointer_down: PointerEvent,
     pointer_up: PointerEvent,
     pointer_move: PointerEvent,
+    scroll: ScrollEvent,
     resized: ResizeEvent,
     focus_gained: WindowId,
     focus_lost: WindowId,
