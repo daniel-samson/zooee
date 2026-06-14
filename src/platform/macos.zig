@@ -114,6 +114,7 @@ pub const SystemClipboard = struct {
 // --- events ----------------------------------------------------------------
 
 const core_event = @import("../event.zig");
+const cursor_mod = @import("../cursor.zig");
 /// Native windows emit the same core events as the terminal session, so
 /// one app loop drives every surface (#5).
 pub const Event = core_event.Event;
@@ -337,6 +338,30 @@ pub const Window = struct {
     pub fn inLiveResize(self: *Window) bool {
         const view = msg(id, struct {}, self.ns_window, sel("contentView"), .{});
         return msg(bool, struct {}, view, sel("inLiveResize"), .{});
+    }
+
+    /// Apply a pointer cursor shape (#123). Maps to the matching `NSCursor`
+    /// class cursor and sends `set`. Shapes without a public AppKit cursor
+    /// (the diagonal resizes, `wait`) fall back to the closest available one.
+    pub fn setCursor(self: *Window, shape: cursor_mod.Cursor) void {
+        _ = self;
+        const ns = cls("NSCursor");
+        const getter: SEL = switch (shape) {
+            .default => sel("arrowCursor"),
+            .pointer => sel("pointingHandCursor"),
+            .text => sel("IBeamCursor"),
+            .crosshair => sel("crosshairCursor"),
+            .not_allowed => sel("operationNotAllowedCursor"),
+            .grab => sel("openHandCursor"),
+            .grabbing => sel("closedHandCursor"),
+            .ew_resize => sel("resizeLeftRightCursor"),
+            .ns_resize => sel("resizeUpDownCursor"),
+            // AppKit has no public diagonal-resize or busy cursor; arrow is the
+            // documented fallback.
+            .nwse_resize, .nesw_resize, .wait => sel("arrowCursor"),
+        };
+        const cursor_obj = msg(id, struct {}, ns, getter, .{});
+        _ = msg(void, struct {}, cursor_obj, sel("set"), .{});
     }
 
     /// The window's content NSView (id) — where the Metal layer (#101) or GL

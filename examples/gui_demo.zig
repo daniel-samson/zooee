@@ -87,6 +87,8 @@ const Demo = struct {
                     .{},
                 .on_click = Msg.click(i),
                 .on_hover = Msg.hover(i),
+                // Clickable rows show the hand pointer (#123).
+                .cursor = .pointer,
             };
             row_ptrs[i] = &rows[i];
         }
@@ -96,6 +98,8 @@ const Demo = struct {
             .text = "zooee — click or hover a row",
             .text_style = .{ .color = self.theme.text, .bold = true, .size = 22 * scale },
             .margin = .{ .bottom = 12 * scale },
+            // Heading reads as text → I-beam (#123); rows below show the hand.
+            .cursor = .text,
         };
         // Declarative-animation indicator (#125): a 4px accent bar that *slides*
         // to the selected row (Transition, eased) while *pulsing* its opacity

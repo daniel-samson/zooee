@@ -11,6 +11,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const core_event = @import("../event.zig");
 const geometry = @import("../geometry.zig");
+const cursor_mod = @import("../cursor.zig");
 
 comptime {
     if (builtin.os.tag != .linux) @compileError("x11.zig is Linux-only; gate imports on builtin.os.tag");
@@ -162,6 +163,9 @@ extern "X11" fn XChangeProperty(*Display, Window_, Atom, Atom, c_int, c_int, [*]
 extern "X11" fn XSelectInput(*Display, Window_, c_long) c_int;
 extern "X11" fn XMapWindow(*Display, Window_) c_int;
 extern "X11" fn XFlush(*Display) c_int;
+extern "X11" fn XCreateFontCursor(*Display, c_uint) XID;
+extern "X11" fn XDefineCursor(*Display, Window_, XID) c_int;
+extern "X11" fn XFreeCursor(*Display, XID) c_int;
 extern "X11" fn XSetWindowBackground(*Display, Window_, c_ulong) c_int;
 extern "X11" fn XClearWindow(*Display, Window_) c_int;
 extern "X11" fn XPending(*Display) c_int;
@@ -302,6 +306,9 @@ pub const Window = struct {
     /// lagging to the next loop iteration (the exposed strip flashing).
     redraw_fn: ?*const fn (?*anyopaque) void = null,
     redraw_ctx: ?*anyopaque = null,
+    /// Lazily-created X font cursors per shape (#123), indexed by the Cursor
+    /// enum tag; 0 = not yet created. Freed in `destroy`.
+    cursors: [std.meta.fields(cursor_mod.Cursor).len]XID = [_]XID{0} ** std.meta.fields(cursor_mod.Cursor).len,
 
     pub const CreateOptions = struct {
         title: [:0]const u8 = "zooee",
@@ -415,6 +422,32 @@ pub const Window = struct {
         self.redraw_fn = f;
     }
 
+    /// Apply a pointer cursor shape (#123) via the X cursor font. Cursors are
+    /// created lazily and cached per shape. The cursor-font glyph numbers are
+    /// the standard `XC_*` constants from `<X11/cursorfont.h>`.
+    pub fn setCursor(self: *Window, shape: cursor_mod.Cursor) void {
+        // XC_* glyph indices. Diagonal resizes use the nearest corner cursor;
+        // not_allowed uses XC_X_cursor (no slashed-circle exists in the font).
+        const glyph: c_uint = switch (shape) {
+            .default => 68, // XC_left_ptr
+            .pointer => 60, // XC_hand2
+            .text => 152, // XC_xterm
+            .crosshair => 34, // XC_crosshair
+            .not_allowed => 0, // XC_X_cursor
+            .grab => 58, // XC_hand1
+            .grabbing => 58, // XC_hand1 (no closed-hand glyph)
+            .ew_resize => 108, // XC_sb_h_double_arrow
+            .ns_resize => 116, // XC_sb_v_double_arrow
+            .nwse_resize => 134, // XC_top_left_corner
+            .nesw_resize => 136, // XC_top_right_corner
+            .wait => 150, // XC_watch
+        };
+        const idx = @intFromEnum(shape);
+        if (self.cursors[idx] == 0) self.cursors[idx] = XCreateFontCursor(self.display, glyph);
+        _ = XDefineCursor(self.display, self.handle, self.cursors[idx]);
+        _ = XFlush(self.display);
+    }
+
     /// Set the window's background to `(r,g,b)` (#182). The server fills any
     /// region exposed by a resize-grow with this — the theme background —
     /// instead of black, until the client repaints. Assumes a TrueColor visual
@@ -436,6 +469,9 @@ pub const Window = struct {
             img.data = null; // our buffer; let Xlib free only the struct
             if (img.f.destroy_image) |di| _ = di(img);
         }
+        for (self.cursors) |c| if (c != 0) {
+            _ = XFreeCursor(self.display, c);
+        };
         self.bgra.deinit(self.gpa);
         self.queue.deinit(self.gpa);
         _ = XDestroyWindow(self.display, self.handle);
