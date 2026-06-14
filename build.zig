@@ -26,6 +26,8 @@ pub fn build(b: *std.Build) void {
             mod.linkFramework("OpenGL", .{}); // CGL/NSOpenGL (#11)
             mod.linkFramework("Metal", .{}); // (#101)
             mod.linkFramework("QuartzCore", .{}); // CAMetalLayer (#101)
+            mod.linkFramework("CoreText", .{}); // system-font discovery (#204)
+            mod.linkFramework("CoreFoundation", .{}); // CF types for CoreText (#204)
             mod.link_libc = true; // dlsym for GL proc resolution
         },
         .linux => {
