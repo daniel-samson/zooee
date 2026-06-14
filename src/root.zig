@@ -39,6 +39,8 @@ pub const declarative = @import("declarative.zig");
 /// Pointer cursor shapes (#123): per-region cursor requests + CSS keyword map.
 pub const cursor = @import("cursor.zig");
 pub const Cursor = cursor.Cursor;
+/// Terminal cell-width of Unicode text (#18): wide CJK = 2, combining = 0.
+pub const unicode_width = @import("unicode_width.zig");
 pub const text = @import("text.zig");
 pub const clipboard = @import("clipboard.zig");
 pub const display = @import("display.zig");
