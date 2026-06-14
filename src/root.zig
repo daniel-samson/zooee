@@ -53,6 +53,8 @@ pub const arabic = @import("arabic.zig");
 pub const indic = @import("indic.zig");
 /// Native file/folder dialogs (#129): NSOpenPanel / GetOpenFileNameW / zenity.
 pub const dialog = @import("dialog.zig");
+/// Native menu model + context-menu popup (#129): NSMenu / HMENU.
+pub const menu = @import("menu.zig");
 pub const text = @import("text.zig");
 pub const clipboard = @import("clipboard.zig");
 pub const display = @import("display.zig");

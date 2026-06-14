@@ -128,6 +128,26 @@ extern "user32" fn SetWindowLongPtrW(HWND, i32, isize) callconv(WINAPI) isize;
 extern "user32" fn GetWindowLongPtrW(HWND, i32) callconv(WINAPI) isize;
 extern "kernel32" fn GetModuleHandleW(?[*:0]const u16) callconv(WINAPI) HINSTANCE;
 
+// Native context menus (#129): HMENU built from the menu model, popped with
+// TrackPopupMenu(TPM_RETURNCMD) which blocks and returns the chosen command id
+// (or 0 on dismiss) synchronously — no WM_COMMAND routing needed.
+const MF_STRING: u32 = 0x0000;
+const MF_SEPARATOR: u32 = 0x0800;
+const MF_GRAYED: u32 = 0x0001;
+const MF_CHECKED: u32 = 0x0008;
+const MF_POPUP: u32 = 0x0010;
+const TPM_RETURNCMD: u32 = 0x0100;
+const TPM_NONOTIFY: u32 = 0x0080;
+const TPM_LEFTALIGN: u32 = 0x0000;
+extern "user32" fn CreatePopupMenu() callconv(WINAPI) ?*anyopaque;
+extern "user32" fn DestroyMenu(*anyopaque) callconv(WINAPI) win.BOOL;
+extern "user32" fn AppendMenuW(*anyopaque, u32, usize, ?[*:0]const u16) callconv(WINAPI) win.BOOL;
+// With TPM_RETURNCMD the return value is the chosen command id (0 = dismissed),
+// not a BOOL.
+extern "user32" fn TrackPopupMenu(*anyopaque, u32, i32, i32, i32, HWND, ?*const anyopaque) callconv(WINAPI) i32;
+extern "user32" fn ClientToScreen(HWND, *POINT) callconv(WINAPI) win.BOOL;
+extern "user32" fn SetForegroundWindow(HWND) callconv(WINAPI) win.BOOL;
+
 // Integrated title bar (#64): extend the DWM "sheet of glass" into the client
 // area so the app draws its own chrome (tabs/toolbar) in the top strip while
 // the native min/max/close buttons stay live — the Win32 analogue of macOS
@@ -142,6 +162,7 @@ const core_event = @import("../event.zig");
 const cursor_mod = @import("../cursor.zig");
 const window_mod = @import("../window.zig");
 const clipboard_mod = @import("../clipboard.zig");
+const menu_mod = @import("../menu.zig");
 
 // System clipboard (#19/#209) via the Win32 clipboard API + CF_UNICODETEXT.
 const CF_UNICODETEXT: u32 = 13;
@@ -391,6 +412,23 @@ pub const Window = struct {
     /// whether to actually destroy) — same contract as macOS performClose.
     pub fn close(self: *Window) void {
         _ = PostMessageW(self.hwnd, WM_CLOSE, 0, 0);
+    }
+
+    /// Pop up `items` as a native context menu at client-area point (x, y) and
+    /// block until the user chooses an item or dismisses (#129). Returns the
+    /// chosen item's id, or null on dismiss / build failure. Items' enabled,
+    /// checked, separator and submenu state are honored.
+    pub fn popupMenu(self: *Window, items: []const menu_mod.Item, x: i32, y: i32) ?u32 {
+        const hmenu = buildPopupMenu(self.gpa, items) orelse return null;
+        defer _ = DestroyMenu(hmenu);
+
+        var pt: POINT = .{ .x = x, .y = y };
+        _ = ClientToScreen(self.hwnd, &pt);
+        // TrackPopupMenu needs the window foreground or it dismisses instantly.
+        _ = SetForegroundWindow(self.hwnd);
+        const chosen = TrackPopupMenu(hmenu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN, pt.x, pt.y, 0, self.hwnd, null);
+        if (chosen == 0) return null;
+        return @intCast(chosen);
     }
 
     pub fn isMinimised(self: *Window) bool {
@@ -707,6 +745,62 @@ pub const Window = struct {
         return DefWindowProcW(hwnd, msg, wparam, lparam);
     }
 };
+
+// --- native context menu (#129) ----------------------------------------------
+
+/// Build an HMENU (recursing into submenus) from the menu model. Caller owns
+/// the returned menu (DestroyMenu frees it and its submenus). Returns null on
+/// any allocation/API failure.
+fn buildPopupMenu(gpa: std.mem.Allocator, items: []const menu_mod.Item) ?*anyopaque {
+    const hmenu = CreatePopupMenu() orelse return null;
+    var ok_all = true;
+    for (items) |it| {
+        if (it.separator) {
+            _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, null);
+            continue;
+        }
+        // Label (+ accelerator hint after a tab, which the OS right-aligns).
+        var buf: [256]u16 = undefined;
+        const label = labelToUtf16(&buf, it.label, it.accelerator) orelse {
+            ok_all = false;
+            break;
+        };
+        if (it.submenu.len > 0) {
+            const sub = buildPopupMenu(gpa, it.submenu) orelse {
+                ok_all = false;
+                break;
+            };
+            _ = AppendMenuW(hmenu, MF_POPUP | MF_STRING, @intFromPtr(sub), label);
+        } else {
+            var flags: u32 = MF_STRING;
+            if (!it.enabled) flags |= MF_GRAYED;
+            if (it.checked) flags |= MF_CHECKED;
+            _ = AppendMenuW(hmenu, flags, it.id, label);
+        }
+    }
+    if (!ok_all) {
+        _ = DestroyMenu(hmenu);
+        return null;
+    }
+    return hmenu;
+}
+
+/// UTF-8 "label\taccel" → null-terminated UTF-16 in `buf`. Null on overflow.
+fn labelToUtf16(buf: []u16, label: []const u8, accel: []const u8) ?[:0]const u16 {
+    var tmp: [256]u8 = undefined;
+    if (label.len + accel.len + 2 > tmp.len) return null;
+    @memcpy(tmp[0..label.len], label);
+    var n: usize = label.len;
+    if (accel.len > 0) {
+        tmp[n] = '\t';
+        n += 1;
+        @memcpy(tmp[n..][0..accel.len], accel);
+        n += accel.len;
+    }
+    const len = std.unicode.utf8ToUtf16Le(buf[0 .. buf.len - 1], tmp[0..n]) catch return null;
+    buf[len] = 0;
+    return buf[0..len :0];
+}
 
 // --- raster blit (GDI) -------------------------------------------------------
 // Windows twin of the macOS CoreGraphics blit: present a CPU-rendered
