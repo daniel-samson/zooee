@@ -193,5 +193,10 @@ pub const Event = union(enum) {
     resized: ResizeEvent,
     focus_gained: WindowId,
     focus_lost: WindowId,
+    /// Window-state transitions (#98), normalized from the OS — emitted by the
+    /// platform whether the change was user- or app-initiated.
+    window_minimized: WindowId,
+    window_maximized: WindowId,
+    window_restored: WindowId,
     close_requested: WindowId,
 };

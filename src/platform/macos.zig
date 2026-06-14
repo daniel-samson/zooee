@@ -286,6 +286,52 @@ pub const Window = struct {
         self.gpa.destroy(self);
     }
 
+    // --- Programmatic window operations (#98) -----------------------------
+    // The app can drive its own window, not just respond to the title-bar
+    // controls. macOS impls; Win32/X11 mirror these (on-device).
+
+    /// Resize the content area to `w`×`h` points (top-left preserved).
+    pub fn setSize(self: *Window, w: f32, h: f32) void {
+        const frame = msg(NSRect, struct {}, self.ns_window, sel("frame"), .{});
+        // setFrame uses the window frame (incl. titlebar); keep the top edge
+        // fixed by adjusting y so the window doesn't appear to jump up.
+        const new: NSRect = .{ .x = frame.x, .y = frame.y + (frame.h - h), .w = w, .h = h };
+        _ = msg(void, struct { NSRect, bool }, self.ns_window, sel("setFrame:display:"), .{ new, true });
+    }
+
+    pub fn setTitle(self: *Window, title: [:0]const u8) void {
+        _ = msg(void, struct { id }, self.ns_window, sel("setTitle:"), .{nsString(title)});
+    }
+
+    pub fn minimise(self: *Window) void {
+        _ = msg(void, struct { id }, self.ns_window, sel("miniaturize:"), .{null});
+    }
+
+    pub fn restore(self: *Window) void {
+        if (self.isMinimised()) {
+            _ = msg(void, struct { id }, self.ns_window, sel("deminiaturize:"), .{null});
+        } else if (self.isMaximised()) {
+            _ = msg(void, struct { id }, self.ns_window, sel("zoom:"), .{null}); // zoom toggles
+        }
+    }
+
+    /// Toggle the standard "zoom" (maximise) state.
+    pub fn maximise(self: *Window) void {
+        if (!self.isMaximised()) _ = msg(void, struct { id }, self.ns_window, sel("zoom:"), .{null});
+    }
+
+    pub fn close(self: *Window) void {
+        _ = msg(void, struct { id }, self.ns_window, sel("performClose:"), .{null});
+    }
+
+    pub fn isMinimised(self: *Window) bool {
+        return msg(bool, struct {}, self.ns_window, sel("isMiniaturized"), .{});
+    }
+
+    pub fn isMaximised(self: *Window) bool {
+        return msg(bool, struct {}, self.ns_window, sel("isZoomed"), .{});
+    }
+
     /// The window's content NSView (id) — where the Metal layer (#101) or GL
     /// context attaches.
     pub fn contentView(self: *Window) ?*anyopaque {
