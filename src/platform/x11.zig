@@ -276,6 +276,23 @@ extern "X11" fn XCheckTypedEvent(*Display, c_int, *XEvent) Bool;
 const SelectionClear = 29;
 const SelectionRequest = 30;
 const SelectionNotify = 31;
+// IME (#213): X Input Method / Context for CJK + dead-key composition.
+const XIM = ?*opaque {};
+const XIC = ?*opaque {};
+const XNInputStyle = "inputStyle";
+const XNClientWindow = "clientWindow";
+const XIMPreeditNothing: c_long = 0x0008;
+const XIMStatusNothing: c_long = 0x0400;
+const LC_CTYPE: c_int = 0;
+extern "c" fn setlocale(c_int, ?[*:0]const u8) ?[*:0]u8;
+extern "X11" fn XSetLocaleModifiers([*:0]const u8) ?[*:0]u8;
+extern "X11" fn XOpenIM(*Display, ?*anyopaque, ?[*:0]const u8, ?[*:0]const u8) XIM;
+extern "X11" fn XCloseIM(XIM) c_int;
+extern "X11" fn XCreateIC(XIM, ...) XIC;
+extern "X11" fn XDestroyIC(XIC) void;
+extern "X11" fn XSetICFocus(XIC) void;
+extern "X11" fn Xutf8LookupString(XIC, *XKeyEvent, [*]u8, c_int, *KeySym, *c_int) c_int;
+extern "X11" fn XFilterEvent(*XEvent, Window_) Bool;
 const SubstructureMask: c_long = (1 << 19) | (1 << 20); // Notify | Redirect
 extern "X11" fn XCreateFontCursor(*Display, c_uint) XID;
 extern "X11" fn XDefineCursor(*Display, Window_, XID) c_int;
@@ -503,6 +520,10 @@ pub const Window = struct {
     clipboard_text: ?[]u8 = null,
     /// XDND drag source during a drag-over (#212); 0 = no drag in progress.
     xdnd_source: Window_ = 0,
+    /// X Input Method / Context (#213); null when no IM is available (the
+    /// KeyPress path then falls back to XLookupString, ASCII only).
+    xim: XIM = null,
+    xic: XIC = null,
     /// Drop arena (#212): dropped paths live here until the next pumpEvents.
     drop_arena: std.heap.ArenaAllocator = undefined,
 
@@ -579,6 +600,18 @@ pub const Window = struct {
         var xdnd_version: Atom = 5;
         _ = XChangeProperty(display, handle, XInternAtom(display, "XdndAware", 0), 4, 32, 0, @ptrCast(&xdnd_version), 1); // XA_ATOM=4
 
+        // IME (#213): open an input method + a root-style context bound to the
+        // window, so KeyPress can use Xutf8LookupString for CJK/dead-key
+        // composition. Best-effort — falls back to ASCII if no IM is available.
+        _ = setlocale(LC_CTYPE, "");
+        _ = XSetLocaleModifiers("");
+        const xim = XOpenIM(display, null, null, null);
+        var xic: XIC = null;
+        if (xim != null) {
+            xic = XCreateIC(xim, XNInputStyle.ptr, XIMPreeditNothing | XIMStatusNothing, XNClientWindow.ptr, handle, @as(?*anyopaque, null));
+            if (xic != null) XSetICFocus(xic);
+        }
+
         const gc = XCreateGC(display, handle, 0, null) orelse return error.BackendFailure;
         if (opts.visible) _ = XMapWindow(display, handle);
         _ = XFlush(display);
@@ -592,6 +625,8 @@ pub const Window = struct {
             .depth = if (gl_depth != 0) gl_depth else @intCast(XDefaultDepth(display, screen)),
             .wm_delete = wm_delete,
             .drop_arena = std.heap.ArenaAllocator.init(gpa),
+            .xim = xim,
+            .xic = xic,
             .gpa = gpa,
             .width = opts.width,
             .height = opts.height,
@@ -890,6 +925,8 @@ pub const Window = struct {
         for (self.cursors) |c| if (c != 0) {
             _ = XFreeCursor(self.display, c);
         };
+        if (self.xic != null) XDestroyIC(self.xic);
+        if (self.xim != null) _ = XCloseIM(self.xim);
         if (self.clipboard_text) |t| self.gpa.free(t);
         self.drop_arena.deinit();
         self.bgra.deinit(self.gpa);
@@ -905,6 +942,8 @@ pub const Window = struct {
         while (XPending(self.display) > 0) {
             var ev: XEvent = undefined;
             _ = XNextEvent(self.display, &ev);
+            // Let the input method consume keystrokes it's composing (#213).
+            if (self.xic != null and XFilterEvent(&ev, self.handle) != 0) continue;
             switch (ev.type) {
                 ClientMessage => {
                     if (@as(Atom, @bitCast(ev.xclient.data.l[0])) == self.wm_delete) {
@@ -991,10 +1030,25 @@ pub const Window = struct {
                     if (keysymToKey(ks)) |k| {
                         self.queue.append(self.gpa, .{ .key_down = .{ .key = k, .mods = x11Mods(ev.xkey.state) } }) catch {};
                     } else {
-                        var buf: [8]u8 = undefined;
-                        const n = XLookupString(&ev.xkey, &buf, buf.len, null, null);
-                        if (n > 0 and buf[0] >= 0x20 and buf[0] != 0x7f) {
-                            self.queue.append(self.gpa, .{ .text = .{ .codepoint = buf[0] } }) catch {};
+                        // With an input context (#213) use Xutf8LookupString so
+                        // IME-composed / dead-key / multi-byte input comes back as
+                        // UTF-8; decode and emit a .text per codepoint.
+                        var buf: [64]u8 = undefined;
+                        var ksym: KeySym = 0;
+                        var status: c_int = 0;
+                        const n: usize = if (self.xic != null)
+                            @intCast(@max(0, Xutf8LookupString(self.xic, &ev.xkey, &buf, buf.len, &ksym, &status)))
+                        else
+                            @intCast(@max(0, XLookupString(&ev.xkey, &buf, buf.len, null, null)));
+                        if (n > 0) {
+                            const mods = x11Mods(ev.xkey.state);
+                            var view = std.unicode.Utf8View.initUnchecked(buf[0..n]);
+                            var cit = view.iterator();
+                            while (cit.nextCodepoint()) |cp| {
+                                if (cp >= 0x20 and cp != 0x7f) {
+                                    self.queue.append(self.gpa, .{ .text = .{ .codepoint = cp, .mods = mods } }) catch {};
+                                }
+                            }
                         }
                     }
                 },
