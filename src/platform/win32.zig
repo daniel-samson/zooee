@@ -102,6 +102,7 @@ extern "user32" fn IsZoomed(HWND) callconv(WINAPI) win.BOOL;
 extern "user32" fn PostMessageW(HWND, u32, WPARAM, LPARAM) callconv(WINAPI) win.BOOL;
 extern "user32" fn AdjustWindowRectEx(*RECT, u32, win.BOOL, u32) callconv(WINAPI) win.BOOL;
 extern "user32" fn GetWindowLongW(HWND, i32) callconv(WINAPI) i32;
+extern "user32" fn ScreenToClient(HWND, *POINT) callconv(WINAPI) win.BOOL;
 const SW_MAXIMIZE = 3;
 const SW_MINIMIZE = 6;
 const SW_RESTORE = 9;
@@ -126,6 +127,7 @@ const WM_LBUTTONUP = 0x0202;
 const WM_RBUTTONDOWN = 0x0204;
 const WM_RBUTTONUP = 0x0205;
 const WM_MOUSEWHEEL = 0x020A;
+const WM_MOUSEHWHEEL = 0x020E;
 const WM_KEYDOWN = 0x0100;
 const WM_CHAR = 0x0102;
 
@@ -411,9 +413,21 @@ pub const Window = struct {
                 };
                 self.queue.append(self.gpa, ev) catch {};
             },
-            WM_MOUSEWHEEL => {
-                const delta = hiShort(wparam);
-                self.queue.append(self.gpa, .{ .key_down = .{ .key = if (delta > 0) .up else .down } }) catch {};
+            WM_MOUSEWHEEL, WM_MOUSEHWHEEL => {
+                // Wheel delta is in the high word of wParam, in WHEEL_DELTA (120)
+                // units; lParam is *screen* coords → ScreenToClient (#126/#210).
+                // dy>0 = wheel up, dx>0 = tilt right. unit = line.
+                const lp: usize = @bitCast(lparam);
+                var pt: POINT = .{ .x = loShort(lp), .y = hiShort(lp) };
+                _ = ScreenToClient(hwnd, &pt);
+                const steps: f32 = @as(f32, @floatFromInt(hiShort(wparam))) / 120.0;
+                const horiz = msg == WM_MOUSEHWHEEL;
+                self.queue.append(self.gpa, .{ .scroll = .{
+                    .position = .{ .x = @floatFromInt(pt.x), .y = @floatFromInt(pt.y) },
+                    .dx = if (horiz) steps else 0,
+                    .dy = if (horiz) 0 else steps,
+                    .unit = .line,
+                } }) catch {};
             },
             WM_KEYDOWN => {
                 if (vkToKey(wparam)) |k| {
