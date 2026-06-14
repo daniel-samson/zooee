@@ -1932,6 +1932,10 @@ pub const GlBackend = struct {
     width: u32 = 0,
     height: u32 = 0,
     clips: std.ArrayList(ScissorRect) = .empty,
+    /// Content translation for scroll viewports (#96): added to draw coords and
+    /// pushed scissor rects so a clipped subtree pans within a viewport.
+    translate: geometry.Point = .{ .x = 0, .y = 0 },
+    translate_stack: std.ArrayList(geometry.Point) = .empty,
     font: ?ttf.Font = null,
     glyphs: std.AutoHashMapUnmanaged(u32, GlyphRenderer) = .empty,
 
@@ -1986,6 +1990,7 @@ pub const GlBackend = struct {
         self.rounds.deinit(self.gpa);
         self.clip_ops.deinit(self.gpa);
         self.clips.deinit(self.gpa);
+        self.translate_stack.deinit(self.gpa);
         var it = self.glyphs.valueIterator();
         while (it.next()) |g| g.deinit();
         self.glyphs.deinit(self.gpa);
@@ -2019,6 +2024,8 @@ pub const GlBackend = struct {
         .stroke_path = strokePath,
         .push_clip = pushClip,
         .pop_clip = popClip,
+        .push_translate = pushTranslate,
+        .pop_translate = popTranslate,
         .push_clip_rounded = pushClipRounded,
         .push_layer = pushLayer,
         .pop_layer = popLayer,
@@ -2091,8 +2098,14 @@ pub const GlBackend = struct {
         };
     }
 
-    fn drawRect(ptr: *anyopaque, rect: geometry.Rect, rs: style.RectStyle) void {
+    /// Shift a rect by the active content translation (#96).
+    fn offRect(self: *const GlBackend, r: geometry.Rect) geometry.Rect {
+        return .{ .x = r.x + self.translate.x, .y = r.y + self.translate.y, .width = r.width, .height = r.height };
+    }
+
+    fn drawRect(ptr: *anyopaque, rect_in: geometry.Rect, rs: style.RectStyle) void {
         const self = self_(ptr);
+        const rect = self.offRect(rect_in);
         const w: f32 = @floatFromInt(self.width);
         const h: f32 = @floatFromInt(self.height);
         const rrect: [4]f32 = .{ rect.x, rect.y, rect.width, rect.height };
@@ -2152,19 +2165,26 @@ pub const GlBackend = struct {
         gr.gl.uniform2f(gr.u_viewport, gr.vw, gr.vh);
         enableBlend();
         const color = ts.color orelse style.Color.black;
-        gr.drawText(self.gpa, origin.x, origin.y, text, col(color)) catch {};
+        gr.drawText(self.gpa, origin.x + self.translate.x, origin.y + self.translate.y, text, col(color)) catch {};
     }
 
     fn drawImage(ptr: *anyopaque, rect: geometry.Rect, texture: *Backend.Texture) void {
         const self = self_(ptr);
         enableBlend();
-        self.image.draw(@floatFromInt(self.width), @floatFromInt(self.height), rect, @intCast(@intFromPtr(texture)));
+        self.image.draw(@floatFromInt(self.width), @floatFromInt(self.height), self.offRect(rect), @intCast(@intFromPtr(texture)));
     }
 
     fn drawImageUv(ptr: *anyopaque, dst: geometry.Rect, texture: *Backend.Texture, src: geometry.Rect, sampling: Backend.Sampling) void {
         const self = self_(ptr);
         enableBlend();
-        self.image.drawUv(@floatFromInt(self.width), @floatFromInt(self.height), dst, src, @intCast(@intFromPtr(texture)), sampling);
+        self.image.drawUv(@floatFromInt(self.width), @floatFromInt(self.height), self.offRect(dst), src, @intCast(@intFromPtr(texture)), sampling);
+    }
+
+    /// Copy `points` shifted by the content translation into `buf` (#96).
+    fn offPoints(self: *const GlBackend, points: []const geometry.Point, buf: []geometry.Point) []geometry.Point {
+        const n = @min(points.len, buf.len);
+        for (0..n) |k| buf[k] = .{ .x = points[k].x + self.translate.x, .y = points[k].y + self.translate.y };
+        return buf[0..n];
     }
 
     fn fillPath(ptr: *anyopaque, points: []const geometry.Point, color: style.Color) void {
@@ -2172,7 +2192,8 @@ pub const GlBackend = struct {
         enableBlend();
         self.path.vw = @floatFromInt(self.width);
         self.path.vh = @floatFromInt(self.height);
-        self.path.fill(points, col(color));
+        var buf: [256]geometry.Point = undefined;
+        self.path.fill(self.offPoints(points, &buf), col(color));
     }
 
     fn strokePath(ptr: *anyopaque, points: []const geometry.Point, width: f32, color: style.Color, closed: bool) void {
@@ -2180,7 +2201,8 @@ pub const GlBackend = struct {
         enableBlend();
         self.stroke.vw = @floatFromInt(self.width);
         self.stroke.vh = @floatFromInt(self.height);
-        self.stroke.stroke(points, width * 0.5, col(color), closed);
+        var buf: [256]geometry.Point = undefined;
+        self.stroke.stroke(self.offPoints(points, &buf), width * 0.5, col(color), closed);
     }
 
     fn applyScissor(self: *GlBackend) void {
@@ -2203,8 +2225,9 @@ pub const GlBackend = struct {
         glScissor(s.x0, gh - s.y1, sw, sh);
     }
 
-    fn pushClip(ptr: *anyopaque, rect: geometry.Rect) void {
+    fn pushClip(ptr: *anyopaque, rect_in: geometry.Rect) void {
         const self = self_(ptr);
+        const rect = self.offRect(rect_in);
         self.clips.append(self.gpa, .{
             .x0 = @intFromFloat(@round(rect.x)),
             .y0 = @intFromFloat(@round(rect.y)),
@@ -2215,11 +2238,24 @@ pub const GlBackend = struct {
         self.applyScissor();
     }
 
+    fn pushTranslate(ptr: *anyopaque, dx: f32, dy: f32) void {
+        const self = self_(ptr);
+        self.translate_stack.append(self.gpa, self.translate) catch return;
+        self.translate.x += dx;
+        self.translate.y += dy;
+    }
+
+    fn popTranslate(ptr: *anyopaque) void {
+        const self = self_(ptr);
+        if (self.translate_stack.pop()) |prev| self.translate = prev;
+    }
+
     /// Rounded clip (#117): redirect draws into an offscreen FBO (like
     /// pushLayer); popClip composites it back masked to the rounded rect.
-    fn pushClipRounded(ptr: *anyopaque, rect: geometry.Rect, radius: style.CornerRadius) void {
+    fn pushClipRounded(ptr: *anyopaque, rect_in: geometry.Rect, radius: style.CornerRadius) void {
         const self = self_(ptr);
-        if (radius.isNone()) return pushClip(ptr, rect);
+        if (radius.isNone()) return pushClip(ptr, rect_in);
+        const rect = self.offRect(rect_in);
         const gl = self.comp.gl;
         var fbo: GLuint = 0;
         var tex: GLuint = 0;

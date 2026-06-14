@@ -63,6 +63,15 @@ pub const Backend = struct {
         push_clip: *const fn (ptr: *anyopaque, rect: Rect) void,
         pop_clip: *const fn (ptr: *anyopaque) void,
 
+        // Content translation for scroll viewports (#96): shift all subsequent
+        // draws (and pushed clips) by `(dx, dy)` until the matching
+        // `pop_translate`. Offsets accumulate; a scroll region pushes a clip to
+        // the viewport then translates content by (-scrollX, -scrollY).
+        // Optional — backends without it leave them null and `pushTranslate`
+        // degrades to no-op (content draws unscrolled, still clipped).
+        push_translate: ?*const fn (ptr: *anyopaque, dx: f32, dy: f32) void = null,
+        pop_translate: ?*const fn (ptr: *anyopaque) void = null,
+
         // Rounded-rect clipping (#117). A backend that can clip to per-corner
         // radii registers this; the rest leave it null and `pushClipRounded`
         // degrades to a rectangular `pushClip` (corners not cut). Paired with
@@ -207,6 +216,17 @@ pub const Backend = struct {
 
     pub fn popClip(self: Backend) void {
         self.vtable.pop_clip(self.ptr);
+    }
+
+    /// Translate subsequent draws and clips by `(dx, dy)` (#96). Pop with
+    /// `popTranslate`. Backends without translation draw unscrolled (degraded
+    /// but still clipped to any active viewport).
+    pub fn pushTranslate(self: Backend, dx: f32, dy: f32) void {
+        if (self.vtable.push_translate) |f| f(self.ptr, dx, dy);
+    }
+
+    pub fn popTranslate(self: Backend) void {
+        if (self.vtable.pop_translate) |f| f(self.ptr);
     }
 
     /// Clip subsequent draws to a rounded rect (#117). Backends without
