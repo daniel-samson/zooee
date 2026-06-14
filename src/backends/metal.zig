@@ -15,6 +15,7 @@ const builtin = @import("builtin");
 const ttf = @import("../font/ttf.zig");
 const grast = @import("../font/raster.zig");
 const gatlas = @import("../font/atlas.zig");
+const fontset = @import("../font/fontset.zig");
 const geometry = @import("../geometry.zig");
 const style = @import("../style.zig");
 const backend_mod = @import("../backend.zig");
@@ -606,9 +607,9 @@ pub const MetalGlyphRenderer = struct {
         \\}
     ;
 
-    pub fn init(device: id, queue: id, gpa: std.mem.Allocator, font: *const ttf.Font, size_px: f32) !MetalGlyphRenderer {
+    pub fn init(device: id, queue: id, gpa: std.mem.Allocator, set: *const fontset.FontSet, size_px: f32) !MetalGlyphRenderer {
         const pipeline = try compilePipeline(device, shader, MTLPixelFormatRGBA8Unorm, true);
-        var atlas = try gatlas.Atlas.init(gpa, font, size_px, dim, dim);
+        var atlas = try gatlas.Atlas.init(gpa, set, size_px, dim, dim);
         errdefer atlas.deinit();
         const atlas_tex = try makeTexture(device, dim, dim, MTLPixelFormatRGBA8Unorm);
         const sampler = makeSampler(device);
@@ -644,14 +645,14 @@ pub const MetalGlyphRenderer = struct {
     /// Draw `text` (UTF-8, any codepoint) with top-left at (x,y) px (baseline =
     /// y + ascent), tinted `color`. Glyphs are rasterized + packed on demand
     /// into the dynamic atlas (#114); call uploadIfDirty before commit.
-    pub fn drawText(self: *MetalGlyphRenderer, gpa: std.mem.Allocator, x: f32, y: f32, text: []const u8, color: [4]f32) !void {
+    pub fn drawText(self: *MetalGlyphRenderer, gpa: std.mem.Allocator, x: f32, y: f32, text: []const u8, color: [4]f32, fstyle: fontset.Style) !void {
         var verts: std.ArrayList(f32) = .empty;
         defer verts.deinit(gpa);
         var pen = x;
         const baseline = y + self.atlas.ascent;
         var it = std.unicode.Utf8View.initUnchecked(text).iterator();
         while (it.nextCodepoint()) |cp| {
-            const e = self.atlas.glyph(self.atlas.font.glyphIndex(cp));
+            const e = self.atlas.glyphForCp(cp, fstyle);
             if (e.w > 0) {
                 const gx = @round(pen) + e.x_off;
                 const gy = @round(baseline) + e.y_off;
@@ -701,7 +702,7 @@ pub const MetalGlyphRenderer = struct {
         self.enc = enc;
         self.vw = @floatFromInt(w);
         self.vh = @floatFromInt(h);
-        try self.drawText(gpa, x, y, text, color);
+        try self.drawText(gpa, x, y, text, color, .{});
         self.enc = null;
         _ = msg(void, struct {}, enc, sel("endEncoding"), .{});
         self.uploadIfDirty(); // after endEncoding, before commit (see uploadIfDirty)
@@ -1401,7 +1402,7 @@ pub const MetalBackend = struct {
     /// the right stack (scissor vs rounded layer).
     rounds: std.ArrayList(RoundClip) = .empty,
     clip_ops: std.ArrayList(ClipOp) = .empty,
-    font: ?ttf.Font = null,
+    fonts: ?fontset.FontSet = null,
     enc: id = null,
     cmdbuf: id = null,
     owns_ctx: bool = true,
@@ -1534,7 +1535,13 @@ pub const MetalBackend = struct {
     }
 
     pub fn setFont(self: *MetalBackend, data: []const u8) !void {
-        self.font = try ttf.Font.parse(data);
+        var set: fontset.FontSet = .{};
+        set.setFace(fontset.FontSet.regular, try ttf.Font.parse(data));
+        self.fonts = set;
+    }
+
+    pub fn setFontSet(self: *MetalBackend, set: fontset.FontSet) void {
+        self.fonts = set;
     }
 
     pub fn interface(self: *MetalBackend) Backend {
@@ -1710,9 +1717,9 @@ pub const MetalBackend = struct {
     }
 
     fn glyphFor(self: *MetalBackend, size_px: u16) ?*MetalGlyphRenderer {
-        if (self.font == null) return null;
+        if (self.fonts == null) return null;
         if (self.glyphs.getPtr(size_px)) |g| return g;
-        const g = MetalGlyphRenderer.init(self.ctx.device, self.ctx.queue, self.gpa, &self.font.?, @floatFromInt(size_px)) catch return null;
+        const g = MetalGlyphRenderer.init(self.ctx.device, self.ctx.queue, self.gpa, &self.fonts.?, @floatFromInt(size_px)) catch return null;
         self.glyphs.put(self.gpa, size_px, g) catch return null;
         return self.glyphs.getPtr(size_px);
     }
@@ -1726,7 +1733,7 @@ pub const MetalBackend = struct {
         gr.vh = @floatFromInt(self.height);
         const color = ts.color orelse style.Color.black;
         _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{gr.pipeline});
-        gr.drawText(self.gpa, origin.x + self.translate.x, origin.y + self.translate.y, text, col4(color)) catch {};
+        gr.drawText(self.gpa, origin.x + self.translate.x, origin.y + self.translate.y, text, col4(color), .{ .bold = ts.bold, .italic = ts.italic }) catch {};
     }
 
     fn drawImage(ptr: *anyopaque, rect_in: geometry.Rect, texture: *Backend.Texture) void {
@@ -1877,16 +1884,9 @@ pub const MetalBackend = struct {
 
     fn measureText(ptr: *anyopaque, text: []const u8, ts: style.TextStyle) geometry.Size {
         const self = self_(ptr);
-        if (self.font) |*font| {
-            const upem: f32 = @floatFromInt(font.units_per_em);
-            const fscale = ts.size / upem;
-            var width: f32 = 0;
-            var it = std.unicode.Utf8View.initUnchecked(text).iterator();
-            while (it.nextCodepoint()) |cp| {
-                width += @as(f32, @floatFromInt(font.hMetrics(font.glyphIndex(cp)).advance)) * fscale;
-            }
-            const line = @as(f32, @floatFromInt(font.ascent - font.descent + font.line_gap)) * fscale;
-            return .{ .width = width, .height = line };
+        if (self.fonts) |*set| {
+            const mtr = set.measure(text, ts.size, .{ .bold = ts.bold, .italic = ts.italic });
+            return .{ .width = mtr.width, .height = mtr.height };
         }
         const n = std.unicode.utf8CountCodepoints(text) catch text.len;
         return .{ .width = @as(f32, @floatFromInt(n)) * 8, .height = 16 };

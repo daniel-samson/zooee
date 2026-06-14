@@ -1687,6 +1687,7 @@ pub fn renderRoundedOffscreen(
 const ttf = @import("../font/ttf.zig");
 const grast = @import("../font/raster.zig");
 const gatlas = @import("../font/atlas.zig");
+const fontset = @import("../font/fontset.zig");
 
 const GL_TRIANGLES: GLenum = 0x0004;
 const atlas_dim: u32 = 512;
@@ -1706,7 +1707,7 @@ pub const GlyphRenderer = struct {
     vw: f32 = 0,
     vh: f32 = 0,
 
-    pub fn init(gpa: std.mem.Allocator, font: *const ttf.Font, size_px: f32) !GlyphRenderer {
+    pub fn init(gpa: std.mem.Allocator, set: *const fontset.FontSet, size_px: f32) !GlyphRenderer {
         const gl = try Gl.load();
         const vs = QuadRenderer.compile(gl, GL_VERTEX_SHADER, glyph_vert) orelse return error.NoContext;
         const fs = QuadRenderer.compile(gl, GL_FRAGMENT_SHADER, glyph_frag) orelse return error.NoContext;
@@ -1718,7 +1719,7 @@ pub const GlyphRenderer = struct {
         gl.getProgramiv(prog, GL_LINK_STATUS, &ok);
         if (ok == 0) return error.NoContext;
 
-        var atlas = try gatlas.Atlas.init(gpa, font, size_px, atlas_dim, atlas_dim);
+        var atlas = try gatlas.Atlas.init(gpa, set, size_px, atlas_dim, atlas_dim);
         errdefer atlas.deinit();
 
         var vao: GLuint = 0;
@@ -1766,7 +1767,7 @@ pub const GlyphRenderer = struct {
     /// (baseline = y + ascent), tinted `color`. Glyphs rasterized + packed on
     /// demand into the dynamic atlas (#114); the texture is re-uploaded before
     /// the draw when new glyphs appear (GL is immediate; the atlas appends).
-    pub fn drawText(self: *GlyphRenderer, gpa: std.mem.Allocator, x: f32, y: f32, text: []const u8, color: [4]f32) !void {
+    pub fn drawText(self: *GlyphRenderer, gpa: std.mem.Allocator, x: f32, y: f32, text: []const u8, color: [4]f32, fstyle: fontset.Style) !void {
         const gl = self.gl;
         var verts: std.ArrayList(f32) = .empty;
         defer verts.deinit(gpa);
@@ -1774,7 +1775,7 @@ pub const GlyphRenderer = struct {
         const baseline = y + self.atlas.ascent;
         var it = std.unicode.Utf8View.initUnchecked(text).iterator();
         while (it.nextCodepoint()) |cp| {
-            const e = self.atlas.glyph(self.atlas.font.glyphIndex(cp));
+            const e = self.atlas.glyphForCp(cp, fstyle);
             if (e.w > 0) {
                 const gx = @round(pen) + e.x_off;
                 const gy = @round(baseline) + e.y_off;
@@ -1856,7 +1857,7 @@ pub fn renderTextOffscreen(gpa: std.mem.Allocator, gr: *GlyphRenderer, w: u32, h
     glClearColor(clear[0], clear[1], clear[2], clear[3]);
     glClear(GL_COLOR_BUFFER_BIT);
     gr.begin(w, h);
-    try gr.drawText(gpa, x, y, text, color);
+    try gr.drawText(gpa, x, y, text, color, .{});
     glFinish();
     const out = try gpa.alloc(u8, @as(usize, w) * h * 4);
     glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, out.ptr);
@@ -1940,7 +1941,7 @@ pub const GlBackend = struct {
     /// pushed scissor rects so a clipped subtree pans within a viewport.
     translate: geometry.Point = .{ .x = 0, .y = 0 },
     translate_stack: std.ArrayList(geometry.Point) = .empty,
-    font: ?ttf.Font = null,
+    fonts: ?fontset.FontSet = null,
     glyphs: std.AutoHashMapUnmanaged(u32, GlyphRenderer) = .empty,
 
     /// Headless GL backend over an offscreen FBO (for golden tests). A hidden
@@ -2002,7 +2003,13 @@ pub const GlBackend = struct {
     }
 
     pub fn setFont(self: *GlBackend, data: []const u8) !void {
-        self.font = try ttf.Font.parse(data);
+        var set: fontset.FontSet = .{};
+        set.setFace(fontset.FontSet.regular, try ttf.Font.parse(data));
+        self.fonts = set;
+    }
+
+    pub fn setFontSet(self: *GlBackend, set: fontset.FontSet) void {
+        self.fonts = set;
     }
 
     pub fn interface(self: *GlBackend) Backend {
@@ -2152,9 +2159,9 @@ pub const GlBackend = struct {
     }
 
     fn glyphFor(self: *GlBackend, size_px: u16) ?*GlyphRenderer {
-        if (self.font == null) return null;
+        if (self.fonts == null) return null;
         if (self.glyphs.getPtr(size_px)) |g| return g;
-        const g = GlyphRenderer.init(self.gpa, &self.font.?, @floatFromInt(size_px)) catch return null;
+        const g = GlyphRenderer.init(self.gpa, &self.fonts.?, @floatFromInt(size_px)) catch return null;
         self.glyphs.put(self.gpa, size_px, g) catch return null;
         return self.glyphs.getPtr(size_px);
     }
@@ -2169,7 +2176,7 @@ pub const GlBackend = struct {
         gr.gl.uniform2f(gr.u_viewport, gr.vw, gr.vh);
         enableBlend();
         const color = ts.color orelse style.Color.black;
-        gr.drawText(self.gpa, origin.x + self.translate.x, origin.y + self.translate.y, text, col(color)) catch {};
+        gr.drawText(self.gpa, origin.x + self.translate.x, origin.y + self.translate.y, text, col(color), .{ .bold = ts.bold, .italic = ts.italic }) catch {};
     }
 
     fn drawImage(ptr: *anyopaque, rect: geometry.Rect, texture: *Backend.Texture) void {
@@ -2369,16 +2376,9 @@ pub const GlBackend = struct {
 
     fn measureText(ptr: *anyopaque, text: []const u8, ts: style.TextStyle) geometry.Size {
         const self = self_(ptr);
-        if (self.font) |*font| {
-            const upem: f32 = @floatFromInt(font.units_per_em);
-            const fscale = ts.size / upem;
-            var width: f32 = 0;
-            var it = std.unicode.Utf8View.initUnchecked(text).iterator();
-            while (it.nextCodepoint()) |cp| {
-                width += @as(f32, @floatFromInt(font.hMetrics(font.glyphIndex(cp)).advance)) * fscale;
-            }
-            const line = @as(f32, @floatFromInt(font.ascent - font.descent + font.line_gap)) * fscale;
-            return .{ .width = width, .height = line };
+        if (self.fonts) |*set| {
+            const mtr = set.measure(text, ts.size, .{ .bold = ts.bold, .italic = ts.italic });
+            return .{ .width = mtr.width, .height = mtr.height };
         }
         const n = std.unicode.utf8CountCodepoints(text) catch text.len;
         return .{ .width = @as(f32, @floatFromInt(n)) * 8, .height = 16 };
