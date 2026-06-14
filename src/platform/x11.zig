@@ -162,6 +162,8 @@ extern "X11" fn XChangeProperty(*Display, Window_, Atom, Atom, c_int, c_int, [*]
 extern "X11" fn XSelectInput(*Display, Window_, c_long) c_int;
 extern "X11" fn XMapWindow(*Display, Window_) c_int;
 extern "X11" fn XFlush(*Display) c_int;
+extern "X11" fn XSetWindowBackground(*Display, Window_, c_ulong) c_int;
+extern "X11" fn XClearWindow(*Display, Window_) c_int;
 extern "X11" fn XPending(*Display) c_int;
 extern "X11" fn XNextEvent(*Display, *XEvent) c_int;
 extern "X11" fn XInternAtom(*Display, [*:0]const u8, Bool) Atom;
@@ -227,9 +229,14 @@ const GLX_RED_SIZE: c_int = 8;
 const GLX_GREEN_SIZE: c_int = 9;
 const GLX_BLUE_SIZE: c_int = 10;
 const GLX_DEPTH_SIZE: c_int = 12;
+const CWBackPixel: c_ulong = 1 << 1;
 const CWBorderPixel: c_ulong = 1 << 3;
+const CWBitGravity: c_ulong = 1 << 4;
 const CWColormap: c_ulong = 1 << 13;
 const CWEventMask: c_ulong = 1 << 11;
+/// bit_gravity: keep existing content anchored top-left on resize (#182), so
+/// growing the window doesn't re-expose/shift what's already painted.
+const NorthWestGravity: c_int = 1;
 const InputOutput: c_uint = 1;
 const AllocNone: c_int = 0;
 
@@ -290,6 +297,11 @@ pub const Window = struct {
     /// (the GPU-present path). null = raster (XPutImage) window.
     gl_ctx: GLXContext = null,
     gl_vi: ?*XVisualInfo = null,
+    /// Render-one-frame callback (#182): invoked synchronously on
+    /// ConfigureNotify so a resize repaints in the same turn instead of
+    /// lagging to the next loop iteration (the exposed strip flashing).
+    redraw_fn: ?*const fn (?*anyopaque) void = null,
+    redraw_ctx: ?*anyopaque = null,
 
     pub const CreateOptions = struct {
         title: [:0]const u8 = "zooee",
@@ -329,8 +341,11 @@ pub const Window = struct {
                     .border_pixel = 0,
                     .colormap = cmap,
                     .event_mask = ExposureMask | KeyPressMask | ButtonPressMask | ButtonReleaseMask | PointerMotionMask | StructureNotifyMask,
+                    // Anchor existing content top-left on grow so the exposed
+                    // strip is the only repaint, not a full re-expose (#182).
+                    .bit_gravity = NorthWestGravity,
                 };
-                const gh = XCreateWindow(display, root, 0, 0, opts.width, opts.height, 0, vi.depth, InputOutput, vi.visual, CWBorderPixel | CWColormap | CWEventMask, &swa);
+                const gh = XCreateWindow(display, root, 0, 0, opts.width, opts.height, 0, vi.depth, InputOutput, vi.visual, CWBorderPixel | CWColormap | CWEventMask | CWBitGravity, &swa);
                 const ctx = glXCreateContext(display, vi, null, 1);
                 if (ctx != null and glXMakeCurrent(display, gh, ctx) != 0) {
                     handle = gh;
@@ -391,13 +406,24 @@ pub const Window = struct {
         _ = self;
     }
 
-    /// No-op: X11 has no modal resize loop — ConfigureNotify flows through
-    /// pumpEvents normally, so the loop redraws live without a callback.
-    /// (macOS needs the windowDidResize: delegate; keeps runWindowGl generic.)
+    /// Register the render-one-frame callback. Unlike the original no-op, X11
+    /// now repaints synchronously on ConfigureNotify (#182): the resize repaint
+    /// happens in the same pumpEvents call, not the next loop iteration, so the
+    /// newly-exposed strip doesn't flash before it's painted.
     pub fn setRedraw(self: *Window, ctx: ?*anyopaque, f: *const fn (?*anyopaque) void) void {
-        _ = self;
-        _ = ctx;
-        _ = f;
+        self.redraw_ctx = ctx;
+        self.redraw_fn = f;
+    }
+
+    /// Set the window's background to `(r,g,b)` (#182). The server fills any
+    /// region exposed by a resize-grow with this — the theme background —
+    /// instead of black, until the client repaints. Assumes a TrueColor visual
+    /// (the GLX RGBA visual is one): pixel = R<<16 | G<<8 | B.
+    pub fn setBackground(self: *Window, r: u8, g: u8, b: u8) void {
+        const pixel: c_ulong = (@as(c_ulong, r) << 16) | (@as(c_ulong, g) << 8) | @as(c_ulong, b);
+        _ = XSetWindowBackground(self.display, self.handle, pixel);
+        _ = XClearWindow(self.display, self.handle);
+        _ = XFlush(self.display);
     }
 
     pub fn destroy(self: *Window) void {
@@ -435,6 +461,9 @@ pub const Window = struct {
                         self.width = w;
                         self.height = h;
                         self.queue.append(self.gpa, .{ .resized = .{ .size = .{ .width = @floatFromInt(w), .height = @floatFromInt(h) } } }) catch {};
+                        // Repaint immediately at the new size (#182) so the
+                        // exposed strip is painted this turn, not next iteration.
+                        if (self.redraw_fn) |f| f(self.redraw_ctx);
                     }
                 },
                 Expose => self.queue.append(self.gpa, .{ .resized = .{ .size = .{ .width = @floatFromInt(self.width), .height = @floatFromInt(self.height) } } }) catch {},
