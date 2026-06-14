@@ -232,6 +232,54 @@ pub fn reorder(levels: []const u8, order: []usize) void {
     }
 }
 
+/// Reorder a UTF-8 line into visual (display) order using the implicit BiDi
+/// algorithm, writing into `out` (should be >= text.len). Returns the visual
+/// slice — or `text` unchanged when it's pure-ASCII / all left-to-right, or
+/// doesn't fit the internal buffers. The text layout (#203) calls this per line.
+pub fn reorderUtf8(text: []const u8, out: []u8) []const u8 {
+    // Fast path: pure ASCII is entirely L → identity order, no work (keeps
+    // Latin rendering byte-for-byte identical).
+    var has_high = false;
+    for (text) |b| {
+        if (b >= 0x80) {
+            has_high = true;
+            break;
+        }
+    }
+    if (!has_high) return text;
+
+    const cap = 512;
+    var cps: [cap]u21 = undefined;
+    var byte_len: [cap]u3 = undefined; // UTF-8 length of each codepoint
+    var n: usize = 0;
+    var it = std.unicode.Utf8View.initUnchecked(text).iterator();
+    while (it.nextCodepoint()) |cp| {
+        if (n >= cap) return text; // too long → leave logical
+        cps[n] = cp;
+        byte_len[n] = std.unicode.utf8CodepointSequenceLength(cp) catch 1;
+        n += 1;
+    }
+    var types: [cap]Class = undefined;
+    var levels: [cap]u8 = undefined;
+    var order: [cap]usize = undefined;
+    const base = resolve(cps[0..n], types[0..n], levels[0..n]);
+    if (base == 0 and isAllEven(levels[0..n])) return text; // no RTL → identity
+    reorder(levels[0..n], order[0..n]);
+
+    var w: usize = 0;
+    for (order[0..n]) |idx| {
+        const need = byte_len[idx];
+        if (w + need > out.len) return text;
+        w += std.unicode.utf8Encode(cps[idx], out[w..]) catch return text;
+    }
+    return out[0..w];
+}
+
+fn isAllEven(levels: []const u8) bool {
+    for (levels) |l| if (l & 1 == 1) return false;
+    return true;
+}
+
 // === Tests ==================================================================
 
 const testing = std.testing;
@@ -258,6 +306,16 @@ fn run(comptime s: []const u8) struct { base: u8, order: [utf8(s).len]usize } {
     const base = resolve(cps, &types, &levels);
     reorder(&levels, &order);
     return .{ .base = base, .order = order };
+}
+
+test "reorderUtf8: ASCII unchanged, RTL reversed for display" {
+    var buf: [64]u8 = undefined;
+    // Pure ASCII → returns the input unchanged (fast path).
+    try testing.expectEqualStrings("hello", reorderUtf8("hello", &buf));
+    // Hebrew reverses to visual order (logical א ב ג → visual ג ב א).
+    try testing.expectEqualStrings("\u{05D2}\u{05D1}\u{05D0}", reorderUtf8("\u{05D0}\u{05D1}\u{05D2}", &buf));
+    // Latin with an accented char (non-ASCII but LTR) stays in order.
+    try testing.expectEqualStrings("café", reorderUtf8("café", &buf));
 }
 
 test "pure LTR stays in logical order" {
