@@ -603,6 +603,16 @@ pub const Window = struct {
         var xdnd_version: Atom = 5;
         _ = XChangeProperty(display, handle, XInternAtom(display, "XdndAware", 0), 4, 32, 0, @ptrCast(&xdnd_version), 1); // XA_ATOM=4
 
+        // Integrated/headless title bars (#64): drop the WM decorations via
+        // _MOTIF_WM_HINTS so the app owns the whole surface. flags =
+        // MWM_HINTS_DECORATIONS (1<<1), decorations = 0. Drag-to-move via
+        // _NET_WM_MOVERESIZE arrives with the Element.drag_region hook.
+        if (opts.titlebar != .native) {
+            const motif = XInternAtom(display, "_MOTIF_WM_HINTS", 0);
+            var hints = [5]c_long{ 2, 0, 0, 0, 0 };
+            _ = XChangeProperty(display, handle, motif, motif, 32, 0, @ptrCast(&hints), 5);
+        }
+
         // IME (#213): open an input method + a root-style context bound to the
         // window, so KeyPress can use Xutf8LookupString for CJK/dead-key
         // composition. Best-effort — falls back to ASCII if no IM is available.
