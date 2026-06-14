@@ -870,12 +870,21 @@ pub const MetalImageRenderer = struct {
     }
 };
 
-// Packed all-float4 uniform. vp_axis = {vw, vh, axis (0=horizontal, 1=vertical), 0}.
-const GradUniform = extern struct { rect: [4]f32, vp_axis: [4]f32, from: [4]f32, to: [4]f32 };
+// Gradient uniform (#118). cfg = {kind(0=linear,1=radial), axis, stop_count, 0};
+// radial = {cx, cy, radius, 0}; offsets[8] + colors[8] are the stops. MSL packs
+// scalar/vector arrays tightly, so [8]f32 / [8][4]f32 match float offsets[8] /
+// float4 colors[8].
+const GradUniform = extern struct {
+    rect: [4]f32,
+    vp: [4]f32,
+    cfg: [4]f32,
+    radial: [4]f32,
+    offsets: [8]f32,
+    colors: [8][4]f32,
+};
 
-/// Fills a rect with a two-stop axis-aligned linear gradient (#118),
-/// interpolated per-fragment from the pixel position — matching raster's
-/// `Gradient.colorAt` (straight RGB, pixel centers).
+/// Fills a rect with a linear or radial, N-stop gradient (#118), evaluated
+/// per-fragment to match raster's `Gradient.colorAt` (straight RGB).
 pub const MetalGradientRenderer = struct {
     device: id,
     queue: id,
@@ -887,16 +896,25 @@ pub const MetalGradientRenderer = struct {
     const shader =
         \\#include <metal_stdlib>
         \\using namespace metal;
-        \\struct GradU { float4 rect; float4 vp_axis; float4 from; float4 to; };
+        \\struct GradU { float4 rect; float4 vp; float4 cfg; float4 radial; float offsets[8]; float4 colors[8]; };
         \\vertex float4 v_main(uint vid [[vertex_id]], constant GradU& u [[buffer(0)]]) {
         \\    float2 corner[4] = { float2(0,0), float2(1,0), float2(0,1), float2(1,1) };
         \\    float2 px = u.rect.xy + corner[vid] * u.rect.zw;
-        \\    return float4(px.x / u.vp_axis.x * 2.0 - 1.0, 1.0 - px.y / u.vp_axis.y * 2.0, 0, 1);
+        \\    return float4(px.x / u.vp.x * 2.0 - 1.0, 1.0 - px.y / u.vp.y * 2.0, 0, 1);
         \\}
-        \\fragment float4 f_main(float4 fragpos [[position]], constant GradU& u [[buffer(0)]]) {
-        \\    float t = (u.vp_axis.z < 0.5) ? (fragpos.x - u.rect.x) / u.rect.z : (fragpos.y - u.rect.y) / u.rect.w;
+        \\fragment float4 f_main(float4 fp [[position]], constant GradU& u [[buffer(0)]]) {
+        \\    float t;
+        \\    if (u.cfg.x < 0.5) { t = (u.cfg.y < 0.5) ? (fp.x - u.rect.x) / u.rect.z : (fp.y - u.rect.y) / u.rect.w; }
+        \\    else { float cx = u.rect.x + u.radial.x*u.rect.z; float cy = u.rect.y + u.radial.y*u.rect.w; float rr = u.radial.z*max(u.rect.z,u.rect.w); float dx = fp.x-cx, dy = fp.y-cy; t = (rr>0.0) ? sqrt(dx*dx+dy*dy)/rr : 0.0; }
         \\    t = clamp(t, 0.0, 1.0);
-        \\    return mix(u.from, u.to, t);
+        \\    int n = int(u.cfg.z);
+        \\    if (t <= u.offsets[0]) return u.colors[0];
+        \\    float4 col = u.colors[n-1];
+        \\    for (int i = 1; i < 8; i++) {
+        \\        if (i >= n) break;
+        \\        if (t <= u.offsets[i]) { float span = u.offsets[i]-u.offsets[i-1]; float f = (span>0.0) ? (t-u.offsets[i-1])/span : 0.0; col = mix(u.colors[i-1], u.colors[i], f); break; }
+        \\    }
+        \\    return col;
         \\}
     ;
 
@@ -909,8 +927,21 @@ pub const MetalGradientRenderer = struct {
         release(self.pipeline);
     }
 
-    pub fn fill(self: *MetalGradientRenderer, x: f32, y: f32, w: f32, h: f32, axis: f32, from: [4]f32, to: [4]f32) void {
-        var u: GradUniform = .{ .rect = .{ x, y, w, h }, .vp_axis = .{ self.vw, self.vh, axis, 0 }, .from = from, .to = to };
+    pub fn fill(self: *MetalGradientRenderer, rect: geometry.Rect, g: style.Gradient) void {
+        var buf: [style.Gradient.max_stops]style.Gradient.Stop = undefined;
+        const ss = g.resolved(&buf);
+        var u: GradUniform = .{
+            .rect = .{ rect.x, rect.y, rect.width, rect.height },
+            .vp = .{ self.vw, self.vh, 0, 0 },
+            .cfg = .{ @floatFromInt(@intFromEnum(g.kind)), if (g.axis == .vertical) 1 else 0, @floatFromInt(ss.len), 0 },
+            .radial = .{ g.cx, g.cy, g.radius, 0 },
+            .offsets = undefined,
+            .colors = undefined,
+        };
+        for (ss, 0..) |s, i| {
+            u.offsets[i] = s.offset;
+            u.colors[i] = col4(s.color);
+        }
         _ = msg(void, struct { *const GradUniform, u64, u64 }, self.enc, sel("setVertexBytes:length:atIndex:"), .{ &u, @as(u64, @sizeOf(GradUniform)), 0 });
         _ = msg(void, struct { *const GradUniform, u64, u64 }, self.enc, sel("setFragmentBytes:length:atIndex:"), .{ &u, @as(u64, @sizeOf(GradUniform)), 0 });
         _ = msg(void, struct { u64, u64, u64 }, self.enc, sel("drawPrimitives:vertexStart:vertexCount:"), .{ MTLPrimitiveTypeTriangleStrip, 0, 4 });
@@ -1560,7 +1591,7 @@ pub const MetalBackend = struct {
         }
         if (rs.gradient) |g| {
             _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{self.grad.pipeline});
-            self.grad.fill(rect.x, rect.y, rect.width, rect.height, if (g.axis == .vertical) 1 else 0, col4(g.from), col4(g.to));
+            self.grad.fill(rect, g);
             return;
         }
         if (rs.corner_radius.isNone() and rs.border.isNone()) {
