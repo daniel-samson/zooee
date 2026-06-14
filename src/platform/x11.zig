@@ -12,6 +12,7 @@ const builtin = @import("builtin");
 const core_event = @import("../event.zig");
 const geometry = @import("../geometry.zig");
 const cursor_mod = @import("../cursor.zig");
+const clipboard_mod = @import("../clipboard.zig");
 
 comptime {
     if (builtin.os.tag != .linux) @compileError("x11.zig is Linux-only; gate imports on builtin.os.tag");
@@ -156,6 +157,29 @@ const XCrossingEvent = extern struct {
     focus: Bool,
     state: c_uint,
 };
+const XSelectionRequestEvent = extern struct {
+    type: c_int,
+    serial: c_ulong,
+    send_event: Bool,
+    display: ?*Display,
+    owner: Window_,
+    requestor: Window_,
+    selection: Atom,
+    target: Atom,
+    property: Atom,
+    time: Time,
+};
+const XSelectionEvent = extern struct {
+    type: c_int,
+    serial: c_ulong,
+    send_event: Bool,
+    display: ?*Display,
+    requestor: Window_,
+    selection: Atom,
+    target: Atom,
+    property: Atom,
+    time: Time,
+};
 const XEvent = extern union {
     type: c_int,
     xkey: XKeyEvent,
@@ -164,6 +188,8 @@ const XEvent = extern union {
     xconfigure: XConfigureEvent,
     xclient: XClientMessageEvent,
     xcrossing: XCrossingEvent,
+    xselectionrequest: XSelectionRequestEvent,
+    xselection: XSelectionEvent,
     pad: [24]c_long,
 };
 
@@ -209,6 +235,15 @@ extern "X11" fn XIconifyWindow(*Display, Window_, c_int) c_int;
 extern "X11" fn XMapRaised(*Display, Window_) c_int;
 extern "X11" fn XSendEvent(*Display, Window_, Bool, c_long, *XEvent) c_int;
 extern "X11" fn XGetWindowProperty(*Display, Window_, Atom, c_long, c_long, Bool, Atom, *Atom, *c_int, *c_ulong, *c_ulong, *?[*]u8) c_int;
+// Clipboard selections (#209/#19).
+extern "X11" fn XSetSelectionOwner(*Display, Atom, Window_, Time) c_int;
+extern "X11" fn XGetSelectionOwner(*Display, Atom) Window_;
+extern "X11" fn XConvertSelection(*Display, Atom, Atom, Atom, Window_, Time) c_int;
+extern "X11" fn XDeleteProperty(*Display, Window_, Atom) c_int;
+extern "X11" fn XCheckTypedEvent(*Display, c_int, *XEvent) Bool;
+const SelectionClear = 29;
+const SelectionRequest = 30;
+const SelectionNotify = 31;
 const SubstructureMask: c_long = (1 << 19) | (1 << 20); // Notify | Redirect
 extern "X11" fn XCreateFontCursor(*Display, c_uint) XID;
 extern "X11" fn XDefineCursor(*Display, Window_, XID) c_int;
@@ -224,6 +259,70 @@ extern "X11" fn XLookupString(*XKeyEvent, [*]u8, c_int, ?*KeySym, ?*anyopaque) c
 extern "X11" fn XCreateGC(*Display, Drawable, c_ulong, ?*anyopaque) ?*GC;
 extern "X11" fn XCreateImage(*Display, ?*Visual, c_uint, c_int, c_int, [*]u8, c_uint, c_uint, c_int, c_int) ?*XImage;
 extern "X11" fn XPutImage(*Display, Drawable, *GC, *XImage, c_int, c_int, c_int, c_int, c_uint, c_uint) c_int;
+
+/// System clipboard backed by the X11 CLIPBOARD selection (#209). Unlike the
+/// macOS/Win32 ones, X11's clipboard is asynchronous and window-owned, so this
+/// wraps a *Window: setText takes ownership of the selection (served from
+/// pumpEvents on SelectionRequest); getText converts + waits for SelectionNotify.
+pub const SystemClipboard = struct {
+    win: *Window,
+
+    pub fn init(win: *Window) SystemClipboard {
+        return .{ .win = win };
+    }
+
+    pub fn interface(self: *SystemClipboard) clipboard_mod.Clipboard {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable: clipboard_mod.Clipboard.VTable = .{ .get_text = getText, .set_text = setText };
+
+    fn setText(ptr: *anyopaque, text: []const u8) anyerror!void {
+        const self: *SystemClipboard = @ptrCast(@alignCast(ptr));
+        const w = self.win;
+        const copy = try w.gpa.dupe(u8, text);
+        if (w.clipboard_text) |old| w.gpa.free(old);
+        w.clipboard_text = copy;
+        const clip = XInternAtom(w.display, "CLIPBOARD", 0);
+        _ = XSetSelectionOwner(w.display, clip, w.handle, 0); // CurrentTime
+        _ = XFlush(w.display);
+    }
+
+    fn getText(ptr: *anyopaque, gpa: std.mem.Allocator) anyerror!?[]u8 {
+        const self: *SystemClipboard = @ptrCast(@alignCast(ptr));
+        const w = self.win;
+        const clip = XInternAtom(w.display, "CLIPBOARD", 0);
+        const utf8 = XInternAtom(w.display, "UTF8_STRING", 0);
+        const dest = XInternAtom(w.display, "ZOOEE_CLIPBOARD", 0);
+        // We own it → return our buffer directly (no round-trip).
+        if (XGetSelectionOwner(w.display, clip) == w.handle) {
+            if (w.clipboard_text) |t| return try gpa.dupe(u8, t);
+            return null;
+        }
+        _ = XConvertSelection(w.display, clip, utf8, dest, w.handle, 0);
+        _ = XFlush(w.display);
+        // Wait (bounded ~500ms) for the SelectionNotify reply.
+        var ev: XEvent = undefined;
+        var tries: usize = 0;
+        while (tries < 100) : (tries += 1) {
+            if (XCheckTypedEvent(w.display, SelectionNotify, &ev) != 0) break;
+            std.Thread.sleep(5 * std.time.ns_per_ms);
+        } else return null;
+        if (ev.xselection.property == 0) return null; // no owner / refused
+        var atype: Atom = 0;
+        var afmt: c_int = 0;
+        var nitems: c_ulong = 0;
+        var after: c_ulong = 0;
+        var data: ?[*]u8 = null;
+        if (XGetWindowProperty(w.display, w.handle, dest, 0, 1 << 24, 0, utf8, &atype, &afmt, &nitems, &after, &data) != 0) return null;
+        defer {
+            if (data) |d| _ = XFree(d);
+        }
+        _ = XDeleteProperty(w.display, w.handle, dest);
+        if (data == null or nitems == 0) return null;
+        return try gpa.dupe(u8, data.?[0..nitems]);
+    }
+};
 
 // --- GLX (optional GPU window; #11 GPU-present path) -------------------------
 // When a GL window is requested we create the X11 window over a GLX-chosen
@@ -367,6 +466,9 @@ pub const Window = struct {
     last_click_time: Time = 0,
     last_click_button: c_uint = 0,
     click_count: u8 = 1,
+    /// CLIPBOARD selection contents we own (#209), served to other apps on
+    /// SelectionRequest. Owned by `gpa`; freed in destroy.
+    clipboard_text: ?[]u8 = null,
 
     pub const CreateOptions = struct {
         title: [:0]const u8 = "zooee",
@@ -644,6 +746,7 @@ pub const Window = struct {
         for (self.cursors) |c| if (c != 0) {
             _ = XFreeCursor(self.display, c);
         };
+        if (self.clipboard_text) |t| self.gpa.free(t);
         self.bgra.deinit(self.gpa);
         self.queue.deinit(self.gpa);
         _ = XDestroyWindow(self.display, self.handle);
@@ -739,6 +842,40 @@ pub const Window = struct {
                             self.queue.append(self.gpa, .{ .text = .{ .codepoint = buf[0] } }) catch {};
                         }
                     }
+                },
+                SelectionRequest => {
+                    // Another app is pasting the CLIPBOARD selection we own
+                    // (#209): serve clipboard_text, or refuse with property=None.
+                    const req = ev.xselectionrequest;
+                    const utf8 = XInternAtom(self.display, "UTF8_STRING", 0);
+                    const targets_atom = XInternAtom(self.display, "TARGETS", 0);
+                    var prop = req.property;
+                    if (self.clipboard_text) |text| {
+                        if (req.target == utf8 or req.target == 31) { // XA_STRING=31
+                            _ = XChangeProperty(self.display, req.requestor, req.property, req.target, 8, 0, text.ptr, @intCast(text.len));
+                        } else if (req.target == targets_atom) {
+                            var list = [_]Atom{ utf8, 31 };
+                            _ = XChangeProperty(self.display, req.requestor, req.property, 4, 32, 0, @ptrCast(&list), 2); // XA_ATOM=4
+                        } else {
+                            prop = 0; // unsupported target → None
+                        }
+                    } else {
+                        prop = 0;
+                    }
+                    var nev: XEvent = undefined;
+                    nev.xselection = .{
+                        .type = SelectionNotify,
+                        .serial = 0,
+                        .send_event = 1,
+                        .display = self.display,
+                        .requestor = req.requestor,
+                        .selection = req.selection,
+                        .target = req.target,
+                        .property = prop,
+                        .time = req.time,
+                    };
+                    _ = XSendEvent(self.display, req.requestor, 0, 0, &nev);
+                    _ = XFlush(self.display);
                 },
                 else => {},
             }
