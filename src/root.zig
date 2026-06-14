@@ -45,6 +45,8 @@ pub const unicode_width = @import("unicode_width.zig");
 pub const devtools = @import("devtools.zig");
 /// Windowing types (#64): TitlebarMode (native/integrated/headless).
 pub const window = @import("window.zig");
+/// Unicode bidirectional algorithm (#203, UAX #9): mixed LTR/RTL reorder.
+pub const bidi = @import("bidi.zig");
 pub const text = @import("text.zig");
 pub const clipboard = @import("clipboard.zig");
 pub const display = @import("display.zig");
