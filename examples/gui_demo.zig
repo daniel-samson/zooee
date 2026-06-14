@@ -304,6 +304,16 @@ const Demo = struct {
             .scroll_y = 40 * scale,
             .children = try arena.dupe(*const L.Element, &.{scroll_content}),
         };
+        // Text layout (#115): a wrapped, centered paragraph in a fixed-width box.
+        const paragraph = try arena.create(L.Element);
+        paragraph.* = .{
+            .width = 240 * scale,
+            .margin = .{ .bottom = 10 * scale },
+            .text = "zooee lays out wrapped, aligned paragraphs across every backend — pixel for pixel.",
+            .text_style = .{ .color = Color.rgb(60, 60, 70), .size = 15 * scale },
+            .text_wrap = true,
+            .text_align = .center,
+        };
         // Unicode (#114): accents + em-dash exercise the dynamic glyph atlas.
         const uni = try arena.create(L.Element);
         uni.* = .{
@@ -320,7 +330,7 @@ const Demo = struct {
                 .border = .all(2 * scale, Color.rgb(120, 120, 130)),
                 .corner_radius = .all(10 * scale),
             },
-            .children = try arena.dupe(*const L.Element, &.{ grad_bar, swatches, card_wrap, icons, button, scroller, uni }),
+            .children = try arena.dupe(*const L.Element, &.{ grad_bar, swatches, card_wrap, icons, button, scroller, paragraph, uni }),
         };
         return panel;
     }
@@ -367,5 +377,5 @@ const Demo = struct {
 pub fn main(init: std.process.Init) !void {
     var demo: Demo = .{};
     const title: [:0]const u8 = if (force_software) "zooee - raster" else "zooee - GPU";
-    try zooee.app.runWindow(Demo, Msg, &demo, init, .{ .title = title, .width = 760, .height = 400, .force_software = force_software });
+    try zooee.app.runWindow(Demo, Msg, &demo, init, .{ .title = title, .width = 760, .height = 560, .force_software = force_software });
 }
