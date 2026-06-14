@@ -34,6 +34,8 @@ pub const driver = @import("testing/driver.zig");
 
 pub const event = @import("event.zig");
 pub const anim = @import("anim.zig");
+/// Declarative animation (#125): CSS-like transitions + keyframes over anim.
+pub const declarative = @import("declarative.zig");
 pub const text = @import("text.zig");
 pub const clipboard = @import("clipboard.zig");
 pub const display = @import("display.zig");

@@ -40,6 +40,20 @@ const Demo = struct {
     phase: f32 = 0,
     /// Wheel-driven scroll offset for the showcase list viewport (#96/#126).
     scroll_y: f32 = 40,
+    /// Declarative transition (#125): the selection indicator eases to the
+    /// selected row's position. `retarget(row)` on every selection change makes
+    /// it slide — and re-base mid-flight if you move again before it settles.
+    sel_indicator: zooee.declarative.Transition =
+        zooee.declarative.Transition.init(0, 180 * std.time.ns_per_ms, .ease_out),
+    /// Declarative keyframes (#125): an infinite alternating opacity pulse on the
+    /// indicator, proving the timeline layer drives invalidation each tick.
+    pulse: zooee.declarative.Keyframes = .{
+        .stops = &.{ .{ .offset = 0, .value = 0.35 }, .{ .offset = 1, .value = 1.0 } },
+        .duration = 700 * std.time.ns_per_ms,
+        .iterations = zooee.declarative.Keyframes.infinite,
+        .direction = .alternate,
+        .easing = .ease_in_out,
+    },
     /// Pointer-inside state (#127): the panel border brightens while the
     /// cursor is over the window (driven by pointer_enter/leave).
     pointer_inside: bool = false,
@@ -83,16 +97,45 @@ const Demo = struct {
             .text_style = .{ .color = self.theme.text, .bold = true, .size = 22 * scale },
             .margin = .{ .bottom = 12 * scale },
         };
+        // Declarative-animation indicator (#125): a 4px accent bar that *slides*
+        // to the selected row (Transition, eased) while *pulsing* its opacity
+        // (Keyframes, infinite alternate). Row pitch = text 16 + pad 3·2 + margin
+        // 6 ≈ 28px; +3 centers the 16px bar against the row's text baseline.
+        const pitch = 28 * scale;
+        const indicator = try arena.create(L.Element);
+        indicator.* = .{
+            .width = 4 * scale,
+            .height = 16 * scale,
+            .margin = .{ .top = self.sel_indicator.value() * pitch + 3 * scale },
+            .rect_style = .{
+                .background = .{
+                    .r = self.theme.accent.r,
+                    .g = self.theme.accent.g,
+                    .b = self.theme.accent.b,
+                    .a = @intFromFloat(@round(self.pulse.value() * 255)),
+                },
+                .corner_radius = .all(2 * scale),
+            },
+        };
+        const indicator_col = try arena.create(L.Element);
+        indicator_col.* = .{
+            .direction = .column,
+            .width = 4 * scale,
+            .margin = .{ .right = 6 * scale },
+            .children = try arena.dupe(*const L.Element, &.{indicator}),
+        };
+        const rows_col = try arena.create(L.Element);
+        rows_col.* = .{ .direction = .column, .children = row_ptrs };
         const list = try arena.create(L.Element);
         list.* = .{
-            .direction = .column,
+            .direction = .row,
             .padding = .all(12 * scale),
             .rect_style = .{
                 .background = self.theme.surface,
                 .border = .all(2 * scale, self.theme.accent),
                 .corner_radius = .all(10 * scale),
             },
-            .children = row_ptrs,
+            .children = try arena.dupe(*const L.Element, &.{ indicator_col, rows_col }),
         };
 
         const showcase = try self.buildShowcase(arena, scale);
@@ -495,6 +538,10 @@ const Demo = struct {
         self.phase += dt_s * 2.0; // ~1 cycle / π seconds
         const tau = 6.2831855;
         if (self.phase > tau) self.phase -= tau;
+        // Declarative layer (#125): the indicator slide settles on its own; the
+        // pulse runs forever. Both feed the same per-frame delta.
+        _ = self.sel_indicator.tick(dt_ns);
+        _ = self.pulse.tick(dt_ns);
         return .redraw; // continuous animation → present every frame
     }
 
@@ -509,6 +556,7 @@ const Demo = struct {
             self.selected = index;
             self.checked[index] = !self.checked[index];
         }
+        self.sel_indicator.retarget(@floatFromInt(self.selected));
         return .redraw;
     }
 
@@ -517,10 +565,12 @@ const Demo = struct {
             .key_down => |k| switch (k.key) {
                 .up => {
                     self.selected = if (self.selected == 0) items.len - 1 else self.selected - 1;
+                    self.sel_indicator.retarget(@floatFromInt(self.selected));
                     return .redraw;
                 },
                 .down => {
                     self.selected = (self.selected + 1) % items.len;
+                    self.sel_indicator.retarget(@floatFromInt(self.selected));
                     return .redraw;
                 },
                 .enter => {
