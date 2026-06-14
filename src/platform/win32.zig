@@ -129,7 +129,40 @@ const WM_RBUTTONUP = 0x0205;
 const WM_MOUSEWHEEL = 0x020A;
 const WM_MOUSEHWHEEL = 0x020E;
 const WM_KEYDOWN = 0x0100;
+const WM_KEYUP = 0x0101;
+const WM_SYSKEYUP = 0x0105;
 const WM_CHAR = 0x0102;
+// Input completeness (#211).
+const WM_LBUTTONDBLCLK = 0x0203;
+const WM_RBUTTONDBLCLK = 0x0206;
+const WM_MBUTTONDBLCLK = 0x0209;
+const WM_MOUSELEAVE = 0x02A3;
+const CS_DBLCLKS: u32 = 0x0008;
+const TME_LEAVE: u32 = 0x0002;
+const VK_SHIFT = 0x10;
+const VK_CONTROL = 0x11;
+const VK_MENU = 0x12;
+const VK_LWIN = 0x5B;
+const VK_RWIN = 0x5C;
+
+const TRACKMOUSEEVENT = extern struct {
+    cbSize: u32,
+    dwFlags: u32,
+    hwndTrack: ?HWND,
+    dwHoverTime: u32,
+};
+extern "user32" fn GetKeyState(i32) callconv(WINAPI) i16;
+extern "user32" fn TrackMouseEvent(*TRACKMOUSEEVENT) callconv(WINAPI) win.BOOL;
+
+/// Current keyboard modifiers from the async key state (#211).
+fn winMods() core_event.Modifiers {
+    return .{
+        .shift = GetKeyState(VK_SHIFT) < 0,
+        .ctrl = GetKeyState(VK_CONTROL) < 0,
+        .alt = GetKeyState(VK_MENU) < 0,
+        .super = GetKeyState(VK_LWIN) < 0 or GetKeyState(VK_RWIN) < 0,
+    };
+}
 
 fn loShort(v: usize) i32 {
     return @as(i16, @bitCast(@as(u16, @truncate(v & 0xFFFF))));
@@ -179,6 +212,9 @@ pub const Window = struct {
     /// cursor on every WM_MOUSEMOVE, so the wndproc re-applies this on
     /// WM_SETCURSOR over the client area instead of fighting it from the loop.
     cursor_idc: usize = IDC_ARROW,
+    /// True between a synthesized pointer_enter and the matching WM_MOUSELEAVE
+    /// (#211): we re-arm TrackMouseEvent on each move only when not tracking.
+    mouse_tracking: bool = false,
 
     /// Apply a pointer cursor shape (#123). Stores the system-cursor id and
     /// applies it now; the wndproc re-applies it on WM_SETCURSOR (Windows
@@ -276,6 +312,7 @@ pub const Window = struct {
 
         if (!class_registered) {
             const wc: WNDCLASSEXW = .{
+                .style = CS_DBLCLKS, // deliver WM_*BUTTONDBLCLK (#211)
                 .lpfnWndProc = wndProc,
                 .hInstance = hinstance,
                 .lpszClassName = class_name,
@@ -396,8 +433,11 @@ pub const Window = struct {
                 }
                 return DefWindowProcW(hwnd, msg, wparam, lparam);
             },
-            WM_MOUSEMOVE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP => {
+            WM_MOUSEMOVE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_LBUTTONDBLCLK, WM_RBUTTONDBLCLK, WM_MBUTTONDBLCLK => {
                 const lp: usize = @bitCast(lparam);
+                // A double-click message is the *second* press → click_count 2
+                // (#211). Native triple-click isn't delivered by Windows.
+                const dbl = msg == WM_LBUTTONDBLCLK or msg == WM_RBUTTONDBLCLK or msg == WM_MBUTTONDBLCLK;
                 const pos: core_event.PointerEvent = .{
                     .position = .{ .x = @floatFromInt(loShort(lp)), .y = @floatFromInt(hiShort(lp)) },
                     .buttons = .{
@@ -405,13 +445,27 @@ pub const Window = struct {
                         .secondary = wparam & 0x0002 != 0,
                         .middle = wparam & 0x0010 != 0,
                     },
+                    .mods = winMods(),
+                    .click_count = if (dbl) 2 else 1,
                 };
+                if (msg == WM_MOUSEMOVE and !self.mouse_tracking) {
+                    // First move after entering / after a leave: emit enter and
+                    // arm leave tracking (#211).
+                    self.mouse_tracking = true;
+                    var tme: TRACKMOUSEEVENT = .{ .cbSize = @sizeOf(TRACKMOUSEEVENT), .dwFlags = TME_LEAVE, .hwndTrack = hwnd, .dwHoverTime = 0 };
+                    _ = TrackMouseEvent(&tme);
+                    self.queue.append(self.gpa, .{ .pointer_enter = pos }) catch {};
+                }
                 const ev: Event = switch (msg) {
                     WM_MOUSEMOVE => .{ .pointer_move = pos },
-                    WM_LBUTTONDOWN, WM_RBUTTONDOWN => .{ .pointer_down = pos },
-                    else => .{ .pointer_up = pos },
+                    WM_LBUTTONUP, WM_RBUTTONUP => .{ .pointer_up = pos },
+                    else => .{ .pointer_down = pos }, // down + dbl-click
                 };
                 self.queue.append(self.gpa, ev) catch {};
+            },
+            WM_MOUSELEAVE => {
+                self.mouse_tracking = false;
+                self.queue.append(self.gpa, .{ .pointer_leave = .{ .position = .{ .x = 0, .y = 0 }, .mods = winMods() } }) catch {};
             },
             WM_MOUSEWHEEL, WM_MOUSEHWHEEL => {
                 // Wheel delta is in the high word of wParam, in WHEEL_DELTA (120)
@@ -431,7 +485,12 @@ pub const Window = struct {
             },
             WM_KEYDOWN => {
                 if (vkToKey(wparam)) |k| {
-                    self.queue.append(self.gpa, .{ .key_down = .{ .key = k } }) catch {};
+                    self.queue.append(self.gpa, .{ .key_down = .{ .key = k, .mods = winMods() } }) catch {};
+                }
+            },
+            WM_KEYUP, WM_SYSKEYUP => {
+                if (vkToKey(wparam)) |k| {
+                    self.queue.append(self.gpa, .{ .key_up = .{ .key = k, .mods = winMods() } }) catch {};
                 }
             },
             WM_CHAR => {
