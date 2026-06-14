@@ -77,6 +77,15 @@ const HTCLIENT: usize = 1;
 
 extern "user32" fn LoadCursorW(?HINSTANCE, ?*const anyopaque) callconv(WINAPI) ?*anyopaque;
 extern "user32" fn SetCursor(?*anyopaque) callconv(WINAPI) ?*anyopaque;
+// Per-monitor DPI (#207). GetDpiForWindow + WM_DPICHANGED are Win10 1607+.
+extern "user32" fn GetDpiForWindow(HWND) callconv(WINAPI) u32;
+extern "user32" fn SetProcessDpiAwarenessContext(?*anyopaque) callconv(WINAPI) win.BOOL;
+extern "user32" fn SetWindowPos(HWND, ?HWND, i32, i32, i32, i32, u32) callconv(WINAPI) win.BOOL;
+const WM_DPICHANGED: u32 = 0x02E0;
+const SWP_NOZORDER: u32 = 0x0004;
+const SWP_NOACTIVATE: u32 = 0x0010;
+// DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = (HANDLE)-4.
+const DPI_PER_MONITOR_V2: ?*anyopaque = @ptrFromInt(@as(usize, @bitCast(@as(isize, -4))));
 
 extern "user32" fn RegisterClassExW(*const WNDCLASSEXW) callconv(WINAPI) u16;
 extern "user32" fn CreateWindowExW(u32, [*:0]const u16, [*:0]const u16, u32, i32, i32, i32, i32, ?HWND, ?*anyopaque, HINSTANCE, ?*anyopaque) callconv(WINAPI) ?HWND;
@@ -199,6 +208,11 @@ pub const Window = struct {
     pub fn create(gpa: std.mem.Allocator, opts: CreateOptions) !*Window {
         const hinstance = GetModuleHandleW(null);
 
+        // Per-monitor-v2 DPI awareness (#207): without it Windows lies about the
+        // client size and GetDpiForWindow always returns 96. Process-wide and
+        // idempotent — safe to call on every create. Ignored on pre-1607.
+        _ = SetProcessDpiAwarenessContext(DPI_PER_MONITOR_V2);
+
         if (!class_registered) {
             const wc: WNDCLASSEXW = .{
                 .lpfnWndProc = wndProc,
@@ -301,6 +315,15 @@ pub const Window = struct {
                 // Redraw live during the modal WM_ENTERSIZEMOVE loop (which
                 // parks our pump loop) so the frame tracks the size.
                 if (self.redraw_fn) |f| f(self.redraw_ctx);
+            },
+            WM_DPICHANGED => {
+                // Dragged to a monitor with a different DPI (#207). lParam is the
+                // suggested window rect; resize to it — the ensuing WM_SIZE emits
+                // `resized`, and contentPixelSize reports the new scale next frame,
+                // so the Coalescer relayouts + regenerates the glyph atlas.
+                const prc: *const RECT = @ptrFromInt(@as(usize, @bitCast(lparam)));
+                _ = SetWindowPos(hwnd, null, prc.left, prc.top, prc.right - prc.left, prc.bottom - prc.top, SWP_NOZORDER | SWP_NOACTIVATE);
+                return 0;
             },
             WM_SETCURSOR => {
                 // Over the client area, apply the app-requested cursor (#123)
@@ -427,10 +450,15 @@ pub fn blit(window: *Window, rgba: []const u8, width: usize, height: usize) void
 pub fn contentPixelSize(window: *Window) struct { width: usize, height: usize, scale: f64 } {
     var rect: RECT = undefined;
     _ = GetClientRect(window.hwnd, &rect);
+    // With per-monitor-v2 awareness the client rect is already physical pixels
+    // (#207); scale = DPI/96 tells layout how to upscale logical units. Mirrors
+    // macOS (physical px + backing scale). 0 → pre-1607 → 1.0.
+    const dpi = GetDpiForWindow(window.hwnd);
+    const scale: f64 = if (dpi > 0) @as(f64, @floatFromInt(dpi)) / 96.0 else 1.0;
     return .{
         .width = @intCast(@max(1, rect.right - rect.left)),
         .height = @intCast(@max(1, rect.bottom - rect.top)),
-        .scale = 1.0,
+        .scale = scale,
     };
 }
 
