@@ -370,6 +370,10 @@ fn runWindowGl(
     if (system_font.loadBytes(gpa, io)) |data| glb.setFont(data) catch {};
     const b = glb.interface();
 
+    // X11 window background = theme backdrop (#182): a resize-grow's exposed
+    // strip shows the theme color instead of black until the frame repaints.
+    window.setBackground(theme.background.r, theme.background.g, theme.background.b);
+
     var frame_arena = std.heap.ArenaAllocator.init(gpa);
     defer frame_arena.deinit();
     var placements: []layout_mod.Placement = &.{};
