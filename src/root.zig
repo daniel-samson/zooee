@@ -36,6 +36,9 @@ pub const event = @import("event.zig");
 pub const anim = @import("anim.zig");
 /// Declarative animation (#125): CSS-like transitions + keyframes over anim.
 pub const declarative = @import("declarative.zig");
+/// Pointer cursor shapes (#123): per-region cursor requests + CSS keyword map.
+pub const cursor = @import("cursor.zig");
+pub const Cursor = cursor.Cursor;
 pub const text = @import("text.zig");
 pub const clipboard = @import("clipboard.zig");
 pub const display = @import("display.zig");

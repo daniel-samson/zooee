@@ -20,6 +20,7 @@ const geometry = @import("geometry.zig");
 const style = @import("style.zig");
 const backend_mod = @import("backend.zig");
 const text_mod = @import("text.zig");
+const cursor_mod = @import("cursor.zig");
 
 const Backend = backend_mod.Backend;
 const Rect = geometry.Rect;
@@ -123,6 +124,11 @@ pub const Element = struct {
     // pointer hits this element. Values are app-defined (enum ints).
     on_click: ?u32 = null,
     on_hover: ?u32 = null,
+    /// Cursor shape (#123) shown while the pointer is over this element's
+    /// border-box. null = inherit (the app resolves the topmost region that
+    /// sets one, defaulting to `.default`). Set `.pointer` on clickables,
+    /// `.text` over text inputs, `.ew_resize` on splitters, etc.
+    cursor: ?cursor_mod.Cursor = null,
 };
 
 /// One positioned element, output of layout.

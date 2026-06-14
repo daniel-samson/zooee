@@ -25,6 +25,7 @@ const geometry = @import("geometry.zig");
 const display = @import("display.zig");
 const theme_mod = @import("theme.zig");
 const style_mod = @import("style.zig");
+const cursor_mod = @import("cursor.zig");
 pub const Theme = theme_mod.Theme;
 
 /// The Model's current backend clear color, if it exposes an optional
@@ -324,9 +325,11 @@ pub fn runWindow(
     }.call);
 
     var fl = FrameLoop.init(platform.refreshHz(window));
+    var last_cursor: cursor_mod.Cursor = .default; // #123: only re-set on change
     loop: while (true) {
         const dt = fl.delta(io);
         for (window.pumpEvents()) |ev| {
+            applyCursor(window, placements, ev, &last_cursor);
             switch (dispatch(Model, Msg, model, ev, placements)) {
                 .none => {},
                 .redraw => dirty = true,
@@ -418,9 +421,11 @@ fn runWindowGl(
     }.call);
 
     var fl = FrameLoop.init(platform.refreshHz(window));
+    var last_cursor: cursor_mod.Cursor = .default; // #123: only re-set on change
     loop: while (true) {
         const dt = fl.delta(io);
         for (window.pumpEvents()) |ev| {
+            applyCursor(window, placements, ev, &last_cursor);
             switch (dispatch(Model, Msg, model, ev, placements)) {
                 .none => {},
                 .redraw => dirty = true,
@@ -541,9 +546,11 @@ fn runWindowMetal(
     }.call);
 
     var fl = FrameLoop.init(platform.refreshHz(window));
+    var last_cursor: cursor_mod.Cursor = .default; // #123: only re-set on change
     loop: while (true) {
         const dt = fl.delta(io);
         for (window.pumpEvents()) |ev| {
+            applyCursor(window, placements, ev, &last_cursor);
             switch (dispatch(Model, Msg, model, ev, placements)) {
                 .none => {},
                 .redraw => dirty = true,
@@ -648,9 +655,11 @@ fn runWindowD3d(
     }.call);
 
     var fl = FrameLoop.init(platform.refreshHz(window));
+    var last_cursor: cursor_mod.Cursor = .default; // #123: only re-set on change
     loop: while (true) {
         const dt = fl.delta(io);
         for (window.pumpEvents()) |ev| {
+            applyCursor(window, placements, ev, &last_cursor);
             switch (dispatch(Model, Msg, model, ev, placements)) {
                 .none => {},
                 .redraw => dirty = true,
@@ -791,6 +800,35 @@ fn dispatch(
     };
 }
 
+/// On a pointer_move, resolve the cursor under the pointer and apply it to the
+/// window — but only when it changed, so the GPU loops don't hammer the OS
+/// cursor API every frame. `last` carries the shape across iterations. Generic
+/// over the window type (each platform Window exposes `setCursor`).
+fn applyCursor(window: anytype, placements: []const layout_mod.Placement, ev: event_mod.Event, last: *cursor_mod.Cursor) void {
+    switch (ev) {
+        .pointer_move => |p| {
+            const shape = cursorFor(placements, p.position);
+            if (shape != last.*) {
+                window.setCursor(shape);
+                last.* = shape;
+            }
+        },
+        else => {},
+    }
+}
+
+/// The cursor shape (#123) the topmost region under `p` requests, or
+/// `.default` when none does. Pure — the platform loops call this on each
+/// pointer_move and apply the result via `window.setCursor`.
+pub fn cursorFor(placements: []const layout_mod.Placement, p: geometry.Point) cursor_mod.Cursor {
+    var shape: cursor_mod.Cursor = .default;
+    for (placements) |pl| {
+        if (!pl.rect.contains(p)) continue;
+        if (pl.element.cursor) |c| shape = c;
+    }
+    return shape;
+}
+
 const Interaction = enum { click, hover };
 
 /// Topmost (last-placed) element containing the point that carries the
@@ -823,4 +861,22 @@ test "hitMsg picks the topmost interactive element" {
     try testing.expectEqual(@as(?u32, 2), hitMsg(&placements, .{ .x = 3, .y = 3 }, .click));
     try testing.expectEqual(@as(?u32, 1), hitMsg(&placements, .{ .x = 8, .y = 8 }, .click));
     try testing.expectEqual(@as(?u32, null), hitMsg(&placements, .{ .x = 50, .y = 50 }, .click));
+}
+
+test "cursorFor resolves topmost region, defaults when none" {
+    const e1: layout_mod.Element = .{ .cursor = .text };
+    const e2: layout_mod.Element = .{ .cursor = .pointer };
+    const e3: layout_mod.Element = .{}; // no cursor request
+    const placements = [_]layout_mod.Placement{
+        .{ .element = &e1, .rect = .{ .x = 0, .y = 0, .width = 10, .height = 10 } },
+        .{ .element = &e2, .rect = .{ .x = 2, .y = 2, .width = 4, .height = 4 } },
+        .{ .element = &e3, .rect = .{ .x = 2, .y = 2, .width = 4, .height = 4 } },
+    };
+    // Inside e2 (topmost with a cursor): e3 sits on top but requests none, so
+    // the last *set* cursor wins → pointer.
+    try testing.expectEqual(cursor_mod.Cursor.pointer, cursorFor(&placements, .{ .x = 3, .y = 3 }));
+    // Only e1 covers (8,8) → its I-beam.
+    try testing.expectEqual(cursor_mod.Cursor.text, cursorFor(&placements, .{ .x = 8, .y = 8 }));
+    // Outside everything → default.
+    try testing.expectEqual(cursor_mod.Cursor.default, cursorFor(&placements, .{ .x = 50, .y = 50 }));
 }
