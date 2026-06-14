@@ -428,7 +428,7 @@ pub const Window = struct {
 
         self.* = .{ .hwnd = hwnd, .gpa = gpa, .drop_arena = std.heap.ArenaAllocator.init(gpa) };
         _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, @bitCast(@intFromPtr(self)));
-        DragAcceptFiles(hwnd, 1); // accept WM_DROPFILES (#212)
+        DragAcceptFiles(hwnd, .TRUE); // accept WM_DROPFILES (#212)
         if (opts.visible) _ = ShowWindow(hwnd, SW_SHOWNORMAL);
         return self;
     }
