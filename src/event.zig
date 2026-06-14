@@ -128,6 +128,22 @@ pub const ScrollPhase = enum {
     momentum,
 };
 
+/// IME composition lifecycle (#19): CJK and other input methods build text in
+/// a pre-edit buffer before committing. `update` carries the in-progress
+/// (underlined) string with a caret; `commit` carries the finalized text that
+/// should be inserted; `cancel` abandons the composition.
+pub const CompositionPhase = enum { start, update, commit, cancel };
+
+pub const CompositionEvent = struct {
+    window: WindowId = main_window,
+    phase: CompositionPhase,
+    /// The pre-edit string (`update`) or the committed string (`commit`).
+    /// Borrowed for the dispatch; apps that retain it must copy.
+    text: []const u8 = "",
+    /// Caret position within `text`, in bytes (for `update` underlining).
+    caret: usize = 0,
+};
+
 /// What a drag carries (#128). Borrowed slices, valid only for the duration of
 /// the event dispatch — apps that keep data must copy it.
 pub const DragData = union(enum) {
@@ -159,6 +175,8 @@ pub const Event = union(enum) {
     /// Key release (#127): held-key state, modifier release, games.
     key_up: KeyEvent,
     text: TextEvent,
+    /// IME pre-edit / commit (#19): CJK and dead-key composition.
+    composition: CompositionEvent,
     pointer_down: PointerEvent,
     pointer_up: PointerEvent,
     pointer_move: PointerEvent,
