@@ -716,6 +716,11 @@ fn runWindowD3d(
             }
             frame.draw();
             dirty = false;
+            // GPU device-lost (#25): present reported the device was removed/
+            // reset. Recreating the whole D3D device + atlas + textures is a
+            // follow-up; for now exit the GPU loop cleanly rather than spin on
+            // blank presents (the app can relaunch / fall back to raster).
+            if (swapchain.isLost()) break :loop;
         }
 
         // Re-pace if the window moved to a different-refresh monitor (#27).
