@@ -170,6 +170,9 @@ pub const BoxShadow = struct {
     /// Blur radius; the Gaussian sigma is blur/2 (≈ the CSS convention).
     blur: f32 = 0,
     spread: f32 = 0,
+    /// Corner radius of the shadowed box (#119): >0 uses the rounded-shadow
+    /// integral; 0 uses the fast closed-form erf product.
+    corner_radius: f32 = 0,
 
     /// Abramowitz-Stegun 7.1.26 erf approximation (max abs error ~1.5e-7).
     /// Backends MUST replicate this exact polynomial so results match.
@@ -185,6 +188,31 @@ pub const BoxShadow = struct {
         return 0.5 * (erf((hi - p) * inv) - erf((lo - p) * inv));
     }
 
+    /// Wallace's vec-form erf approximation, used ONLY by the rounded path so
+    /// the CPU and every shader integrate the identical curve.
+    fn werf(x: f32) f32 {
+        const s: f32 = if (x < 0) -1 else 1;
+        const a = @abs(x);
+        var v = 1.0 + (0.278393 + (0.230389 + 0.078108 * (a * a)) * a) * a;
+        v *= v;
+        return s - s / (v * v);
+    }
+
+    fn gaussian(x: f32, sigma: f32) f32 {
+        return @exp(-(x * x) / (2.0 * sigma * sigma)) / (2.5066282746310002 * sigma); // sqrt(2π)
+    }
+
+    /// Horizontal extent of the rounded box at row `y` (box-center coords),
+    /// blurred (Evan Wallace, madebyevan.com fast-rounded-rectangle-shadows).
+    fn roundedX(x: f32, y: f32, sigma: f32, corner: f32, hx: f32, hy: f32) f32 {
+        const delta = @min(hy - corner - @abs(y), 0.0);
+        const curved = hx - corner + @sqrt(@max(0.0, corner * corner - delta * delta));
+        const inv = 0.7071067811865476 / sigma; // sqrt(0.5)/sigma
+        const lo = 0.5 + 0.5 * werf((x - curved) * inv);
+        const hi = 0.5 + 0.5 * werf((x + curved) * inv);
+        return hi - lo;
+    }
+
     /// Shadow coverage [0,1] at pixel center (px,py) for the rect at
     /// (rect_x,rect_y) sized rect_w×rect_h.
     pub fn coverage(self: BoxShadow, rect_x: f32, rect_y: f32, rect_w: f32, rect_h: f32, px: f32, py: f32) f32 {
@@ -196,8 +224,32 @@ pub const BoxShadow = struct {
             return if (px >= x0 and px < x1 and py >= y0 and py < y1) 1 else 0;
         }
         const s = self.blur * 0.5;
-        const c = band(px, x0, x1, s) * band(py, y0, y1, s);
-        return @max(0, @min(1, c));
+        if (self.corner_radius <= 0) {
+            const c = band(px, x0, x1, s) * band(py, y0, y1, s);
+            return @max(0, @min(1, c));
+        }
+        // Rounded box: 4-sample vertical Gaussian integral of the rounded
+        // horizontal extent. Same loop on CPU and shader → matching result.
+        const cx = (x0 + x1) * 0.5;
+        const cy = (y0 + y1) * 0.5;
+        const hx = (x1 - x0) * 0.5;
+        const hy = (y1 - y0) * 0.5;
+        const corner = @min(self.corner_radius, @min(hx, hy));
+        const ptx = px - cx;
+        const pty = py - cy;
+        const low = pty - hy;
+        const high = pty + hy;
+        const start = @max(low, @min(high, -3.0 * s));
+        const end = @max(low, @min(high, 3.0 * s));
+        const step = (end - start) / 4.0;
+        var y = start + step * 0.5;
+        var value: f32 = 0;
+        var i: usize = 0;
+        while (i < 4) : (i += 1) {
+            value += roundedX(ptx, pty - y, s, corner, hx, hy) * gaussian(y, s) * step;
+            y += step;
+        }
+        return @max(0, @min(1, value));
     }
 };
 

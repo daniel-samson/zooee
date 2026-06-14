@@ -974,13 +974,24 @@ pub const MetalShadowRenderer = struct {
         \\}
         \\static float erf_(float x) { float t = 1.0/(1.0+0.3275911*fabs(x)); float y = 1.0-(((((1.061405429*t-1.453152027)*t)+1.421413741)*t-0.284496736)*t+0.254829592)*t*exp(-x*x); return x<0.0?-y:y; }
         \\static float band_(float p, float lo, float hi, float s) { float inv = 1.0/(s*1.4142135623730951); return 0.5*(erf_((hi-p)*inv)-erf_((lo-p)*inv)); }
+        \\static float werf_(float x) { float s = x<0.0?-1.0:1.0; float a = fabs(x); float v = 1.0+(0.278393+(0.230389+0.078108*(a*a))*a)*a; v*=v; return s - s/(v*v); }
+        \\static float gauss_(float x, float sigma) { return exp(-(x*x)/(2.0*sigma*sigma)) / (2.5066282746310002*sigma); }
+        \\static float roundedX_(float x, float y, float sigma, float corner, float hx, float hy) { float delta = min(hy-corner-fabs(y), 0.0); float curved = hx-corner+sqrt(max(0.0, corner*corner-delta*delta)); float inv = 0.7071067811865476/sigma; float i0 = 0.5+0.5*werf_((x-curved)*inv); float i1 = 0.5+0.5*werf_((x+curved)*inv); return i1-i0; }
         \\fragment float4 f_main(float4 fp [[position]], constant ShU& u [[buffer(0)]]) {
-        \\    float dx=u.sh.x, dy=u.sh.y, blur=u.sh.z, spread=u.sh.w;
+        \\    float dx=u.sh.x, dy=u.sh.y, blur=u.sh.z, spread=u.sh.w; float corner=u.vp.z;
         \\    float x0=u.rect.x+dx-spread, y0=u.rect.y+dy-spread;
         \\    float x1=u.rect.x+u.rect.z+dx+spread, y1=u.rect.y+u.rect.w+dy+spread;
         \\    float cov;
         \\    if (blur<=0.0) cov = (fp.x>=x0 && fp.x<x1 && fp.y>=y0 && fp.y<y1) ? 1.0 : 0.0;
-        \\    else { float s=blur*0.5; cov = clamp(band_(fp.x,x0,x1,s)*band_(fp.y,y0,y1,s), 0.0, 1.0); }
+        \\    else if (corner<=0.0) { float s=blur*0.5; cov = clamp(band_(fp.x,x0,x1,s)*band_(fp.y,y0,y1,s), 0.0, 1.0); }
+        \\    else {
+        \\        float s=blur*0.5; float cx=(x0+x1)*0.5, cy=(y0+y1)*0.5; float hx=(x1-x0)*0.5, hy=(y1-y0)*0.5;
+        \\        float cr=min(corner, min(hx,hy)); float ptx=fp.x-cx, pty=fp.y-cy;
+        \\        float low=pty-hy, high=pty+hy; float start=clamp(-3.0*s, low, high); float end=clamp(3.0*s, low, high);
+        \\        float step=(end-start)/4.0; float y=start+step*0.5; float value=0.0;
+        \\        for (int i=0;i<4;i++) { value += roundedX_(ptx, pty-y, s, cr, hx, hy)*gauss_(y, s)*step; y+=step; }
+        \\        cov = clamp(value, 0.0, 1.0);
+        \\    }
         \\    return float4(u.color.rgb, cov*u.color.a);
         \\}
     ;
@@ -994,8 +1005,8 @@ pub const MetalShadowRenderer = struct {
         release(self.pipeline);
     }
 
-    pub fn draw(self: *MetalShadowRenderer, quad: [4]f32, rect: [4]f32, sh: [4]f32, color: [4]f32) void {
-        var u: ShadowUniform = .{ .quad = quad, .rect = rect, .sh = sh, .color = color, .vp = .{ self.vw, self.vh, 0, 0 } };
+    pub fn draw(self: *MetalShadowRenderer, quad: [4]f32, rect: [4]f32, sh: [4]f32, color: [4]f32, corner: f32) void {
+        var u: ShadowUniform = .{ .quad = quad, .rect = rect, .sh = sh, .color = color, .vp = .{ self.vw, self.vh, corner, 0 } };
         _ = msg(void, struct { *const ShadowUniform, u64, u64 }, self.enc, sel("setVertexBytes:length:atIndex:"), .{ &u, @as(u64, @sizeOf(ShadowUniform)), 0 });
         _ = msg(void, struct { *const ShadowUniform, u64, u64 }, self.enc, sel("setFragmentBytes:length:atIndex:"), .{ &u, @as(u64, @sizeOf(ShadowUniform)), 0 });
         _ = msg(void, struct { u64, u64, u64 }, self.enc, sel("drawPrimitives:vertexStart:vertexCount:"), .{ MTLPrimitiveTypeTriangleStrip, 0, 4 });
@@ -1587,7 +1598,7 @@ pub const MetalBackend = struct {
                 rect.height + 2 * (sh.spread + margin),
             };
             _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{self.shadow.pipeline});
-            self.shadow.draw(quad, .{ rect.x, rect.y, rect.width, rect.height }, .{ sh.dx, sh.dy, sh.blur, sh.spread }, col4(sh.color));
+            self.shadow.draw(quad, .{ rect.x, rect.y, rect.width, rect.height }, .{ sh.dx, sh.dy, sh.blur, sh.spread }, col4(sh.color), sh.corner_radius);
         }
         if (rs.gradient) |g| {
             _ = msg(void, struct { id }, self.enc, sel("setRenderPipelineState:"), .{self.grad.pipeline});
