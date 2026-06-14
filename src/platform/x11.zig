@@ -477,6 +477,14 @@ pub fn contentPixelSize(window: *Window) struct { width: usize, height: usize, s
     return .{ .width = window.width, .height = window.height, .scale = 1.0 };
 }
 
+/// Display refresh rate (Hz) for frame pacing (#170). Returning 0 makes the
+/// caller fall back to 60. The real query — XRRConfigCurrentRate (Xrandr) —
+/// NEEDS ON-DEVICE QA on the Ubuntu VM, so this is a safe 60 stub for now.
+pub fn refreshHz(window: *Window) f32 {
+    _ = window;
+    return 0;
+}
+
 pub fn blit(window: *Window, rgba: []const u8, width: usize, height: usize) void {
     std.debug.assert(rgba.len == width * height * 4);
     window.bgra.resize(window.gpa, rgba.len) catch return;
