@@ -1725,13 +1725,21 @@ const D3dImageRenderer = struct {
     }
 
     fn draw(self: *D3dImageRenderer, rtv: *IRtv, vw: f32, vh: f32, rect: geometry.Rect, srv: *ISrv) Error!void {
+        return self.drawUv(rtv, vw, vh, rect, .{ .x = 0, .y = 0, .width = 1, .height = 1 }, srv);
+    }
+
+    fn drawUv(self: *D3dImageRenderer, rtv: *IRtv, vw: f32, vh: f32, dst: geometry.Rect, src: geometry.Rect, srv: *ISrv) Error!void {
         const dev = self.device;
         const ctx = self.context;
-        const x0 = rect.x;
-        const y0 = rect.y;
-        const x1 = rect.x + rect.width;
-        const y1 = rect.y + rect.height;
-        const verts = [_]f32{ x0, y0, 0, 0, x1, y0, 1, 0, x0, y1, 0, 1, x1, y1, 1, 1 };
+        const x0 = dst.x;
+        const y0 = dst.y;
+        const x1 = dst.x + dst.width;
+        const y1 = dst.y + dst.height;
+        const tx0 = src.x;
+        const ty0 = src.y;
+        const tx1 = src.x + src.width;
+        const ty1 = src.y + src.height;
+        const verts = [_]f32{ x0, y0, tx0, ty0, x1, y0, tx1, ty0, x0, y1, tx0, ty1, x1, y1, tx1, ty1 };
         var vb_data: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = &verts };
         var vb_desc: D3D11_BUFFER_DESC = .{ .byte_width = @sizeOf(@TypeOf(verts)), .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_VERTEX_BUFFER };
         var vb: ?*IBuffer = null;
@@ -2396,6 +2404,7 @@ pub const D3dBackend = struct {
         .draw_rect = drawRect,
         .draw_text = drawText,
         .draw_image = drawImage,
+        .draw_image_uv = drawImageUv,
         .fill_path = fillPath,
         .stroke_path = strokePath,
         .push_clip = pushClip,
@@ -2485,6 +2494,14 @@ pub const D3dBackend = struct {
         const h: f32 = @floatFromInt(self.off.height);
         const srv: *ISrv = @ptrCast(@alignCast(texture));
         self.image.draw(self.target(), w, h, rect, srv) catch {};
+    }
+
+    fn drawImageUv(ptr: *anyopaque, dst: geometry.Rect, texture: *Backend.Texture, src: geometry.Rect) void {
+        const self = self_(ptr);
+        const w: f32 = @floatFromInt(self.off.width);
+        const h: f32 = @floatFromInt(self.off.height);
+        const srv: *ISrv = @ptrCast(@alignCast(texture));
+        self.image.drawUv(self.target(), w, h, dst, src, srv) catch {};
     }
 
     fn fillPath(ptr: *anyopaque, points: []const geometry.Point, color: style.Color) void {

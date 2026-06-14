@@ -467,6 +467,32 @@ pub fn main(init: std.process.Init) !void {
             if (!scene_ok) backend_ok = false;
             try out.print("D3D11 Backend vs raster [{s}]: bad_frac={d:.4} {s}\n", .{ scene.name, frac, if (scene_ok) "PASS" else "FAIL" });
         }
+        // Image fit modes (#122): cover + contain, nearest sampling (exact).
+        {
+            const scene: zooee.fixtures.Scene = .{ .name = "image_fit", .width = 15, .height = 8, .draw = zooee.fixtures.drawImageFit };
+            try zooee.fixtures.run(scene, db.interface(), 8);
+            const dpx = try db.readPixels();
+            var ras = zooee.backends.raster.RasterBackend.init(gpa);
+            defer ras.deinit();
+            try ras.setFont(zooee.test_font_ttf);
+            try zooee.fixtures.run(scene, ras.interface(), 8);
+            var bad: usize = 0;
+            const n = @min(dpx.len, ras.pixels.len) / 4;
+            for (0..n) |p| {
+                var md: u8 = 0;
+                for (0..3) |ch| {
+                    const a = dpx[p * 4 + ch];
+                    const bch = ras.pixels[p * 4 + ch];
+                    const d = if (a > bch) a - bch else bch - a;
+                    if (d > md) md = d;
+                }
+                if (md > 32) bad += 1;
+            }
+            const frac = @as(f32, @floatFromInt(bad)) / @as(f32, @floatFromInt(n));
+            const scene_ok = frac < 0.03;
+            if (!scene_ok) backend_ok = false;
+            try out.print("D3D11 Backend vs raster [{s}]: bad_frac={d:.4} {s}\n", .{ scene.name, frac, if (scene_ok) "PASS" else "FAIL" });
+        }
         // Layout-integrated effects (#117/#121/#118 via Element): gradient +
         // rounded clip + opacity through the layout engine, vs raster.
         {
