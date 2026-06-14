@@ -370,7 +370,7 @@ fn runWindowGl(
     var glb = try gl_backend.GlBackend.initOnCurrent(gpa);
     glb.clear_color = theme.clearRgba(); // theme backdrop (theming)
     defer glb.deinit();
-    if (system_font.loadBytes(gpa, io)) |data| glb.setFont(data) catch {};
+    if (system_font.loadFontSet(gpa, io)) |set| glb.setFontSet(set);
     const b = glb.interface();
 
     // X11 window background = theme backdrop (#182): a resize-grow's exposed
@@ -489,7 +489,7 @@ fn runWindowMetal(
     var mb = try metal_backend.MetalBackend.initOn(gpa, ctx.device, ctx.queue);
     mb.clear_color = theme.clearRgba(); // theme backdrop (theming)
     defer mb.deinit();
-    if (system_font.loadBytes(gpa, io)) |data| mb.setFont(data) catch {};
+    if (system_font.loadFontSet(gpa, io)) |set| mb.setFontSet(set);
     const b = mb.interface();
 
     var frame_arena = std.heap.ArenaAllocator.init(gpa);
@@ -602,7 +602,7 @@ fn runWindowD3d(
     var db = try d3d_backend.D3dBackend.initOnDevice(gpa, swapchain.device, swapchain.context);
     db.clear_color = theme.clearRgba(); // theme backdrop (theming)
     defer db.deinit();
-    if (system_font.loadBytes(gpa, io)) |data| db.setFont(data) catch {};
+    if (system_font.loadFontSet(gpa, io)) |set| db.setFontSet(set);
     const b = db.interface();
 
     var frame_arena = std.heap.ArenaAllocator.init(gpa);

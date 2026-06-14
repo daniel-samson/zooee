@@ -111,7 +111,9 @@ pub fn main(init: std.process.Init) !void {
     // region is empty. Also dump a PPM for visual inspection.
     const zooee = @import("zooee");
     const font = try zooee.font.ttf.Font.parse(zooee.test_font_ttf);
-    var gr = gl.GlyphRenderer.init(gpa, &font, 48) catch |err| {
+    var fset: zooee.font.FontSet = .{};
+    fset.setFace(zooee.font.FontSet.regular, font);
+    var gr = gl.GlyphRenderer.init(gpa, &fset, 48) catch |err| {
         try out.print("GL-GLYPH-INIT-FAILED: {t}\n", .{err});
         try out.flush();
         std.process.exit(1);

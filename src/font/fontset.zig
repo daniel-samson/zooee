@@ -97,6 +97,25 @@ pub const FontSet = struct {
     pub fn hasAny(self: *const FontSet) bool {
         return self.faces[regular] != null;
     }
+
+    pub const Metrics = struct { width: f32, height: f32 };
+
+    /// Advance width + line height of `text` at `size`, resolving each codepoint
+    /// through the face set (bold/italic/fallback). Line height comes from the
+    /// primary face so mixed-face runs share one grid. Shared by every backend's
+    /// measureText so they agree (#114).
+    pub fn measure(self: *const FontSet, text: []const u8, size: f32, style: Style) Metrics {
+        var width: f32 = 0;
+        var it = std.unicode.Utf8View.initUnchecked(text).iterator();
+        while (it.nextCodepoint()) |cp| {
+            const r = self.resolve(cp, style);
+            const f = self.face(r.face_id);
+            width += @as(f32, @floatFromInt(f.hMetrics(r.glyph).advance)) * (size / @as(f32, @floatFromInt(f.units_per_em)));
+        }
+        const p = self.primary();
+        const line = @as(f32, @floatFromInt(p.ascent - p.descent + p.line_gap)) * (size / @as(f32, @floatFromInt(p.units_per_em)));
+        return .{ .width = width, .height = line };
+    }
 };
 
 // === Tests ==================================================================

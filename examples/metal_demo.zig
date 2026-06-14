@@ -116,7 +116,9 @@ pub fn main(init: std.process.Init) !void {
     // Slice 5: glyph atlas text. Render white "Hi zooee" on black via the
     // Metal glyph atlas; assert ink exists and the far-right region is empty.
     const font = try zooee.font.ttf.Font.parse(zooee.test_font_ttf);
-    var gr = metal.MetalGlyphRenderer.init(ctx.device, ctx.queue, gpa, &font, 48) catch |err| {
+    var fset: zooee.font.FontSet = .{};
+    fset.setFace(zooee.font.FontSet.regular, font);
+    var gr = metal.MetalGlyphRenderer.init(ctx.device, ctx.queue, gpa, &fset, 48) catch |err| {
         try out.print("METAL-GLYPH-INIT-FAILED: {t}\n", .{err});
         try out.flush();
         std.process.exit(1);
