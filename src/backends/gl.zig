@@ -647,17 +647,29 @@ const shadow_frag: [*:0]const u8 =
     \\#version 120
     \\uniform vec4 rect;  // x,y,w,h
     \\uniform vec4 sh;    // dx,dy,blur,spread
+    \\uniform float corner;
     \\uniform vec4 color;
     \\varying vec2 v_px;
     \\float erf_(float x){ float t=1.0/(1.0+0.3275911*abs(x)); float y=1.0-(((((1.061405429*t-1.453152027)*t)+1.421413741)*t-0.284496736)*t+0.254829592)*t*exp(-x*x); return x<0.0?-y:y; }
     \\float band_(float p,float lo,float hi,float s){ float inv=1.0/(s*1.4142135623730951); return 0.5*(erf_((hi-p)*inv)-erf_((lo-p)*inv)); }
+    \\float werf_(float x){ float s=x<0.0?-1.0:1.0; float a=abs(x); float v=1.0+(0.278393+(0.230389+0.078108*(a*a))*a)*a; v*=v; return s - s/(v*v); }
+    \\float gauss_(float x, float sigma){ return exp(-(x*x)/(2.0*sigma*sigma)) / (2.5066282746310002*sigma); }
+    \\float roundedX_(float x, float y, float sigma, float cr, float hx, float hy){ float delta=min(hy-cr-abs(y), 0.0); float curved=hx-cr+sqrt(max(0.0, cr*cr-delta*delta)); float inv=0.7071067811865476/sigma; float lo=0.5+0.5*werf_((x-curved)*inv); float hi=0.5+0.5*werf_((x+curved)*inv); return hi-lo; }
     \\void main(){
     \\  float dx=sh.x, dy=sh.y, blur=sh.z, spread=sh.w;
     \\  float x0=rect.x+dx-spread, y0=rect.y+dy-spread;
     \\  float x1=rect.x+rect.z+dx+spread, y1=rect.y+rect.w+dy+spread;
     \\  float cov;
     \\  if (blur<=0.0) cov = (v_px.x>=x0 && v_px.x<x1 && v_px.y>=y0 && v_px.y<y1) ? 1.0 : 0.0;
-    \\  else { float s=blur*0.5; cov = clamp(band_(v_px.x,x0,x1,s)*band_(v_px.y,y0,y1,s), 0.0, 1.0); }
+    \\  else if (corner<=0.0) { float s=blur*0.5; cov = clamp(band_(v_px.x,x0,x1,s)*band_(v_px.y,y0,y1,s), 0.0, 1.0); }
+    \\  else {
+    \\    float s=blur*0.5; float cx=(x0+x1)*0.5, cy=(y0+y1)*0.5; float hx=(x1-x0)*0.5, hy=(y1-y0)*0.5;
+    \\    float cr=min(corner, min(hx,hy)); float ptx=v_px.x-cx, pty=v_px.y-cy;
+    \\    float low=pty-hy, high=pty+hy; float start=clamp(-3.0*s, low, high); float end=clamp(3.0*s, low, high);
+    \\    float step=(end-start)/4.0; float y=start+step*0.5; float value=0.0;
+    \\    for (int i=0;i<4;i++){ value += roundedX_(ptx, pty-y, s, cr, hx, hy)*gauss_(y, s)*step; y+=step; }
+    \\    cov = clamp(value, 0.0, 1.0);
+    \\  }
     \\  gl_FragColor = vec4(color.rgb, cov*color.a);
     \\}
 ;
@@ -672,6 +684,7 @@ pub const ShadowRenderer = struct {
     u_viewport: GLint,
     u_rect: GLint,
     u_sh: GLint,
+    u_corner: GLint,
     u_color: GLint,
     vw: f32 = 0,
     vh: f32 = 0,
@@ -700,17 +713,19 @@ pub const ShadowRenderer = struct {
             .u_viewport = gl.getUniformLocation(prog, "viewport"),
             .u_rect = gl.getUniformLocation(prog, "rect"),
             .u_sh = gl.getUniformLocation(prog, "sh"),
+            .u_corner = gl.getUniformLocation(prog, "corner"),
             .u_color = gl.getUniformLocation(prog, "color"),
         };
     }
 
     /// Draw the shadow over the expanded `quad` (x,y,w,h pixel space).
-    pub fn draw(self: *ShadowRenderer, quad: [4]f32, rect: [4]f32, sh: [4]f32, color: [4]f32) void {
+    pub fn draw(self: *ShadowRenderer, quad: [4]f32, rect: [4]f32, sh: [4]f32, color: [4]f32, corner: f32) void {
         const gl = self.gl;
         gl.useProgram(self.program);
         gl.uniform2f(self.u_viewport, self.vw, self.vh);
         gl.uniform4f(self.u_rect, rect[0], rect[1], rect[2], rect[3]);
         gl.uniform4f(self.u_sh, sh[0], sh[1], sh[2], sh[3]);
+        gl.uniform1f(self.u_corner, corner);
         gl.uniform4f(self.u_color, color[0], color[1], color[2], color[3]);
         const x = quad[0];
         const y = quad[1];
@@ -2060,7 +2075,7 @@ pub const GlBackend = struct {
                 rect.width + 2 * (sh.spread + margin),
                 rect.height + 2 * (sh.spread + margin),
             };
-            self.shadow.draw(quad, .{ rect.x, rect.y, rect.width, rect.height }, .{ sh.dx, sh.dy, sh.blur, sh.spread }, col(sh.color));
+            self.shadow.draw(quad, .{ rect.x, rect.y, rect.width, rect.height }, .{ sh.dx, sh.dy, sh.blur, sh.spread }, col(sh.color), sh.corner_radius);
         }
         if (rs.gradient) |g| {
             enableBlend();
