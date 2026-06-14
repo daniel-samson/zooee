@@ -226,6 +226,28 @@ fn onPerformDrag(_: id, _: SEL, sender: id) callconv(.c) bool {
     return true;
 }
 
+// --- drag-and-drop source (#128) ---------------------------------------------
+// Start an OS drag *out* of the window. The triggering NSEvent comes from
+// [NSApp currentEvent], so the app can call beginDragText from a pointer-drag
+// handler without us threading the live event through the decoupled loop.
+var drag_source_instance: id = null;
+
+/// IMP for `draggingSession:sourceOperationMaskForDraggingContext:` — allow
+/// copy in any context (within-app and to other apps).
+fn onDragSourceMask(_: id, _: SEL, _: id, _: i64) callconv(.c) u64 {
+    return NSDragOperationCopy;
+}
+
+/// A shared NSDraggingSource whose op-mask method permits copy. Registered once.
+fn dragSource() id {
+    if (drag_source_instance) |s| return s;
+    const c = objc_allocateClassPair(cls("NSObject"), "ZooeeDragSource", 0);
+    _ = class_addMethod(c, sel("draggingSession:sourceOperationMaskForDraggingContext:"), @ptrCast(&onDragSourceMask), "Q@:@q");
+    objc_registerClassPair(c);
+    drag_source_instance = msg(id, struct {}, msg(id, struct {}, c, sel("alloc"), .{}), sel("init"), .{});
+    return drag_source_instance;
+}
+
 /// Register the drag-destination methods on the contentView's class (once) and
 /// accept filename drops on `view`.
 fn enableDrop(view: id, w: *Window) void {
@@ -562,6 +584,30 @@ pub const Window = struct {
         const r = menu_selected_id;
         menu_selected_id = 0; // clear so a later takeMenuCommand() isn't fooled
         return if (r == 0) null else r;
+    }
+
+    /// Begin an OS drag-and-drop *source* session carrying `text` (#128). Call
+    /// from a pointer-drag handler; uses the current NSEvent as the trigger and
+    /// a generic drag image. Returns false if there's no current event (not in a
+    /// drag gesture). The OS drives the rest; drops into other apps paste text.
+    pub fn beginDragText(self: *Window, text: [:0]const u8) bool {
+        const app = msg(id, struct {}, cls("NSApplication"), sel("sharedApplication"), .{});
+        const event = msg(id, struct {}, app, sel("currentEvent"), .{});
+        if (event == null) return false;
+        const view = msg(id, struct {}, self.ns_window, sel("contentView"), .{});
+
+        const pbitem = msg(id, struct {}, msg(id, struct {}, cls("NSPasteboardItem"), sel("alloc"), .{}), sel("init"), .{});
+        _ = msg(bool, struct { id, id }, pbitem, sel("setString:forType:"), .{ nsString(text), nsString("public.utf8-plain-text") });
+
+        const ditem = msg(id, struct { id }, msg(id, struct {}, cls("NSDraggingItem"), sel("alloc"), .{}), sel("initWithPasteboardWriter:"), .{pbitem});
+        const img = msg(id, struct { id }, cls("NSImage"), sel("imageNamed:"), .{nsString("NSMultipleDocuments")});
+        const loc = msg(NSPoint, struct {}, event, sel("locationInWindow"), .{});
+        const frame: NSRect = .{ .x = loc.x - 16, .y = loc.y - 16, .w = 32, .h = 32 };
+        _ = msg(void, struct { NSRect, id }, ditem, sel("setDraggingFrame:contents:"), .{ frame, img });
+
+        const arr = msg(id, struct { id }, cls("NSArray"), sel("arrayWithObject:"), .{ditem});
+        const sess = msg(id, struct { id, id, id }, view, sel("beginDraggingSessionWithItems:event:source:"), .{ arr, event, dragSource() });
+        return sess != null;
     }
 
     /// Install `items` as the application menu bar (#129). Each top-level item
