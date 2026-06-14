@@ -2273,6 +2273,10 @@ fn col(c: style.Color) [4]f32 {
 
 pub const D3dBackend = struct {
     gpa: std.mem.Allocator,
+    /// Framebuffer clear color (theming, #170 follow-up). White by default so
+    /// the offscreen golden path is unchanged; the windowed app sets it from
+    /// the theme background.
+    clear_color: [4]f32 = .{ 1, 1, 1, 1 },
     off: D3dOffscreen,
     rect: D3dRectRenderer,
     exact: D3dExactRectRenderer,
@@ -2448,7 +2452,7 @@ pub const D3dBackend = struct {
         const w: u32 = @intFromFloat(@max(1, @round(viewport.width)));
         const h: u32 = @intFromFloat(@max(1, @round(viewport.height)));
         self.off.resize(w, h) catch return error.OutOfMemory;
-        self.off.clear(1, 1, 1, 1); // match raster's white clear
+        self.off.clear(self.clear_color[0], self.clear_color[1], self.clear_color[2], self.clear_color[3]);
         self.cur_rtv = self.off.rtv;
         self.clips.clearRetainingCapacity();
         self.clip_ops.clearRetainingCapacity();

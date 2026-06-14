@@ -1360,6 +1360,10 @@ pub const MetalBackend = struct {
     target: id = null,
     width: u32 = 0,
     height: u32 = 0,
+    /// Framebuffer clear color (theming, #170 follow-up). Defaults to white so
+    /// the offscreen golden path is unchanged; the windowed app sets it from
+    /// the theme background.
+    clear_color: [4]f32 = .{ 1, 1, 1, 1 },
     rect: MetalRectRenderer,
     exact: MetalExactRectRenderer,
     image: MetalImageRenderer,
@@ -1603,7 +1607,7 @@ pub const MetalBackend = struct {
         _ = msg(void, struct { id }, a0, sel("setTexture:"), .{self.target});
         _ = msg(void, struct { u64 }, a0, sel("setLoadAction:"), .{MTLLoadActionClear});
         _ = msg(void, struct { u64 }, a0, sel("setStoreAction:"), .{MTLStoreActionStore});
-        _ = msg(void, struct { MTLClearColor }, a0, sel("setClearColor:"), .{.{ .red = 1, .green = 1, .blue = 1, .alpha = 1 }}); // match raster white clear
+        _ = msg(void, struct { MTLClearColor }, a0, sel("setClearColor:"), .{.{ .red = self.clear_color[0], .green = self.clear_color[1], .blue = self.clear_color[2], .alpha = self.clear_color[3] }});
         const cmdbuf = msg(id, struct {}, self.ctx.queue, sel("commandBuffer"), .{});
         self.cmdbuf = cmdbuf;
         const enc = msg(id, struct { id }, cmdbuf, sel("renderCommandEncoderWithDescriptor:"), .{rpd});
