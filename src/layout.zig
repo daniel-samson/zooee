@@ -525,6 +525,39 @@ test "grow children tile the parent exactly (no rounding seams)" {
     try testing.expectEqual(@as(f32, 10), r3.x + r3.width); // exact tiling
 }
 
+test "resize re-layouts, it doesn't scale (#99 stretch detection)" {
+    var rec = record.RecordBackend.init(testing.allocator);
+    defer rec.deinit();
+
+    // A fixed-width sidebar + a growing pane in a row. On resize, reflow keeps
+    // the fixed element constant and lets the grow pane absorb the delta — a
+    // *scale* would multiply both by the width ratio. This is the regression
+    // guard against stretching the stale frame (#170/#181/#182).
+    const sidebar: Element = .{ .width = 100 };
+    const pane: Element = .{ .grow = 1 };
+    const root: Element = .{ .direction = .row, .children = &.{ &sidebar, &pane } };
+
+    var narrow = try layoutWith(&rec, &root, 300, 200);
+    defer narrow.deinit(testing.allocator);
+    var wide = try layoutWith(&rec, &root, 600, 200);
+    defer wide.deinit(testing.allocator);
+
+    const sidebar_narrow = narrow.placements[1].rect; // [0]=root
+    const sidebar_wide = wide.placements[1].rect;
+    const pane_narrow = narrow.placements[2].rect;
+    const pane_wide = wide.placements[2].rect;
+
+    // Reflow: the fixed sidebar is identical at both widths (a scale would
+    // double it to 200).
+    try testing.expectEqual(@as(f32, 100), sidebar_narrow.width);
+    try testing.expectEqual(@as(f32, 100), sidebar_wide.width);
+    // The grow pane absorbs the entire +300 width delta (200 → 500).
+    try testing.expectEqual(@as(f32, 200), pane_narrow.width);
+    try testing.expectEqual(@as(f32, 500), pane_wide.width);
+    // Height is unchanged by a horizontal resize (no vertical scaling).
+    try testing.expectEqual(pane_narrow.height, pane_wide.height);
+}
+
 test "padding and border shrink the content box" {
     var rec = record.RecordBackend.init(testing.allocator);
     defer rec.deinit();
