@@ -127,6 +127,36 @@ pub fn drawImageBilinear(b: Backend, s: f32) !void {
     b.drawImageUv(.{ .x = 1 * s, .y = 1 * s, .width = 8 * s, .height = 8 * s }, tex, .{ .x = 0, .y = 0, .width = 1, .height = 1 }, .linear);
 }
 
+/// 9-slice scaling (#122): an 8×8 texture with a 2px border ring is stretched
+/// into a wide "button" rect — corners stay 2px and sharp, edges stretch along
+/// one axis, the center fills the rest. All 9 patches use nearest sampling, so
+/// it's pixel-exact across backends. Not in `all`.
+pub fn drawNineSlice(b: Backend, s: f32) !void {
+    // Build an 8×8 RGBA texture: a 2px dark-blue border around a light fill.
+    var px: [8 * 8 * 4]u8 = undefined;
+    var i: usize = 0;
+    while (i < 8) : (i += 1) {
+        var j: usize = 0;
+        while (j < 8) : (j += 1) {
+            const border = i < 2 or i >= 6 or j < 2 or j >= 6;
+            const o = (i * 8 + j) * 4;
+            if (border) {
+                px[o + 0] = 40;
+                px[o + 1] = 60;
+                px[o + 2] = 160;
+            } else {
+                px[o + 0] = 200;
+                px[o + 1] = 220;
+                px[o + 2] = 255;
+            }
+            px[o + 3] = 255;
+        }
+    }
+    const tex = try b.createTexture(8, 8, &px);
+    defer b.destroyTexture(tex);
+    b.drawImageNine(.{ .x = 1 * s, .y = 1 * s, .width = 12 * s, .height = 5 * s }, tex, 8, 8, .{ .l = 2, .t = 2, .r = 2, .b = 2 });
+}
+
 /// Real text rendering (#10): glyphs on raster (font set by the
 /// harness), plain characters on the terminal.
 fn drawHelloText(b: Backend, s: f32) !void {
