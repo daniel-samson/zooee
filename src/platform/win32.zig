@@ -58,6 +58,16 @@ const WM_SIZE = 0x0005;
 const WM_CLOSE = 0x0010;
 const PM_REMOVE = 0x0001;
 const WS_OVERLAPPEDWINDOW = 0x00CF0000;
+// Headless title bar (#64): a sizable, framed window with NO OS caption —
+// the app owns the whole surface (Chrome-style chrome). WS_THICKFRAME keeps
+// the OS resize-border hit-testing for free; SYSMENU+MIN/MAXIMIZEBOX keep
+// taskbar minimize/restore + Win+arrow snap working without a caption.
+const WS_POPUP: u32 = 0x80000000;
+const WS_THICKFRAME: u32 = 0x00040000;
+const WS_SYSMENU: u32 = 0x00080000;
+const WS_MINIMIZEBOX: u32 = 0x00020000;
+const WS_MAXIMIZEBOX: u32 = 0x00010000;
+const WS_POPUPFRAME: u32 = WS_POPUP | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
 const CW_USEDEFAULT: i32 = @bitCast(@as(u32, 0x80000000));
 const SW_SHOWNORMAL = 1;
 const GWLP_USERDATA = -21;
@@ -117,6 +127,14 @@ const SWP_NOMOVE: u32 = 0x0002;
 extern "user32" fn SetWindowLongPtrW(HWND, i32, isize) callconv(WINAPI) isize;
 extern "user32" fn GetWindowLongPtrW(HWND, i32) callconv(WINAPI) isize;
 extern "kernel32" fn GetModuleHandleW(?[*:0]const u16) callconv(WINAPI) HINSTANCE;
+
+// Integrated title bar (#64): extend the DWM "sheet of glass" into the client
+// area so the app draws its own chrome (tabs/toolbar) in the top strip while
+// the native min/max/close buttons stay live — the Win32 analogue of macOS
+// titlebarAppearsTransparent + full-size content view. -1 margins = whole
+// window. dwmapi is Vista+; the call is a no-op-equivalent if DWM is off.
+const MARGINS = extern struct { left: i32, right: i32, top: i32, bottom: i32 };
+extern "dwmapi" fn DwmExtendFrameIntoClientArea(HWND, *const MARGINS) callconv(WINAPI) i32;
 
 // --- events ----------------------------------------------------------------
 
@@ -394,7 +412,9 @@ pub const Window = struct {
         /// Accepted for cross-platform parity; the Windows GPU path is
         /// D3D11 (#12), not GL, so this is ignored here.
         gl: bool = false,
-        /// Title-bar mode (#64); honored on macOS, ignored here for now.
+        /// Title-bar mode (#64): native OS caption, integrated (content under a
+        /// transparent caption — app draws the top strip, OS buttons stay), or
+        /// headless (no OS caption — app owns the whole surface).
         titlebar: window_mod.TitlebarMode = .native,
     };
 
@@ -435,11 +455,19 @@ pub const Window = struct {
         const title_len = try std.unicode.utf8ToUtf16Le(title_buf[0..255], opts.title);
         title_buf[title_len] = 0;
 
+        // Title-bar mode (#64): headless drops the OS caption for an app-owned
+        // surface (still resizable via WS_THICKFRAME); native/integrated keep
+        // the standard frame (integrated extends the glass under it post-create).
+        const style: u32 = switch (opts.titlebar) {
+            .native, .integrated => WS_OVERLAPPEDWINDOW,
+            .headless => WS_POPUPFRAME,
+        };
+
         const hwnd = CreateWindowExW(
             0,
             class_name,
             title_buf[0..title_len :0],
-            WS_OVERLAPPEDWINDOW,
+            style,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             @intCast(opts.width),
@@ -449,6 +477,13 @@ pub const Window = struct {
             hinstance,
             null,
         ) orelse return error.BackendFailure;
+
+        // Integrated (#64): extend the DWM frame across the whole window so the
+        // app draws its chrome in the top strip while native buttons stay live.
+        if (opts.titlebar == .integrated) {
+            const m: MARGINS = .{ .left = -1, .right = -1, .top = -1, .bottom = -1 };
+            _ = DwmExtendFrameIntoClientArea(hwnd, &m);
+        }
 
         self.* = .{ .hwnd = hwnd, .gpa = gpa, .drop_arena = std.heap.ArenaAllocator.init(gpa) };
         _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, @bitCast(@intFromPtr(self)));
