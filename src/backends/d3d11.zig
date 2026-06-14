@@ -774,7 +774,7 @@ pub const D3dRectRenderer = struct {
 // SV_Position is the pixel center, top-left origin (like raster) — no y-flip.
 
 const grad_hlsl =
-    \\cbuffer CB : register(b0) { float2 viewport; float axis; float pad; float4 rect; float4 c0; float4 c1; };
+    \\cbuffer CB : register(b0) { float2 viewport; float2 pad; float4 rectg; float4 cfg; float4 radial; float4 offs[2]; float4 colors[8]; };
     \\struct VSIn  { float2 pos : POSITION; };
     \\struct VSOut { float4 pos : SV_POSITION; };
     \\VSOut VSMain(VSIn i) {
@@ -782,14 +782,36 @@ const grad_hlsl =
     \\  o.pos = float4(i.pos.x / viewport.x * 2.0 - 1.0, 1.0 - i.pos.y / viewport.y * 2.0, 0, 1);
     \\  return o;
     \\}
+    \\float off(int k) { return offs[k/4][k%4]; } // offsets packed 4 per float4
     \\float4 PSMain(VSOut i) : SV_TARGET {
-    \\  float t = (axis < 0.5) ? (i.pos.x - rect.x) / rect.z : (i.pos.y - rect.y) / rect.w;
+    \\  float2 p = i.pos.xy; // cfg = {kind, axis, count, 0}
+    \\  float t;
+    \\  if (cfg.x < 0.5) { t = (cfg.y < 0.5) ? (p.x - rectg.x) / rectg.z : (p.y - rectg.y) / rectg.w; }
+    \\  else { float cx = rectg.x + radial.x*rectg.z; float cy = rectg.y + radial.y*rectg.w; float rr = radial.z*max(rectg.z,rectg.w); float dx=p.x-cx, dy=p.y-cy; t = (rr>0.0) ? sqrt(dx*dx+dy*dy)/rr : 0.0; }
     \\  t = saturate(t);
-    \\  return lerp(c0, c1, t);
+    \\  int n = (int)cfg.z;
+    \\  if (t <= off(0)) return colors[0];
+    \\  for (int k = 1; k < 8; k++) {
+    \\    if (k >= n) break;
+    \\    if (t <= off(k)) { float span = off(k)-off(k-1); float f = (span>0.0) ? (t-off(k-1))/span : 0.0; return lerp(colors[k-1], colors[k], f); }
+    \\  }
+    \\  float4 last = colors[0];
+    \\  for (int k2 = 0; k2 < 8; k2++) { if (k2 >= n) break; last = colors[k2]; }
+    \\  return last;
     \\}
 ;
 
-const GradCB = extern struct { vw: f32, vh: f32, axis: f32, pad: f32 = 0, rect: [4]f32, c0: [4]f32, c1: [4]f32 };
+const GradCB = extern struct {
+    vw: f32,
+    vh: f32,
+    pad0: f32 = 0,
+    pad1: f32 = 0,
+    rect: [4]f32,
+    cfg: [4]f32,
+    radial: [4]f32,
+    offs: [2][4]f32,
+    colors: [8][4]f32,
+};
 
 pub const D3dGradientRenderer = struct {
     device: *IDevice,
@@ -831,7 +853,7 @@ pub const D3dGradientRenderer = struct {
         release(self.vs);
     }
 
-    pub fn fill(self: *D3dGradientRenderer, rtv: *IRtv, vw: f32, vh: f32, rect: geometry.Rect, axis: f32, c0: [4]f32, c1: [4]f32) Error!void {
+    pub fn fill(self: *D3dGradientRenderer, rtv: *IRtv, vw: f32, vh: f32, rect: geometry.Rect, g: style.Gradient) Error!void {
         const dev = self.device;
         const ctx = self.context;
         const verts = [_]f32{ rect.x, rect.y, rect.x + rect.width, rect.y, rect.x, rect.y + rect.height, rect.x + rect.width, rect.y + rect.height };
@@ -841,7 +863,21 @@ pub const D3dGradientRenderer = struct {
         if (!ok(dev.vtbl.CreateBuffer(dev, &vb_desc, &vb_data, &vb)) or vb == null) return error.ShaderFailed;
         defer release(vb.?);
 
-        var cbv: GradCB = .{ .vw = vw, .vh = vh, .axis = axis, .rect = .{ rect.x, rect.y, rect.width, rect.height }, .c0 = c0, .c1 = c1 };
+        var buf: [style.Gradient.max_stops]style.Gradient.Stop = undefined;
+        const ss = g.resolved(&buf);
+        var cbv: GradCB = .{
+            .vw = vw,
+            .vh = vh,
+            .rect = .{ rect.x, rect.y, rect.width, rect.height },
+            .cfg = .{ @floatFromInt(@intFromEnum(g.kind)), if (g.axis == .vertical) 1 else 0, @floatFromInt(ss.len), 0 },
+            .radial = .{ g.cx, g.cy, g.radius, 0 },
+            .offs = std.mem.zeroes([2][4]f32),
+            .colors = std.mem.zeroes([8][4]f32),
+        };
+        for (ss, 0..) |s, i| {
+            cbv.offs[i / 4][i % 4] = s.offset;
+            cbv.colors[i] = col(s.color);
+        }
         var cb_data: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = &cbv };
         var cb_desc: D3D11_BUFFER_DESC = .{ .byte_width = @sizeOf(GradCB), .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_CONSTANT_BUFFER };
         var cb: ?*IBuffer = null;
@@ -2393,7 +2429,7 @@ pub const D3dBackend = struct {
             self.shadow.draw(self.target(), w, h, quad, .{ rect.x, rect.y, rect.width, rect.height }, .{ sh.dx, sh.dy, sh.blur, sh.spread }, col(sh.color)) catch {};
         }
         if (rs.gradient) |g| {
-            self.grad.fill(self.target(), w, h, rect, if (g.axis == .vertical) 1 else 0, col(g.from), col(g.to)) catch {};
+            self.grad.fill(self.target(), w, h, rect, g) catch {};
             return;
         }
         if (rs.corner_radius.isNone() and rs.border.isNone()) {
