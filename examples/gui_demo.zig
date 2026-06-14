@@ -149,7 +149,7 @@ const Demo = struct {
             .width = track_w,
             .height = dot_w,
             .margin = .{ .top = 8 * scale },
-            .rect_style = .{ .background = Color.rgb(235, 237, 242), .corner_radius = .all(dot_w * 0.5) },
+            .rect_style = .{ .background = self.theme.surface_variant, .corner_radius = .all(dot_w * 0.5) },
             .children = try arena.dupe(*const L.Element, &.{dot}),
         };
         // Rounded clip (#117): a SQUARE green fill clipped to round corners —
@@ -200,7 +200,7 @@ const Demo = struct {
             .width = 200 * scale,
             .height = 36 * scale,
             .rect_style = .{
-                .background = Color.white,
+                .background = self.theme.surface,
                 .corner_radius = .all(8 * scale),
                 .shadow = .{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 90 }, .dy = 3 * scale, .blur = 8 * scale, .corner_radius = 8 * scale },
             },
@@ -211,7 +211,7 @@ const Demo = struct {
             .width = 200 * scale,
             .height = 28 * scale,
             .rect_style = .{
-                .background = Color.rgb(225, 228, 232),
+                .background = self.theme.surface_variant,
                 .corner_radius = .all(7 * scale),
                 .shadow = .{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 110 }, .dy = 1 * scale, .blur = 5 * scale, .corner_radius = 7 * scale, .inset = true },
             },
@@ -344,7 +344,7 @@ const Demo = struct {
             .height = 70 * scale,
             .padding = .all(4 * scale),
             .margin = .{ .bottom = 12 * scale },
-            .rect_style = .{ .background = Color.rgb(245, 245, 248), .border = .all(1 * scale, Color.rgb(150, 150, 160)), .corner_radius = .all(6 * scale) },
+            .rect_style = .{ .background = self.theme.surface_variant, .border = .all(1 * scale, self.theme.border), .corner_radius = .all(6 * scale) },
             .scroll = true,
             .scroll_y = self.scroll_y * scale,
             .children = try arena.dupe(*const L.Element, &.{scroll_content}),
@@ -355,7 +355,7 @@ const Demo = struct {
             .width = 240 * scale,
             .margin = .{ .bottom = 10 * scale },
             .text = "zooee lays out wrapped, aligned paragraphs across every backend — pixel for pixel.",
-            .text_style = .{ .color = Color.rgb(60, 60, 70), .size = 15 * scale },
+            .text_style = .{ .color = self.theme.text, .size = 15 * scale },
             .text_wrap = true,
             .text_align = .center,
         };
@@ -372,10 +372,10 @@ const Demo = struct {
             .margin = .{ .bottom = 10 * scale },
             .padding = .all(6 * scale),
             .text = drop_label,
-            .text_style = .{ .color = Color.rgb(90, 90, 110), .size = 13 * scale },
+            .text_style = .{ .color = self.theme.text_muted, .size = 13 * scale },
             .rect_style = .{
-                .background = if (self.drag_over) Color.rgb(225, 240, 255) else Color.rgb(245, 246, 250),
-                .border = .all(1 * scale, if (self.drag_over) Color.rgb(0, 120, 255) else Color.rgb(170, 175, 190)),
+                .background = if (self.drag_over) self.theme.accent else self.theme.surface_variant,
+                .border = .all(1 * scale, if (self.drag_over) self.theme.accent else self.theme.border),
                 .corner_radius = .all(5 * scale),
             },
         };
@@ -389,13 +389,13 @@ const Demo = struct {
         ime_label.* = .{
             .margin = .{ .bottom = 8 * scale },
             .text = ime_text,
-            .text_style = .{ .color = Color.rgb(110, 110, 130), .size = 13 * scale },
+            .text_style = .{ .color = self.theme.text_muted, .size = 13 * scale },
         };
         // Unicode (#114): accents + em-dash exercise the dynamic glyph atlas.
         const uni = try arena.create(L.Element);
         uni.* = .{
             .text = "café — déjà vu",
-            .text_style = .{ .color = Color.rgb(40, 40, 40), .size = 16 * scale },
+            .text_style = .{ .color = self.theme.text, .size = 16 * scale },
         };
 
         const panel = try arena.create(L.Element);
@@ -411,6 +411,12 @@ const Demo = struct {
             .children = try arena.dupe(*const L.Element, &.{ grad_bar, track, swatches, card_wrap, icons, button, scroller, paragraph, drop_zone, ime_label, uni }),
         };
         return panel;
+    }
+
+    /// Backend clear color (theming): the framework reads this each frame so a
+    /// runtime theme change recolors the window backdrop too, not just content.
+    pub fn background(self: *Demo) Color {
+        return self.theme.background;
     }
 
     /// Frame-driver hook (#170): advance the animation by the real elapsed
@@ -455,7 +461,16 @@ const Demo = struct {
                 .escape => return .quit,
                 else => {},
             },
-            .text => |t| if (t.codepoint == 'q') return .quit,
+            .text => |t| switch (t.codepoint) {
+                'q' => return .quit,
+                // Toggle the whole UI light ⇄ dark at runtime (theming). The
+                // backend clear color follows via the `background` hook.
+                't' => {
+                    self.theme = if (self.theme.background.r > 128) zooee.Theme.dark else zooee.Theme.light;
+                    return .redraw;
+                },
+                else => {},
+            },
             .scroll => |s| {
                 // Wheel/trackpad scrolls the showcase list viewport (#126).
                 // Content is ~8 rows × 26px ≈ 200px tall in a 70px box.
