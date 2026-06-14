@@ -51,6 +51,8 @@ pub const bidi = @import("bidi.zig");
 pub const arabic = @import("arabic.zig");
 /// Indic reordering (#202): Devanagari pre-base matra → visual order.
 pub const indic = @import("indic.zig");
+/// Native file/folder dialogs (#129): NSOpenPanel / GetOpenFileNameW / zenity.
+pub const dialog = @import("dialog.zig");
 pub const text = @import("text.zig");
 pub const clipboard = @import("clipboard.zig");
 pub const display = @import("display.zig");
