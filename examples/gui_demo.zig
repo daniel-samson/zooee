@@ -29,6 +29,10 @@ const Msg = enum(u32) {
 const Demo = struct {
     selected: usize = 0,
     checked: [items.len]bool = .{ true, true, true, true, true },
+    /// Continuous-animation phase in radians (#170/#20): advanced by the
+    /// frame-delta in `animate`, so motion is smooth and frame-rate-independent
+    /// (same speed at 60 or 144 Hz).
+    phase: f32 = 0,
     /// Wheel-driven scroll offset for the showcase list viewport (#96/#126).
     scroll_y: f32 = 40,
     /// Pointer-inside state (#127): the panel border brightens while the
@@ -120,6 +124,28 @@ const Demo = struct {
             .width = 200 * scale,
             .height = 28 * scale,
             .rect_style = .{ .gradient = rainbow },
+        };
+        // Continuous animation (#170): a dot slides along a track, driven by
+        // `phase` (advanced by the real frame-delta in `animate`). Smooth and
+        // the same speed at any refresh rate; uncapped from the old 60fps limit.
+        const track_w: f32 = 200 * scale;
+        const dot_w: f32 = 16 * scale;
+        const t: f32 = 0.5 + 0.5 * @sin(self.phase);
+        const dot = try arena.create(L.Element);
+        dot.* = .{
+            .width = dot_w,
+            .height = dot_w,
+            .margin = .{ .left = t * (track_w - dot_w) },
+            .rect_style = .{ .background = Color.rgb(60, 130, 240), .corner_radius = .all(dot_w * 0.5) },
+        };
+        const track = try arena.create(L.Element);
+        track.* = .{
+            .direction = .row,
+            .width = track_w,
+            .height = dot_w,
+            .margin = .{ .top = 8 * scale },
+            .rect_style = .{ .background = Color.rgb(235, 237, 242), .corner_radius = .all(dot_w * 0.5) },
+            .children = try arena.dupe(*const L.Element, &.{dot}),
         };
         // Rounded clip (#117): a SQUARE green fill clipped to round corners —
         // the corners are cut by the clip, not by a rounded-rect draw.
@@ -377,9 +403,19 @@ const Demo = struct {
                 .border = .all(2 * scale, if (self.pointer_inside) Color.rgb(0, 120, 255) else Color.rgb(120, 120, 130)),
                 .corner_radius = .all(10 * scale),
             },
-            .children = try arena.dupe(*const L.Element, &.{ grad_bar, swatches, card_wrap, icons, button, scroller, paragraph, drop_zone, ime_label, uni }),
+            .children = try arena.dupe(*const L.Element, &.{ grad_bar, track, swatches, card_wrap, icons, button, scroller, paragraph, drop_zone, ime_label, uni }),
         };
         return panel;
+    }
+
+    /// Frame-driver hook (#170): advance the animation by the real elapsed
+    /// time, so the motion runs at the same speed regardless of refresh rate.
+    pub fn animate(self: *Demo, dt_ns: u64) zooee.app.Command {
+        const dt_s: f32 = @as(f32, @floatFromInt(dt_ns)) / 1_000_000_000.0;
+        self.phase += dt_s * 2.0; // ~1 cycle / π seconds
+        const tau = 6.2831855;
+        if (self.phase > tau) self.phase -= tau;
+        return .redraw; // continuous animation → present every frame
     }
 
     pub fn update(self: *Demo, msg: Msg) zooee.app.Command {
