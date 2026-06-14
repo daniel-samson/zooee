@@ -41,6 +41,8 @@ pub const cursor = @import("cursor.zig");
 pub const Cursor = cursor.Cursor;
 /// Terminal cell-width of Unicode text (#18): wide CJK = 2, combining = 0.
 pub const unicode_width = @import("unicode_width.zig");
+/// Developer tools (#26): tree/layout dumps + a widget-bounds overlay.
+pub const devtools = @import("devtools.zig");
 pub const text = @import("text.zig");
 pub const clipboard = @import("clipboard.zig");
 pub const display = @import("display.zig");
