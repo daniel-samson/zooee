@@ -47,6 +47,8 @@ pub const devtools = @import("devtools.zig");
 pub const window = @import("window.zig");
 /// Unicode bidirectional algorithm (#203, UAX #9): mixed LTR/RTL reorder.
 pub const bidi = @import("bidi.zig");
+/// Arabic contextual joining (#202): presentation-form selection.
+pub const arabic = @import("arabic.zig");
 pub const text = @import("text.zig");
 pub const clipboard = @import("clipboard.zig");
 pub const display = @import("display.zig");
