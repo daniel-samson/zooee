@@ -148,7 +148,8 @@ const Demo = struct {
             .margin = .{ .top = 12 * scale, .bottom = 12 * scale },
             .children = try arena.dupe(*const L.Element, &.{ clip_box, op_group, orb }),
         };
-        // Box shadow (#119): an elevated card floating on a soft blurred shadow.
+        // Box shadow (#119): an elevated card on a soft, ROUNDED-corner shadow
+        // that matches the card's rounding (Wallace rounded-box-shadow).
         const card = try arena.create(L.Element);
         card.* = .{
             .width = 200 * scale,
@@ -156,7 +157,7 @@ const Demo = struct {
             .rect_style = .{
                 .background = Color.white,
                 .corner_radius = .all(8 * scale),
-                .shadow = .{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 90 }, .dy = 3 * scale, .blur = 8 * scale },
+                .shadow = .{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 90 }, .dy = 3 * scale, .blur = 8 * scale, .corner_radius = 8 * scale },
             },
         };
         const card_wrap = try arena.create(L.Element);

@@ -210,6 +210,16 @@ pub fn drawBoxShadow(b: Backend, s: f32) !void {
     });
 }
 
+/// Rounded box shadow (#119): a rounded card on a blurred, rounded-corner
+/// shadow (Wallace integral). Not in `all`.
+pub fn drawRoundedShadow(b: Backend, s: f32) !void {
+    b.drawRect(.{ .x = 3 * s, .y = 2.5 * s, .width = 6 * s, .height = 6 * s }, .{
+        .background = Color.white,
+        .corner_radius = .all(1.6 * s),
+        .shadow = .{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 150 }, .dy = 1 * s, .blur = 2.2 * s, .corner_radius = 1.6 * s },
+    });
+}
+
 /// Layout-integrated effects (#117/#121/#118): a column of three leaves built
 /// through the layout engine — a gradient header, a rounded-clipped fill, and
 /// a half-opacity group — exercising Element.gradient/clip_radius/opacity and
