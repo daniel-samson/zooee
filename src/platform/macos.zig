@@ -550,6 +550,16 @@ pub fn contentPixelSize(window: *Window) struct { width: usize, height: usize, s
     };
 }
 
+/// The refresh rate (Hz) of the display the window is on (#170), for frame
+/// pacing. Uses NSScreen.maximumFramesPerSecond (macOS 12+); 0 → caller's
+/// fallback (60). A ProMotion / 120Hz panel reports 120 here.
+pub fn refreshHz(window: *Window) f32 {
+    const screen = msg(id, struct {}, window.ns_window, sel("screen"), .{});
+    if (screen == null) return 0;
+    const fps = msg(i64, struct {}, screen, sel("maximumFramesPerSecond"), .{});
+    return if (fps > 0) @floatFromInt(fps) else 0;
+}
+
 test "objc runtime reachable: NSString round-trip" {
     const s = nsString("zooee");
     try std.testing.expect(s != null);

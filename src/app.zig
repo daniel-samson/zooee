@@ -22,8 +22,52 @@ const terminal_mod = @import("backends/terminal.zig");
 const raster_mod = @import("backends/raster.zig");
 const system_font = @import("font/system.zig");
 const geometry = @import("geometry.zig");
+const display = @import("display.zig");
 
 pub const Command = enum { none, redraw, quit };
+
+/// Per-frame timing for a present loop (#170): measures real inter-frame delta
+/// and paces the sleep to the display's refresh interval instead of a hard-
+/// coded 16ms — so a 120/144Hz monitor renders proportionally more frames, and
+/// heavy frames don't add a fixed 16ms on top of their own cost.
+const FrameLoop = struct {
+    pacer: display.FramePacer,
+    /// Monotonic ns at the start of the previous frame.
+    last: i96 = 0,
+    started: bool = false,
+
+    fn init(hz: f32) FrameLoop {
+        return .{ .pacer = display.FramePacer.forHz(hz) };
+    }
+
+    fn nowNs(io: std.Io) i96 {
+        return std.Io.Timestamp.now(io, .awake).nanoseconds;
+    }
+
+    /// Nanoseconds since the previous `delta` call (0 on the first frame), and
+    /// records this frame's start. Feed this to `animate`.
+    fn delta(self: *FrameLoop, io: std.Io) u64 {
+        const now = nowNs(io);
+        const dt: u64 = if (!self.started) 0 else @intCast(@max(0, now - self.last));
+        self.last = now;
+        self.started = true;
+        return dt;
+    }
+
+    /// Sleep what's left of the refresh interval after this frame's work.
+    fn pace(self: *FrameLoop, io: std.Io) !void {
+        const work: u64 = @intCast(@max(0, nowNs(io) - self.last));
+        const nap = self.pacer.sleepAfter(work);
+        if (nap > 0) try io.sleep(.fromNanoseconds(@intCast(nap)), .awake);
+    }
+};
+
+/// Call the Model's optional `animate(dt_ns) Command` hook (#170) so timers and
+/// tweens advance with real elapsed time. Models without one are unaffected.
+fn animate(comptime Model: type, model: *Model, dt: u64) Command {
+    if (@hasDecl(Model, "animate")) return model.animate(dt);
+    return .none;
+}
 
 /// Native window platform for the GUI runner. X11 is the #9 follow-up;
 /// unsupported OSes get an empty struct (runWindow @compileErrors before
@@ -124,7 +168,11 @@ pub fn run(
     var frame_arena = std.heap.ArenaAllocator.init(gpa);
     defer frame_arena.deinit();
 
+    // Terminals have no vsync; pace at 60Hz so animations advance at a steady
+    // cadence without busy-spinning (#170).
+    var fl = FrameLoop.init(60);
     loop: while (true) {
+        const dt = fl.delta(io);
         if (dirty) {
             _ = frame_arena.reset(.retain_capacity);
             const arena = frame_arena.allocator();
@@ -148,8 +196,9 @@ pub fn run(
                 .quit => break :loop,
             }
         }
+        if (animate(Model, model, dt) == .redraw) dirty = true;
 
-        if (!dirty) try io.sleep(.fromMilliseconds(16), .awake);
+        try fl.pace(io);
     }
 }
 
@@ -257,7 +306,9 @@ pub fn runWindow(
         }
     }.call);
 
+    var fl = FrameLoop.init(platform.refreshHz(window));
     loop: while (true) {
+        const dt = fl.delta(io);
         for (window.pumpEvents()) |ev| {
             switch (dispatch(Model, Msg, model, ev, placements)) {
                 .none => {},
@@ -265,13 +316,14 @@ pub fn runWindow(
                 .quit => break :loop,
             }
         }
+        if (animate(Model, model, dt) == .redraw) dirty = true;
 
         if (dirty) {
             frame.draw();
             dirty = false;
         }
 
-        try io.sleep(.fromMilliseconds(16), .awake);
+        try fl.pace(io);
     }
 }
 
@@ -342,7 +394,9 @@ fn runWindowGl(
         }
     }.call);
 
+    var fl = FrameLoop.init(platform.refreshHz(window));
     loop: while (true) {
+        const dt = fl.delta(io);
         for (window.pumpEvents()) |ev| {
             switch (dispatch(Model, Msg, model, ev, placements)) {
                 .none => {},
@@ -350,6 +404,7 @@ fn runWindowGl(
                 .quit => break :loop,
             }
         }
+        if (animate(Model, model, dt) == .redraw) dirty = true;
 
         if (dirty) {
             // Headless capture hook: render once, read the GL back buffer,
@@ -379,7 +434,7 @@ fn runWindowGl(
             dirty = false;
         }
 
-        try io.sleep(.fromMilliseconds(16), .awake);
+        try fl.pace(io);
     }
 }
 
@@ -450,7 +505,9 @@ fn runWindowMetal(
         }
     }.call);
 
+    var fl = FrameLoop.init(platform.refreshHz(window));
     loop: while (true) {
+        const dt = fl.delta(io);
         for (window.pumpEvents()) |ev| {
             switch (dispatch(Model, Msg, model, ev, placements)) {
                 .none => {},
@@ -458,6 +515,7 @@ fn runWindowMetal(
                 .quit => break :loop,
             }
         }
+        if (animate(Model, model, dt) == .redraw) dirty = true;
 
         if (dirty) {
             // Headless capture hook: render one frame to the RT, read it, exit.
@@ -482,7 +540,7 @@ fn runWindowMetal(
             dirty = false;
         }
 
-        try io.sleep(.fromMilliseconds(16), .awake);
+        try fl.pace(io);
     }
 }
 
@@ -552,7 +610,9 @@ fn runWindowD3d(
         }
     }.call);
 
+    var fl = FrameLoop.init(platform.refreshHz(window));
     loop: while (true) {
+        const dt = fl.delta(io);
         for (window.pumpEvents()) |ev| {
             switch (dispatch(Model, Msg, model, ev, placements)) {
                 .none => {},
@@ -560,6 +620,7 @@ fn runWindowD3d(
                 .quit => break :loop,
             }
         }
+        if (animate(Model, model, dt) == .redraw) dirty = true;
 
         if (dirty) {
             // Headless capture hook: render one frame to the offscreen RT,
@@ -585,7 +646,7 @@ fn runWindowD3d(
             dirty = false;
         }
 
-        try io.sleep(.fromMilliseconds(16), .awake);
+        try fl.pace(io);
     }
 }
 

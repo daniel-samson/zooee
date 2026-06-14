@@ -385,6 +385,15 @@ pub fn contentPixelSize(window: *Window) struct { width: usize, height: usize, s
     };
 }
 
+/// Display refresh rate (Hz) for frame pacing (#170). Returning 0 makes the
+/// caller fall back to 60. The real query — EnumDisplaySettings(ENUM_CURRENT_
+/// SETTINGS).dmDisplayFrequency or DwmGetCompositionTimingInfo — NEEDS ON-DEVICE
+/// QA on the Win11 VM, so this is a safe 60 stub for now.
+pub fn refreshHz(window: *Window) f32 {
+    _ = window;
+    return 0;
+}
+
 test "create, pump, and destroy a real window" {
     const w = try Window.create(std.testing.allocator, .{
         .title = "zooee smoke test",
