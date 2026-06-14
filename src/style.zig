@@ -96,7 +96,9 @@ pub const Gradient = struct {
     to: Color = .white,
 
     /// Resolve to an explicit stop list (≥2): the `stops`, or {0:from, 1:to}.
-    pub fn resolved(self: Gradient, out: *[max_stops]Stop) []const Stop {
+    /// Takes `self` by pointer so the returned slice (for the multi-stop case)
+    /// references the caller's gradient, not a by-value copy's dead stack.
+    pub fn resolved(self: *const Gradient, out: *[max_stops]Stop) []const Stop {
         if (self.stop_count >= 2) {
             const n = @min(self.stop_count, max_stops);
             return self.stops[0..n];
