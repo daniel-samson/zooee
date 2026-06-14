@@ -29,8 +29,18 @@ const Msg = enum(u32) {
 };
 
 const Demo = struct {
+    /// Theme tokens drive the TUI too (theming): `background` becomes the
+    /// terminal's default cell color, so the whole TUI gets the backdrop — not
+    /// just where rects draw. Dark reads well in a terminal; press `t` to flip.
+    theme: zooee.Theme = zooee.Theme.dark,
     selected: usize = 0,
     checked: [items.len]bool = .{ true, true, true, true, false },
+
+    /// The TUI backdrop = theme background (theming): the framework fills every
+    /// empty cell with it, so the theme applies to the terminal, not just GPU.
+    pub fn background(self: *Demo) Color {
+        return self.theme.background;
+    }
 
     pub fn view(self: *Demo, arena: std.mem.Allocator, scale: f32) !*const L.Element {
         _ = scale;
@@ -42,9 +52,9 @@ const Demo = struct {
             rows[i] = .{
                 .text = try std.fmt.allocPrint(arena, "{s}{s}{s}", .{ cursor, mark, item }),
                 .text_style = if (self.selected == i)
-                    .{ .color = .{ .r = 0, .g = 120, .b = 255 }, .bold = true }
+                    .{ .color = self.theme.accent, .bold = true }
                 else
-                    .{},
+                    .{ .color = self.theme.text },
                 .on_click = Msg.click(i),
                 .on_hover = Msg.hover(i),
             };
@@ -52,12 +62,12 @@ const Demo = struct {
         }
 
         const title = try arena.create(L.Element);
-        title.* = .{ .text = "zooee demo — ↑/↓/hover move · space/click toggle · q quit", .text_style = .{ .bold = true } };
+        title.* = .{ .text = "zooee demo — ↑/↓/hover move · space/click toggle · t theme · q quit", .text_style = .{ .color = self.theme.text, .bold = true } };
         const list = try arena.create(L.Element);
         list.* = .{
             .direction = .column,
             .padding = .symmetric(2, 1),
-            .rect_style = .{ .border = .all(1, Color.rgb(128, 128, 128)), .corner_radius = .all(1) },
+            .rect_style = .{ .border = .all(1, self.theme.border), .corner_radius = .all(1) },
             .children = row_ptrs,
         };
         const root = try arena.create(L.Element);
@@ -106,6 +116,10 @@ const Demo = struct {
             },
             .text => |t| switch (t.codepoint) {
                 'q' => return .quit,
+                't' => {
+                    self.theme = if (self.theme.background.r > 128) zooee.Theme.dark else zooee.Theme.light;
+                    return .redraw;
+                },
                 ' ' => {
                     self.checked[self.selected] = !self.checked[self.selected];
                     return .redraw;
