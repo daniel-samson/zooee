@@ -116,6 +116,7 @@ pub const SystemClipboard = struct {
 
 const core_event = @import("../event.zig");
 const cursor_mod = @import("../cursor.zig");
+const window_mod = @import("../window.zig");
 /// Native windows emit the same core events as the terminal session, so
 /// one app loop drives every surface (#5).
 pub const Event = core_event.Event;
@@ -354,6 +355,7 @@ const NSWindowStyleMask = struct {
     const closable: u64 = 1 << 1;
     const miniaturizable: u64 = 1 << 2;
     const resizable: u64 = 1 << 3;
+    const full_size_content_view: u64 = 1 << 15; // #64
 };
 
 pub const Window = struct {
@@ -385,6 +387,8 @@ pub const Window = struct {
         /// Try to create an NSOpenGLContext on the window (GPU-present).
         /// Falls back to raster + CoreGraphics if context creation fails.
         gl: bool = false,
+        /// Title-bar presentation (#64).
+        titlebar: window_mod.TitlebarMode = .native,
     };
 
     /// Register the redraw callback and mark this as the window whose
@@ -406,13 +410,23 @@ pub const Window = struct {
         _ = msg(void, struct {}, app, sel("finishLaunching"), .{});
 
         const window_alloc = msg(id, struct {}, cls("NSWindow"), sel("alloc"), .{});
-        const style = NSWindowStyleMask.titled | NSWindowStyleMask.closable |
+        var style = NSWindowStyleMask.titled | NSWindowStyleMask.closable |
             NSWindowStyleMask.miniaturizable | NSWindowStyleMask.resizable;
+        // Integrated/headless title bars (#64): let the content view extend under
+        // the title bar. The bar stays present-but-transparent so the traffic
+        // lights + system window-drag keep working while the app draws the strip.
+        if (opts.titlebar != .native) style |= NSWindowStyleMask.full_size_content_view;
         const frame: NSRect = .{ .x = 200, .y = 200, .w = @floatFromInt(opts.width), .h = @floatFromInt(opts.height) };
         const window = msg(id, struct { NSRect, u64, u64, bool }, window_alloc, sel("initWithContentRect:styleMask:backing:defer:"), .{ frame, style, 2, false });
         if (window == null) return error.BackendFailure;
 
         _ = msg(void, struct { id }, window, sel("setTitle:"), .{nsString(opts.title)});
+        if (opts.titlebar != .native) {
+            // Transparent bar + hidden title → the app's content shows through
+            // the title-bar strip (#64). NSWindowTitleHidden = 1.
+            _ = msg(void, struct { bool }, window, sel("setTitlebarAppearsTransparent:"), .{true});
+            _ = msg(void, struct { i64 }, window, sel("setTitleVisibility:"), .{1});
+        }
         _ = msg(void, struct { bool }, window, sel("setReleasedWhenClosed:"), .{false});
         _ = msg(void, struct { bool }, window, sel("setAcceptsMouseMovedEvents:"), .{true});
         // Don't let AppKit cache-and-stretch the old frame during a live

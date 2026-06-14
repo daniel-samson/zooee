@@ -122,6 +122,7 @@ extern "kernel32" fn GetModuleHandleW(?[*:0]const u16) callconv(WINAPI) HINSTANC
 
 const core_event = @import("../event.zig");
 const cursor_mod = @import("../cursor.zig");
+const window_mod = @import("../window.zig");
 const clipboard_mod = @import("../clipboard.zig");
 
 // System clipboard (#19/#209) via the Win32 clipboard API + CF_UNICODETEXT.
@@ -393,6 +394,8 @@ pub const Window = struct {
         /// Accepted for cross-platform parity; the Windows GPU path is
         /// D3D11 (#12), not GL, so this is ignored here.
         gl: bool = false,
+        /// Title-bar mode (#64); honored on macOS, ignored here for now.
+        titlebar: window_mod.TitlebarMode = .native,
     };
 
     pub fn create(gpa: std.mem.Allocator, opts: CreateOptions) !*Window {

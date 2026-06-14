@@ -12,6 +12,7 @@ const builtin = @import("builtin");
 const core_event = @import("../event.zig");
 const geometry = @import("../geometry.zig");
 const cursor_mod = @import("../cursor.zig");
+const window_mod = @import("../window.zig");
 const clipboard_mod = @import("../clipboard.zig");
 
 comptime {
@@ -535,6 +536,8 @@ pub const Window = struct {
         /// Try to create a GLX-capable window + current context. Falls back
         /// to a raster window if GLX is unavailable (old driver, no GLX).
         gl: bool = false,
+        /// Title-bar mode (#64); honored on macOS, ignored here for now.
+        titlebar: window_mod.TitlebarMode = .native,
     };
 
     pub fn create(gpa: std.mem.Allocator, opts: CreateOptions) !*Window {
