@@ -41,6 +41,8 @@ pub const Cell = struct {
     fg: ?Color = null,
     bg: ?Color = null,
     bold: bool = false,
+    underline: bool = false,
+    strikethrough: bool = false,
 
     pub const blank: Cell = .{};
 };
@@ -236,6 +238,8 @@ pub const TerminalBackend = struct {
             cell.cp = cp;
             cell.fg = text_style.color; // null = terminal default fg
             cell.bold = text_style.bold;
+            cell.underline = text_style.underline;
+            cell.strikethrough = text_style.strikethrough;
         }
     }
 
@@ -324,18 +328,23 @@ pub const TerminalBackend = struct {
         var y: usize = 0;
         while (y < self.height) : (y += 1) {
             if (y != 0) try writer.writeAll("\r\n");
-            var last_fg: ?Color = null;
-            var last_bg: ?Color = null;
+            var last: Cell = .{};
             var first = true;
             for (self.cells[y * self.width ..][0..self.width]) |cell| {
-                const fg_changed = !colorEq(cell.fg, last_fg);
-                const bg_changed = !colorEq(cell.bg, last_bg);
-                if (first or fg_changed or bg_changed) {
+                const changed = first or
+                    !colorEq(cell.fg, last.fg) or !colorEq(cell.bg, last.bg) or
+                    cell.bold != last.bold or cell.underline != last.underline or
+                    cell.strikethrough != last.strikethrough;
+                if (changed) {
+                    // Reset, then re-emit the active attributes (#191): bold (1),
+                    // underline (4), strikethrough (9), then truecolor fg/bg.
                     try writer.writeAll("\x1b[0m");
+                    if (cell.bold) try writer.writeAll("\x1b[1m");
+                    if (cell.underline) try writer.writeAll("\x1b[4m");
+                    if (cell.strikethrough) try writer.writeAll("\x1b[9m");
                     if (cell.fg) |c| try writer.print("\x1b[38;2;{d};{d};{d}m", .{ c.r, c.g, c.b });
                     if (cell.bg) |c| try writer.print("\x1b[48;2;{d};{d};{d}m", .{ c.r, c.g, c.b });
-                    last_fg = cell.fg;
-                    last_bg = cell.bg;
+                    last = cell;
                     first = false;
                 }
                 var buf: [4]u8 = undefined;

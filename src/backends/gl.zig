@@ -2177,6 +2177,26 @@ pub const GlBackend = struct {
         enableBlend();
         const color = ts.color orelse style.Color.black;
         gr.drawText(self.gpa, origin.x + self.translate.x, origin.y + self.translate.y, text, col(color), .{ .bold = ts.bold, .italic = ts.italic }) catch {};
+        // Text decorations (#191): a filled line, same geometry as raster.
+        if (ts.underline or ts.strikethrough) {
+            const rw = self.fonts.?.measure(text, ts.size, .{ .bold = ts.bold, .italic = ts.italic }).width;
+            const bx = origin.x + self.translate.x;
+            const baseline = origin.y + self.translate.y + gr.atlas.ascent;
+            const c = col(color);
+            const rr = &self.rect;
+            rr.gl.useProgram(rr.program);
+            rr.vw = @floatFromInt(self.width);
+            rr.vh = @floatFromInt(self.height);
+            rr.gl.uniform2f(rr.u_viewport, rr.vw, rr.vh);
+            if (ts.underline) {
+                const r = style.TextDecoration.underlineRect(bx, baseline, rw, ts.size);
+                rr.fillRect(r.x, r.y, r.width, r.height, c);
+            }
+            if (ts.strikethrough) {
+                const r = style.TextDecoration.strikeRect(bx, baseline, rw, ts.size);
+                rr.fillRect(r.x, r.y, r.width, r.height, c);
+            }
+        }
     }
 
     fn drawImage(ptr: *anyopaque, rect: geometry.Rect, texture: *Backend.Texture) void {
