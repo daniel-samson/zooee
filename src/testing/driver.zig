@@ -242,6 +242,7 @@ pub fn Driver(comptime Model: type, comptime Msg: type) type {
 const testing = std.testing;
 const L = layout_mod;
 const Color = @import("../style.zig").Color;
+const display_mod = @import("../display.zig");
 
 /// A minimal interactive model: a button that toggles a fill color on click and
 /// counts key presses — enough to exercise pointer hit-testing, message
@@ -453,6 +454,22 @@ test "IME composition: preedit then commit (#19)" {
     _ = try d.commit("你"); // commit the Han character (3 UTF-8 bytes)
     try testing.expect(!model.composing);
     try testing.expectEqual(@as(usize, 3), model.committed_len);
+}
+
+test "resize storm coalesces to one relayout at the final size (#27)" {
+    var model: Toggle = .{};
+    var d = try Driver(Toggle, Toggle.Msg).init(testing.allocator, &model, .{ .width = 100, .height = 60 });
+    defer d.deinit();
+    // The run-loop pattern: feed every OS resize to a coalescer, then apply
+    // at most one relayout per frame at the final size.
+    var c = display_mod.Coalescer.init(.{ .size = .{ .width = 100, .height = 60 }, .scale = 1 });
+    var w: f32 = 101;
+    while (w <= 160) : (w += 1) c.postSize(w, 90);
+    const m = c.take().?; // one coalesced update for the whole burst
+    try testing.expectEqual(@as(?display_mod.Metrics, null), c.take()); // no second relayout
+    _ = try d.resize(m.size.width, m.size.height);
+    const px = try d.render();
+    try testing.expectEqual(@as(usize, 160 * 90 * 4), px.len); // laid out at the final size
 }
 
 test "window-state events normalize into the model (#98)" {
