@@ -160,8 +160,19 @@ const Demo = struct {
                 .shadow = .{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 90 }, .dy = 3 * scale, .blur = 8 * scale, .corner_radius = 8 * scale },
             },
         };
+        // Inset shadow (#119): a pressed "well" — shadow hugs the inner edges.
+        const well = try arena.create(L.Element);
+        well.* = .{
+            .width = 200 * scale,
+            .height = 28 * scale,
+            .rect_style = .{
+                .background = Color.rgb(225, 228, 232),
+                .corner_radius = .all(7 * scale),
+                .shadow = .{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 110 }, .dy = 1 * scale, .blur = 5 * scale, .corner_radius = 7 * scale, .inset = true },
+            },
+        };
         const card_wrap = try arena.create(L.Element);
-        card_wrap.* = .{ .margin = .{ .bottom = 12 * scale }, .children = try arena.dupe(*const L.Element, &.{card}) };
+        card_wrap.* = .{ .direction = .column, .gap = 10 * scale, .margin = .{ .bottom = 12 * scale }, .children = try arena.dupe(*const L.Element, &.{ card, well }) };
         // Filled path (#120): a gold star icon (concave, even-odd fill).
         const star_pts = try arena.alloc(zooee.Point, 10);
         {
