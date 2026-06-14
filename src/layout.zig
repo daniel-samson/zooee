@@ -74,9 +74,10 @@ pub const Element = struct {
     children: []const *const Element = &.{},
     text: ?[]const u8 = null,
     text_style: style.TextStyle = .{},
-    /// Wrap text to the content-box width (#115). Off = single line (only
-    /// explicit newlines split). Honors `text_align`.
-    text_wrap: bool = false,
+    /// CSS `text-wrap` mode (#192): how text wraps to the content-box width.
+    /// `.nowrap` (default) = single line (only explicit newlines split);
+    /// `.wrap`/`.balance`/`.pretty` wrap to the width. Honors `text_align`.
+    text_wrap: text_mod.TextWrap = .nowrap,
     text_align: text_mod.Align = .left,
 
     // Filled path (#120): a closed polygon in the element's LOCAL coords
@@ -203,7 +204,7 @@ fn renderNode(b: Backend, placements: []const Placement, i: *usize) void {
     }
     if (el.text) |t| {
         const inner = contentBox(el, p.rect);
-        if (el.text_wrap or hasNewline(t)) {
+        if (el.text_wrap != .nowrap or hasNewline(t)) {
             drawWrappedText(b, el, t, inner);
         } else {
             b.drawText(inner.origin(), t, el.text_style);
@@ -254,6 +255,7 @@ fn measureWrapped(b: Backend, el: *const Element, t: []const u8, wrap_w: ?f32) S
         .max_width = wrap_w,
         .@"align" = el.text_align,
         .line_height = line_h,
+        .wrap = el.text_wrap,
     }) catch return b.measureText(t, el.text_style);
     defer lay.deinit(fba.allocator());
     return .{ .width = lay.width, .height = lay.height };
@@ -269,9 +271,10 @@ fn drawWrappedText(b: Backend, el: *const Element, t: []const u8, inner: Rect) v
     const m: text_mod.Measurer = .{ .ctx = &ctx, .measure_fn = MeasureCtx.measure };
     const line_h = b.measureText("Ag", el.text_style).height;
     var lay = text_mod.layout(fba.allocator(), t, m, .{
-        .max_width = if (el.text_wrap) inner.width else null,
+        .max_width = if (el.text_wrap != .nowrap) inner.width else null,
         .@"align" = el.text_align,
         .line_height = line_h,
+        .wrap = el.text_wrap,
     }) catch {
         b.drawText(inner.origin(), t, el.text_style);
         return;
@@ -301,10 +304,10 @@ fn measure(b: Backend, el: *const Element) Size {
 
     var content: Size = .{};
     if (el.text) |t| {
-        if ((el.text_wrap and el.width != null) or hasNewline(t)) {
+        if ((el.text_wrap != .nowrap and el.width != null) or hasNewline(t)) {
             // Wrapped/multiline text reserves the full block height so siblings
             // flow below it (#115).
-            const wrap_w: ?f32 = if (el.text_wrap and el.width != null) el.width.? - chrome_w else null;
+            const wrap_w: ?f32 = if (el.text_wrap != .nowrap and el.width != null) el.width.? - chrome_w else null;
             content = measureWrapped(b, el, t, wrap_w);
         } else {
             content = b.measureText(t, el.text_style);

@@ -19,6 +19,24 @@ const Rect = geometry.Rect;
 
 pub const Align = enum { left, center, right };
 
+/// Line-wrapping mode, mirroring the CSS `text-wrap` property (#192).
+pub const TextWrap = enum {
+    /// Normal greedy wrapping to the width.
+    wrap,
+    /// No soft wrapping; only explicit newlines break lines (content may
+    /// overflow the width).
+    nowrap,
+    /// Even out line widths — pack into the tightest width that keeps the same
+    /// line count, so lines are balanced (good for headings / short blocks).
+    balance,
+    /// Like `wrap`, but avoid a lone short last line (an orphan): re-balance
+    /// when the last line is much shorter than the rest.
+    pretty,
+    /// Edit-stable wrapping. Our wrapping is already deterministic, so this
+    /// behaves like `wrap` (kept for CSS parity / intent).
+    stable,
+};
+
 /// A width-measuring callback over a UTF-8 slice. `ctx` is the backend (or a
 /// test fake); `measure_fn` returns the advance width of `text` at the caller's
 /// font/size. Prefix widths must be additive enough for caret math — i.e.
@@ -39,6 +57,9 @@ pub const Options = struct {
     @"align": Align = .left,
     /// Baseline-to-baseline distance. Also the height contributed per line.
     line_height: f32 = 16,
+    /// CSS `text-wrap` mode (#192). `nowrap` ignores `max_width` for soft
+    /// breaks; `balance`/`pretty` adjust the effective width.
+    wrap: TextWrap = .wrap,
 };
 
 /// One laid-out line: a byte range into the source string plus its placement.
@@ -70,8 +91,21 @@ pub const Layout = struct {
 };
 
 /// Lay out `text` into positioned lines. The source string is borrowed; lines
-/// reference byte ranges into it, so it must outlive the `Layout`.
+/// reference byte ranges into it, so it must outlive the `Layout`. The
+/// `text-wrap` mode (#192) picks the effective wrap width.
 pub fn layout(gpa: std.mem.Allocator, text: []const u8, m: Measurer, opts: Options) !Layout {
+    const eff_width: ?f32 = switch (opts.wrap) {
+        .nowrap => null, // no soft wrapping (newlines still split)
+        .wrap, .stable => opts.max_width,
+        .balance => balancedWidth(gpa, text, m, opts),
+        .pretty => prettyWidth(gpa, text, m, opts),
+    };
+    return layoutAt(gpa, text, m, opts, eff_width);
+}
+
+/// The core layout, wrapping each paragraph at `wrap_width` (null = no soft
+/// wrap). `layout` computes `wrap_width` from the `text-wrap` mode.
+fn layoutAt(gpa: std.mem.Allocator, text: []const u8, m: Measurer, opts: Options, wrap_width: ?f32) !Layout {
     var lines: std.ArrayListUnmanaged(Line) = .empty;
     errdefer lines.deinit(gpa);
 
@@ -81,13 +115,15 @@ pub fn layout(gpa: std.mem.Allocator, text: []const u8, m: Measurer, opts: Optio
     while (i <= text.len) : (i += 1) {
         const at_end = i == text.len;
         if (at_end or text[i] == '\n') {
-            try wrapParagraph(gpa, text, para_start, i, m, opts, &lines);
+            try wrapParagraph(gpa, text, para_start, i, m, wrap_width, &lines);
             para_start = i + 1;
             if (at_end) break;
         }
     }
 
-    // Assign y and alignment x now that the full set of lines is known.
+    // Assign y and alignment x now that the full set of lines is known. Align to
+    // the requested box width (max_width), not the (possibly narrower) wrap
+    // width, so balanced text still centers/right-aligns in its box.
     var max_w: f32 = 0;
     for (lines.items) |ln| max_w = @max(max_w, ln.width);
     const align_w = opts.max_width orelse max_w;
@@ -109,6 +145,50 @@ pub fn layout(gpa: std.mem.Allocator, text: []const u8, m: Measurer, opts: Optio
     };
 }
 
+/// Number of lines a wrap at `width` produces (for balance/pretty search).
+fn lineCountAt(gpa: std.mem.Allocator, text: []const u8, m: Measurer, opts: Options, width: ?f32) usize {
+    var l = layoutAt(gpa, text, m, opts, width) catch return 0;
+    defer l.deinit(gpa);
+    return l.lines.len;
+}
+
+/// `balance`: the smallest width that still yields the same line count as the
+/// full width — packs lines tightly so they're as even as possible.
+fn balancedWidth(gpa: std.mem.Allocator, text: []const u8, m: Measurer, opts: Options) ?f32 {
+    const mw = opts.max_width orelse return null;
+    const n = lineCountAt(gpa, text, m, opts, mw);
+    if (n <= 1) return mw;
+    // Line count is monotonic non-decreasing as width shrinks; binary-search the
+    // narrowest width that keeps exactly n lines.
+    var lo: f32 = 1;
+    var hi: f32 = mw;
+    var best: f32 = mw;
+    var iter: u8 = 0;
+    while (iter < 24) : (iter += 1) {
+        const mid = (lo + hi) * 0.5;
+        if (lineCountAt(gpa, text, m, opts, mid) <= n) {
+            best = mid;
+            hi = mid;
+        } else lo = mid;
+    }
+    return best;
+}
+
+/// `pretty`: full width, unless the last line is an orphan (much shorter than
+/// the rest) — then balance to pull a word down.
+fn prettyWidth(gpa: std.mem.Allocator, text: []const u8, m: Measurer, opts: Options) ?f32 {
+    const mw = opts.max_width orelse return null;
+    var l = layoutAt(gpa, text, m, opts, mw) catch return mw;
+    defer l.deinit(gpa);
+    if (l.lines.len < 2) return mw;
+    var sum: f32 = 0;
+    for (l.lines[0 .. l.lines.len - 1]) |ln| sum += ln.width;
+    const avg = sum / @as(f32, @floatFromInt(l.lines.len - 1));
+    const last = l.lines[l.lines.len - 1].width;
+    if (last >= avg * 0.4) return mw; // not an orphan
+    return balancedWidth(gpa, text, m, opts);
+}
+
 /// Greedy word-wrap one paragraph (text[start..end], no newlines) into `lines`.
 fn wrapParagraph(
     gpa: std.mem.Allocator,
@@ -116,7 +196,7 @@ fn wrapParagraph(
     start: usize,
     end: usize,
     m: Measurer,
-    opts: Options,
+    max_w: ?f32,
     lines: *std.ArrayListUnmanaged(Line),
 ) !void {
     if (start >= end) {
@@ -124,7 +204,6 @@ fn wrapParagraph(
         try lines.append(gpa, .{ .start = start, .end = start, .x = 0, .y = 0, .width = 0 });
         return;
     }
-    const max_w = opts.max_width;
     var line_start = start;
     // Scan word by word; a "word" is a run of non-space plus trailing spaces.
     var cursor = start;
@@ -330,6 +409,38 @@ test "caret↔point round-trips on a wrapped layout" {
     // A point on the second line maps into "brown fox".
     const c2 = pointToCaret(l, s, fixed, .{ .x = 0, .y = 20 });
     try testing.expectEqual(@as(usize, 10), c2); // start of "brown"
+}
+
+test "text-wrap: nowrap keeps one line regardless of width (#192)" {
+    const s = "the quick brown fox"; // 19 chars = 190px, far over 100
+    var l = try layout(testing.allocator, s, fixed, .{ .max_width = 100, .wrap = .nowrap });
+    defer l.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), l.lines.len);
+}
+
+test "text-wrap: balance evens the line widths (#192)" {
+    // Greedy packs "aa aa aa" (80px) then orphans "aa" (20px). Balance splits
+    // 2+2 into two 50px lines.
+    const s = "aa aa aa aa";
+    var w = try layout(testing.allocator, s, fixed, .{ .max_width = 80, .wrap = .wrap });
+    defer w.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 2), w.lines.len);
+    try testing.expectApproxEqAbs(@as(f32, 80), w.lines[0].width, 1e-3);
+    try testing.expectApproxEqAbs(@as(f32, 20), w.lines[1].width, 1e-3);
+
+    var b = try layout(testing.allocator, s, fixed, .{ .max_width = 80, .wrap = .balance });
+    defer b.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 2), b.lines.len); // same line count
+    try testing.expectApproxEqAbs(@as(f32, 50), b.lines[0].width, 1e-3);
+    try testing.expectApproxEqAbs(@as(f32, 50), b.lines[1].width, 1e-3); // balanced
+}
+
+test "text-wrap: pretty rescues an orphan last line (#192)" {
+    const s = "aa aa aa aa"; // greedy → 80/20 (orphan); pretty → 50/50
+    var p = try layout(testing.allocator, s, fixed, .{ .max_width = 80, .wrap = .pretty });
+    defer p.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 2), p.lines.len);
+    try testing.expectApproxEqAbs(@as(f32, 50), p.lines[1].width, 1e-3); // no longer 20
 }
 
 test "blank line is preserved" {
