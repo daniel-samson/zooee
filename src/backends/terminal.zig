@@ -18,6 +18,7 @@ const std = @import("std");
 const geometry = @import("../geometry.zig");
 const style = @import("../style.zig");
 const backend = @import("../backend.zig");
+const unicode_width = @import("../unicode_width.zig");
 
 const Backend = backend.Backend;
 const Color = style.Color;
@@ -231,15 +232,24 @@ pub const TerminalBackend = struct {
 
         var x: i32 = @intFromFloat(@round(origin.x));
         var it = std.unicode.Utf8View.initUnchecked(text).iterator();
-        while (it.nextCodepoint()) |cp| : (x += 1) {
-            if (x < clip.x0) continue;
+        while (it.nextCodepoint()) |cp| {
+            const cw = unicode_width.charWidth(cp);
+            if (cw == 0) continue; // combining / zero-width: no cell (v1; clusters are #18)
             if (x >= clip.x1) break;
-            const cell = self.cellAt(x, y);
-            cell.cp = cp;
-            cell.fg = text_style.color; // null = terminal default fg
-            cell.bold = text_style.bold;
-            cell.underline = text_style.underline;
-            cell.strikethrough = text_style.strikethrough;
+            if (x >= clip.x0) {
+                const cell = self.cellAt(x, y);
+                cell.cp = cp;
+                cell.fg = text_style.color; // null = terminal default fg
+                cell.bold = text_style.bold;
+                cell.underline = text_style.underline;
+                cell.strikethrough = text_style.strikethrough;
+                // A wide glyph owns the next cell too — blank it so stale content
+                // doesn't bleed through beside it.
+                if (cw == 2 and x + 1 >= clip.x0 and x + 1 < clip.x1) {
+                    self.cellAt(x + 1, y).cp = ' ';
+                }
+            }
+            x += cw;
         }
     }
 
@@ -289,9 +299,9 @@ pub const TerminalBackend = struct {
     fn measureText(ptr: *anyopaque, text: []const u8, text_style: style.TextStyle) geometry.Size {
         _ = ptr;
         _ = text_style;
-        // Codepoint count; East Asian width and grapheme clusters are #18.
-        const n = std.unicode.utf8CountCodepoints(text) catch text.len;
-        return .{ .width = @floatFromInt(n), .height = 1 };
+        // Cell width: wide CJK = 2, combining/zero-width = 0 (#18). Grapheme
+        // clustering (ZWJ emoji) is a follow-up.
+        return .{ .width = @floatFromInt(unicode_width.measureWidth(text)), .height = 1 };
     }
 
     fn snap(ptr: *anyopaque, value: f32, axis: geometry.Axis) f32 {
