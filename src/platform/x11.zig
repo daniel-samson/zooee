@@ -5,7 +5,7 @@
 //!
 //! Mirrors the Win32/Cocoa shape: Window.create/destroy, non-blocking
 //! pumpEvents emitting core events, blit (XPutImage), contentPixelSize.
-//! DPI (Xft.dpi) is #27; v1 reports scale 1.
+//! DPI via Xft.dpi (#207); window operations (#208).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -172,6 +172,13 @@ extern "X11" fn XResourceManagerString(*Display) ?[*:0]const u8;
 extern "X11" fn XrmGetStringDatabase([*:0]const u8) XrmDatabase;
 extern "X11" fn XrmDestroyDatabase(XrmDatabase) void;
 extern "X11" fn XrmGetResource(XrmDatabase, [*:0]const u8, [*:0]const u8, *?[*:0]const u8, *XrmValue) c_int;
+// Window operations (#208).
+extern "X11" fn XResizeWindow(*Display, Window_, c_uint, c_uint) c_int;
+extern "X11" fn XIconifyWindow(*Display, Window_, c_int) c_int;
+extern "X11" fn XMapRaised(*Display, Window_) c_int;
+extern "X11" fn XSendEvent(*Display, Window_, Bool, c_long, *XEvent) c_int;
+extern "X11" fn XGetWindowProperty(*Display, Window_, Atom, c_long, c_long, Bool, Atom, *Atom, *c_int, *c_ulong, *c_ulong, *?[*]u8) c_int;
+const SubstructureMask: c_long = (1 << 19) | (1 << 20); // Notify | Redirect
 extern "X11" fn XCreateFontCursor(*Display, c_uint) XID;
 extern "X11" fn XDefineCursor(*Display, Window_, XID) c_int;
 extern "X11" fn XFreeCursor(*Display, XID) c_int;
@@ -455,6 +462,110 @@ pub const Window = struct {
         if (self.cursors[idx] == 0) self.cursors[idx] = XCreateFontCursor(self.display, glyph);
         _ = XDefineCursor(self.display, self.handle, self.cursors[idx]);
         _ = XFlush(self.display);
+    }
+
+    // --- Window operations (#208) — mirror the macOS Window method set. ---
+
+    pub fn setSize(self: *Window, w: f32, h: f32) void {
+        _ = XResizeWindow(self.display, self.handle, @intFromFloat(@max(1, w)), @intFromFloat(@max(1, h)));
+        _ = XFlush(self.display);
+    }
+
+    pub fn setTitle(self: *Window, title: [:0]const u8) void {
+        _ = XStoreName(self.display, self.handle, title.ptr);
+        const net = XInternAtom(self.display, "_NET_WM_NAME", 0);
+        const utf8 = XInternAtom(self.display, "UTF8_STRING", 0);
+        _ = XChangeProperty(self.display, self.handle, net, utf8, 8, 0, title.ptr, @intCast(title.len));
+        _ = XFlush(self.display);
+    }
+
+    pub fn minimise(self: *Window) void {
+        _ = XIconifyWindow(self.display, self.handle, XDefaultScreen(self.display));
+        _ = XFlush(self.display);
+    }
+
+    /// De-iconify / un-maximise back to normal.
+    pub fn restore(self: *Window) void {
+        self.netWmState(0, "_NET_WM_STATE_MAXIMIZED_VERT", "_NET_WM_STATE_MAXIMIZED_HORZ"); // remove
+        _ = XMapRaised(self.display, self.handle);
+        _ = XFlush(self.display);
+    }
+
+    pub fn maximise(self: *Window) void {
+        self.netWmState(1, "_NET_WM_STATE_MAXIMIZED_VERT", "_NET_WM_STATE_MAXIMIZED_HORZ"); // add
+    }
+
+    /// App-initiated close: enqueue close_requested so the loop breaks, matching
+    /// macOS performClose (the app decides whether to destroy).
+    pub fn close(self: *Window) void {
+        self.queue.append(self.gpa, .{ .close_requested = core_event.main_window }) catch {};
+    }
+
+    pub fn isMinimised(self: *Window) bool {
+        // WM_STATE first value == IconicState (3).
+        return self.firstCard("WM_STATE") == 3;
+    }
+
+    pub fn isMaximised(self: *Window) bool {
+        return self.hasNetState("_NET_WM_STATE_MAXIMIZED_VERT");
+    }
+
+    /// Send a _NET_WM_STATE client message to the root (action: 0=remove,
+    /// 1=add) toggling up to two state atoms.
+    fn netWmState(self: *Window, action: c_long, a1: [:0]const u8, a2: [:0]const u8) void {
+        const root = XRootWindow(self.display, XDefaultScreen(self.display));
+        var ev: XEvent = undefined;
+        ev.xclient = .{
+            .type = ClientMessage,
+            .serial = 0,
+            .send_event = 1,
+            .display = self.display,
+            .window = self.handle,
+            .message_type = XInternAtom(self.display, "_NET_WM_STATE", 0),
+            .format = 32,
+            .data = .{ .l = .{
+                action,
+                @bitCast(@as(c_ulong, XInternAtom(self.display, a1, 0))),
+                @bitCast(@as(c_ulong, XInternAtom(self.display, a2, 0))),
+                1, // source: application
+                0,
+            } },
+        };
+        _ = XSendEvent(self.display, root, 0, SubstructureMask, &ev);
+        _ = XFlush(self.display);
+    }
+
+    /// First 32-bit value of `prop_name` on this window, or -1 if absent.
+    fn firstCard(self: *Window, prop_name: [:0]const u8) c_long {
+        const prop = XInternAtom(self.display, prop_name, 0);
+        var atype: Atom = 0;
+        var afmt: c_int = 0;
+        var nitems: c_ulong = 0;
+        var after: c_ulong = 0;
+        var data: ?[*]u8 = null;
+        if (XGetWindowProperty(self.display, self.handle, prop, 0, 2, 0, 0, &atype, &afmt, &nitems, &after, &data) != 0) return -1;
+        defer { if (data) |d| { _ = XFree(d); } }
+        if (data == null or afmt != 32 or nitems == 0) return -1;
+        const vals: [*]const c_ulong = @ptrCast(@alignCast(data.?));
+        return @bitCast(@as(c_ulong, vals[0]));
+    }
+
+    /// Whether `_NET_WM_STATE` contains the named atom.
+    fn hasNetState(self: *Window, atom_name: [:0]const u8) bool {
+        const prop = XInternAtom(self.display, "_NET_WM_STATE", 0);
+        const want = XInternAtom(self.display, atom_name, 0);
+        var atype: Atom = 0;
+        var afmt: c_int = 0;
+        var nitems: c_ulong = 0;
+        var after: c_ulong = 0;
+        var data: ?[*]u8 = null;
+        if (XGetWindowProperty(self.display, self.handle, prop, 0, 32, 0, 0, &atype, &afmt, &nitems, &after, &data) != 0) return false;
+        defer { if (data) |d| { _ = XFree(d); } }
+        if (data == null or afmt != 32) return false;
+        const atoms: [*]const c_ulong = @ptrCast(@alignCast(data.?));
+        var i: usize = 0;
+        while (i < nitems) : (i += 1) if (atoms[i] == want) return true;
+        return false;
     }
 
     /// Set the window's background to `(r,g,b)` (#182). The server fills any
