@@ -146,6 +146,8 @@ pub fn run(
 
     terminal_mod.setupConsole();
     var term = terminal_mod.TerminalBackend.init(gpa);
+    // Theme backdrop fills the whole TUI, not just where rects draw (theming).
+    if (modelBackground(Model, model)) |c| term.clear_color = c;
     defer term.deinit();
     const b = term.interface();
 
@@ -185,6 +187,7 @@ pub fn run(
     loop: while (true) {
         const dt = fl.delta(io);
         if (dirty) {
+            if (modelBackground(Model, model)) |c| term.clear_color = c; // runtime theme
             _ = frame_arena.reset(.retain_capacity);
             const arena = frame_arena.allocator();
             const root = try model.view(arena, 1);

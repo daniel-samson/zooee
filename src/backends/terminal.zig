@@ -84,6 +84,10 @@ pub const TerminalBackend = struct {
     textures: std.AutoHashMapUnmanaged(u32, void) = .empty,
     next_texture_id: u32 = 1,
     in_frame: bool = false,
+    /// Default cell background (theming): empty cells paint this so the theme
+    /// backdrop fills the whole TUI, not just where rects draw. Null = the
+    /// terminal's own background (the historical behavior).
+    clear_color: ?Color = null,
 
     pub fn init(gpa: std.mem.Allocator) TerminalBackend {
         return .{ .gpa = gpa };
@@ -145,7 +149,8 @@ pub const TerminalBackend = struct {
             self.width = w;
             self.height = h;
         }
-        @memset(self.cells, Cell.blank);
+        const fill: Cell = if (self.clear_color) |c| .{ .cp = ' ', .bg = c } else Cell.blank;
+        @memset(self.cells, fill);
         self.in_frame = true;
     }
 
@@ -470,4 +475,21 @@ test "present emits ANSI truecolor escapes" {
     const written = fixed.buffered();
     try std.testing.expect(std.mem.indexOf(u8, written, "\x1b[48;2;10;20;30m") != null);
     try std.testing.expect(std.mem.startsWith(u8, written, "\x1b[H"));
+}
+
+test "clear_color paints the whole TUI backdrop (theming)" {
+    var term = TerminalBackend.init(std.testing.allocator);
+    defer term.deinit();
+    term.clear_color = Color.rgb(24, 26, 32); // theme dark background
+    const b = term.interface();
+
+    // No draws at all — just the cleared frame.
+    try b.beginFrame(.{ .width = 4, .height = 2 });
+    try b.endFrame();
+
+    var buf: [256]u8 = undefined;
+    var fixed: std.Io.Writer = .fixed(&buf);
+    try term.present(&fixed);
+    // Every empty cell carries the backdrop, so its bg escape is emitted.
+    try std.testing.expect(std.mem.indexOf(u8, fixed.buffered(), "\x1b[48;2;24;26;32m") != null);
 }
