@@ -99,6 +99,20 @@ fn drawImage(b: Backend, s: f32) !void {
     b.drawImage(.{ .x = 1 * s, .y = 1 * s, .width = 8 * s, .height = 4 * s }, tex);
 }
 
+/// Image fit modes (#122): a wide 4×2 image drawn COVER (crops to fill a
+/// square) and CONTAIN (letterboxed in a square), nearest sampling. Not in
+/// `all`; the GPU checks compare vs the raster reference.
+pub fn drawImageFit(b: Backend, s: f32) !void {
+    const px = [_]u8{
+        255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255, // r g b y
+        0, 255, 255, 255, 255, 0, 255, 255, 255, 255, 255, 255, 128, 128, 128, 255, // c m w grey
+    };
+    const tex = try b.createTexture(4, 2, &px);
+    defer b.destroyTexture(tex);
+    b.drawImageFit(.{ .x = 1 * s, .y = 1 * s, .width = 6 * s, .height = 6 * s }, tex, 4, 2, .cover);
+    b.drawImageFit(.{ .x = 8 * s, .y = 1 * s, .width = 6 * s, .height = 6 * s }, tex, 4, 2, .contain);
+}
+
 /// Real text rendering (#10): glyphs on raster (font set by the
 /// harness), plain characters on the terminal.
 fn drawHelloText(b: Backend, s: f32) !void {
