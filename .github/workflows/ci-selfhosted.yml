@@ -80,6 +80,32 @@ jobs:
             Stop-Process -Id $demo.Id -Force -ErrorAction SilentlyContinue
           }
 
+      - name: E2E on-hardware resize regression (maximize) (#97)
+        run: |
+          # Lock in the window-resize fix (PR #94) on real hardware: launch the
+          # GUI demo, capture at the default size, then MAXIMIZE the window and
+          # recapture. Assert the maximized client rect is strictly larger AND
+          # still non-blank. A swapchain that wasn't ResizeBuffers'd would
+          # stretch a stale frame / go blank / freeze on WM_SIZE — all caught
+          # here (the layout-reflow invariant itself is unit-tested, #99).
+          $env:ZOOEE_WINLOG = "winpath-resize.log"
+          $demo = Start-Process -FilePath "zig-out\bin\zooee-gui-demo.exe" -PassThru
+          Start-Sleep -Seconds 2
+          try {
+            powershell -NoProfile -ExecutionPolicy Bypass -File ci\capture-window.ps1 -TitlePattern "*zooee*" -OutFile before.bmp
+            powershell -NoProfile -ExecutionPolicy Bypass -File ci\capture-window.ps1 -TitlePattern "*zooee*" -OutFile after.bmp -Maximize
+            & "zig-out\bin\visual-diff.exe" --reject-solid 255,255,255 after.bmp
+            if ($LASTEXITCODE -ne 0) { throw "maximized window blank - resize regressed (stale/blank frame)" }
+            $b = (Get-Content before.bmp.size) -split 'x'
+            $a = (Get-Content after.bmp.size)  -split 'x'
+            Write-Host "client size before=$($b -join 'x') after=$($a -join 'x')"
+            if ([int]$a[0] -le [int]$b[0] -or [int]$a[1] -le [int]$b[1]) {
+              throw "window did not grow on maximize (before=$($b -join 'x') after=$($a -join 'x')) - WM_SIZE/present loop stuck"
+            }
+          } finally {
+            Stop-Process -Id $demo.Id -Force -ErrorAction SilentlyContinue
+          }
+
       - name: Upload window capture
         if: always()
         uses: actions/upload-artifact@v4
@@ -88,6 +114,9 @@ jobs:
           path: |
             window.bmp
             winpath.log
+            before.bmp
+            after.bmp
+            winpath-resize.log
           if-no-files-found: ignore
 
       # D3D11 GPU window (#12): the interactive session has a desktop, so the

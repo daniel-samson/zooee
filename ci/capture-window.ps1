@@ -10,9 +10,18 @@
 #
 # Must run in an interactive session — window enumeration sees nothing
 # from session 0.
+#
+# -Maximize (#97): before capturing, maximize the window and let the
+# present loop re-lay-out at the new size. The on-hardware resize guard:
+# a swapchain that wasn't ResizeBuffers'd would stretch a stale frame or
+# go blank, and the window would freeze/crash. Pair two runs (default +
+# -Maximize) and assert the maximized client rect is strictly larger and
+# still non-blank. The client size is written to "<OutFile>.size" (WxH)
+# so the caller can compare across runs without parsing stdout.
 param(
   [Parameter(Mandatory)][string]$TitlePattern,
-  [string]$OutFile = "window.bmp"
+  [string]$OutFile = "window.bmp",
+  [switch]$Maximize
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
@@ -22,6 +31,7 @@ using System.Runtime.InteropServices;
 public class WinCap {
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
   [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
 }
 "@
@@ -33,6 +43,13 @@ foreach ($attempt in 1..20) {
 }
 if (-not $proc) { Write-Error "window matching '$TitlePattern' not found"; exit 1 }
 Start-Sleep -Milliseconds 500  # let the first paint land
+
+if ($Maximize) {
+  # 3 = SW_MAXIMIZE. Drives WM_SIZE through the real present loop so the
+  # swapchain ResizeBuffers / re-layout path runs on actual hardware.
+  [WinCap]::ShowWindow($proc.MainWindowHandle, 3) | Out-Null
+  Start-Sleep -Milliseconds 800  # let the resize re-lay-out and present
+}
 
 $r = New-Object WinCap+RECT
 [WinCap]::GetClientRect($proc.MainWindowHandle, [ref]$r) | Out-Null
@@ -48,4 +65,5 @@ $g.ReleaseHdc($hdc)
 if (-not $ok) { Write-Error "PrintWindow failed"; exit 1 }
 $bmp.Save($OutFile, [System.Drawing.Imaging.ImageFormat]::Bmp)
 $g.Dispose(); $bmp.Dispose()
+Set-Content -Path "$OutFile.size" -Value "${w}x${h}" -NoNewline
 Write-Host "captured client area ${w}x${h} -> $OutFile"
