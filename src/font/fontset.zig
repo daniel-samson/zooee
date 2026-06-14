@@ -18,6 +18,62 @@ pub const Style = struct { bold: bool = false, italic: bool = false };
 /// the glyph index within that face.
 pub const Glyph = struct { face_id: u8, glyph: u16 };
 
+/// Shaping iterator (#201): turns a UTF-8 string into a sequence of output
+/// glyphs, applying GSUB standard ligatures (e.g. f+i → fi). Each `next()`
+/// yields one resolved glyph — usually one per codepoint, but a ligature
+/// collapses several. Pure/allocation-free: it resolves codepoints lazily into
+/// a small lookahead buffer and substitutes at the head. Ligatures only span a
+/// contiguous run from the same face (cross-face fallback breaks the run).
+/// `measure` and every backend's drawText drive this so they agree.
+pub const Shaper = struct {
+    set: *const FontSet,
+    style: Style,
+    it: std.unicode.Utf8Iterator,
+    buf: [max_lookahead]Glyph = undefined,
+    len: usize = 0,
+
+    /// Bounds the longest ligature (component count) and the lookahead.
+    const max_lookahead = 16;
+
+    pub fn init(set: *const FontSet, style: Style, text: []const u8) Shaper {
+        return .{ .set = set, .style = style, .it = std.unicode.Utf8View.initUnchecked(text).iterator() };
+    }
+
+    fn fill(self: *Shaper) void {
+        while (self.len < max_lookahead) {
+            const cp = self.it.nextCodepoint() orelse break;
+            self.buf[self.len] = self.set.resolve(cp, self.style);
+            self.len += 1;
+        }
+    }
+
+    fn shift(self: *Shaper, n: usize) void {
+        var i: usize = 0;
+        while (i + n < self.len) : (i += 1) self.buf[i] = self.buf[i + n];
+        self.len -= n;
+    }
+
+    /// The next output glyph, or null at end of text.
+    pub fn next(self: *Shaper) ?Glyph {
+        self.fill();
+        if (self.len == 0) return null;
+        const head = self.buf[0];
+        // Contiguous same-face run available for ligature matching.
+        var run: usize = 1;
+        while (run < self.len and self.buf[run].face_id == head.face_id) : (run += 1) {}
+        var gids: [max_lookahead]u16 = undefined;
+        var i: usize = 0;
+        while (i < run) : (i += 1) gids[i] = self.buf[i].glyph;
+        const face = self.set.face(head.face_id);
+        if (face.ligature(gids[0..run])) |r| {
+            self.shift(r.consumed);
+            return .{ .face_id = head.face_id, .glyph = r.glyph };
+        }
+        self.shift(1);
+        return head;
+    }
+};
+
 pub const FontSet = struct {
     /// Slot layout: 0=regular, 1=bold, 2=italic, 3=bold-italic, 4..=fallbacks.
     faces: [max_faces]?ttf.Font = .{null} ** max_faces,
@@ -107,19 +163,19 @@ pub const FontSet = struct {
     pub fn measure(self: *const FontSet, text: []const u8, size: f32, style: Style) Metrics {
         var width: f32 = 0;
         var prev: ?Glyph = null;
-        var it = std.unicode.Utf8View.initUnchecked(text).iterator();
-        while (it.nextCodepoint()) |cp| {
-            const r = self.resolve(cp, style);
-            const f = self.face(r.face_id);
+        // Shape (#201 ligatures) then measure the output glyphs, so width matches
+        // what the backends render.
+        var sh = Shaper.init(self, style, text);
+        while (sh.next()) |g| {
+            const f = self.face(g.face_id);
             const scale = size / @as(f32, @floatFromInt(f.units_per_em));
-            // Kerning (#116): adjust by the GPOS/kern pair value, but only
-            // between two glyphs from the same face (cross-face pairs have no
-            // shared kern data).
-            if (prev) |pg| if (pg.face_id == r.face_id) {
-                width += @as(f32, @floatFromInt(f.kern(pg.glyph, r.glyph))) * scale;
+            // Kerning (#116): same-face pairs only (cross-face fallback pairs
+            // have no shared kern data).
+            if (prev) |pg| if (pg.face_id == g.face_id) {
+                width += @as(f32, @floatFromInt(f.kern(pg.glyph, g.glyph))) * scale;
             };
-            width += @as(f32, @floatFromInt(f.hMetrics(r.glyph).advance)) * scale;
-            prev = r;
+            width += @as(f32, @floatFromInt(f.hMetrics(g.glyph).advance)) * scale;
+            prev = g;
         }
         const p = self.primary();
         const line = @as(f32, @floatFromInt(p.ascent - p.descent + p.line_gap)) * (size / @as(f32, @floatFromInt(p.units_per_em)));
@@ -131,6 +187,19 @@ pub const FontSet = struct {
 
 const testing = std.testing;
 const test_ttf = @embedFile("poppins");
+
+test "shaper yields one glyph per codepoint when the font has no ligatures" {
+    const f = try ttf.Font.parse(test_ttf); // Poppins has no `liga`
+    var set: FontSet = .{};
+    set.setFace(FontSet.regular, f);
+    var sh = Shaper.init(&set, .{}, "fi");
+    const g1 = sh.next() orelse return error.TestUnexpectedResult;
+    const g2 = sh.next() orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(?Glyph, null), sh.next());
+    // Identity: each output glyph equals the per-codepoint resolution.
+    try testing.expectEqual(set.resolve('f', .{}).glyph, g1.glyph);
+    try testing.expectEqual(set.resolve('i', .{}).glyph, g2.glyph);
+}
 
 test "resolve falls back through the chain and to .notdef" {
     const f = try ttf.Font.parse(test_ttf);

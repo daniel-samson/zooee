@@ -1773,11 +1773,13 @@ pub const GlyphRenderer = struct {
         defer verts.deinit(gpa);
         var pen = x;
         const baseline = y + self.atlas.ascent;
-        var prev_cp: ?u21 = null;
-        var it = std.unicode.Utf8View.initUnchecked(text).iterator();
-        while (it.nextCodepoint()) |cp| {
-            if (prev_cp) |pc| pen += self.atlas.kernCp(pc, cp, fstyle); // #116
-            const e = self.atlas.glyphForCp(cp, fstyle);
+        var prev: ?fontset.Glyph = null;
+        var sh = fontset.Shaper.init(self.atlas.set, fstyle, text);
+        while (sh.next()) |g| {
+            if (prev) |pg| if (pg.face_id == g.face_id) {
+                pen += self.atlas.kernGid(g.face_id, pg.glyph, g.glyph); // #116/#201
+            };
+            const e = self.atlas.glyphForGid(g.face_id, g.glyph);
             if (e.w > 0) {
                 const gx = @round(pen) + e.x_off;
                 const gy = @round(baseline) + e.y_off;
@@ -1795,7 +1797,7 @@ pub const GlyphRenderer = struct {
                 try verts.appendSlice(gpa, &quad);
             }
             pen += e.advance;
-            prev_cp = cp;
+            prev = g;
         }
         if (verts.items.len == 0) return;
         if (self.atlas.dirty) {

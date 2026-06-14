@@ -447,18 +447,18 @@ pub const RasterBackend = struct {
         var pen_x = origin.x;
         const baseline = origin.y + ascent;
         var prev: ?fontset.Glyph = null;
-        var it = std.unicode.Utf8View.initUnchecked(text).iterator();
-        while (it.nextCodepoint()) |cp| {
-            const r = set.resolve(cp, fstyle);
-            const face = set.face(r.face_id);
+        // Shape (#201 ligatures) then render the output glyphs — matches measure.
+        var sh = fontset.Shaper.init(set, fstyle, text);
+        while (sh.next()) |g| {
+            const face = set.face(g.face_id);
             const fscale = @as(f32, @floatFromInt(size_px)) / @as(f32, @floatFromInt(face.units_per_em));
             // Kerning (#116): same-face pairs only — matches FontSet.measure.
-            if (prev) |pg| if (pg.face_id == r.face_id) {
-                pen_x += @as(f32, @floatFromInt(face.kern(pg.glyph, r.glyph))) * fscale;
+            if (prev) |pg| if (pg.face_id == g.face_id) {
+                pen_x += @as(f32, @floatFromInt(face.kern(pg.glyph, g.glyph))) * fscale;
             };
-            prev = r;
-            const metrics = face.hMetrics(r.glyph);
-            if (self.cachedGlyph(r.face_id, face, r.glyph, size_px)) |bmp| {
+            prev = g;
+            const metrics = face.hMetrics(g.glyph);
+            if (self.cachedGlyph(g.face_id, face, g.glyph, size_px)) |bmp| {
                 const gx: i32 = @as(i32, @intFromFloat(@round(pen_x))) + bmp.x_off;
                 const gy: i32 = @as(i32, @intFromFloat(@round(baseline))) + bmp.y_off;
                 var y: usize = 0;
