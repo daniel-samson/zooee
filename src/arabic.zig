@@ -127,6 +127,44 @@ pub fn shape(cps: []const u21, out: []u21) void {
     }
 }
 
+/// Apply Arabic joining to a UTF-8 string, writing the shaped result (with
+/// letters replaced by their presentation forms) to `out`. Returns the shaped
+/// slice — or `text` unchanged when it has no shapeable Arabic letters, or
+/// doesn't fit the internal buffers. The text layout (#202) calls this per line
+/// (before BiDi reorder, since joining is on logical order). Note the forms are
+/// 3-byte UTF-8, so `out` should be ~1.5× `text`.
+pub fn shapeUtf8(text: []const u8, out: []u8) []const u8 {
+    var has_arabic = false;
+    var probe = std.unicode.Utf8View.initUnchecked(text).iterator();
+    while (probe.nextCodepoint()) |cp| {
+        const t = joiningType(cp);
+        if (t == .dual or t == .right) {
+            has_arabic = true;
+            break;
+        }
+    }
+    if (!has_arabic) return text;
+
+    const cap = 512;
+    var cps: [cap]u21 = undefined;
+    var n: usize = 0;
+    var it = std.unicode.Utf8View.initUnchecked(text).iterator();
+    while (it.nextCodepoint()) |cp| {
+        if (n >= cap) return text;
+        cps[n] = cp;
+        n += 1;
+    }
+    var shaped: [cap]u21 = undefined;
+    shape(cps[0..n], shaped[0..n]);
+    var w: usize = 0;
+    for (shaped[0..n]) |cp| {
+        const len = std.unicode.utf8CodepointSequenceLength(cp) catch 1;
+        if (w + len > out.len) return text;
+        w += std.unicode.utf8Encode(cp, out[w..]) catch return text;
+    }
+    return out[0..w];
+}
+
 // === Tests ==================================================================
 
 const testing = std.testing;
@@ -180,4 +218,12 @@ test "non-Arabic text is unchanged" {
     var out: [3]u21 = undefined;
     shape(&.{ 'a', 'b', 'c' }, &out);
     try testing.expectEqualSlices(u21, &.{ 'a', 'b', 'c' }, &out);
+}
+
+test "shapeUtf8: ASCII unchanged, Arabic joined to presentation forms" {
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("hello", shapeUtf8("hello", &buf)); // fast path, no copy
+    // "بم" (BEH+MEEM) → initial BEH (FE91) + final MEEM (FEE2).
+    const got = shapeUtf8("\u{0628}\u{0645}", &buf);
+    try testing.expectEqualStrings("\u{FE91}\u{FEE2}", got);
 }

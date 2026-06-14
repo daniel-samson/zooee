@@ -22,6 +22,14 @@ const backend_mod = @import("backend.zig");
 const text_mod = @import("text.zig");
 const cursor_mod = @import("cursor.zig");
 const bidi = @import("bidi.zig");
+const arabic = @import("arabic.zig");
+
+/// Shape a line for display (#202/#203): Arabic contextual joining (logical
+/// order) then BiDi visual reorder. `abuf`/`vbuf` are caller scratch (the forms
+/// are 3-byte UTF-8, so size generously); both no-op for plain LTR text.
+fn shapeForDisplay(t: []const u8, abuf: []u8, vbuf: []u8) []const u8 {
+    return bidi.reorderUtf8(arabic.shapeUtf8(t, abuf), vbuf);
+}
 
 const Backend = backend_mod.Backend;
 const Rect = geometry.Rect;
@@ -214,8 +222,9 @@ fn renderNode(b: Backend, placements: []const Placement, i: *usize) void {
         if (el.text_wrap != .nowrap or hasNewline(t)) {
             drawWrappedText(b, el, t, inner);
         } else {
-            var vbuf: [2048]u8 = undefined;
-            b.drawText(inner.origin(), bidi.reorderUtf8(t, &vbuf), el.text_style); // #203
+            var abuf: [3072]u8 = undefined;
+            var vbuf: [3072]u8 = undefined;
+            b.drawText(inner.origin(), shapeForDisplay(t, &abuf, &vbuf), el.text_style); // #202/#203
         }
     }
 
@@ -284,15 +293,17 @@ fn drawWrappedText(b: Backend, el: *const Element, t: []const u8, inner: Rect) v
         .line_height = line_h,
         .wrap = el.text_wrap,
     }) catch {
-        var vbuf: [2048]u8 = undefined;
-        b.drawText(inner.origin(), bidi.reorderUtf8(t, &vbuf), el.text_style);
+        var abuf: [3072]u8 = undefined;
+        var vbuf: [3072]u8 = undefined;
+        b.drawText(inner.origin(), shapeForDisplay(t, &abuf, &vbuf), el.text_style);
         return;
     };
     defer lay.deinit(fba.allocator());
-    var vbuf: [2048]u8 = undefined;
+    var abuf: [3072]u8 = undefined;
+    var vbuf: [3072]u8 = undefined;
     for (lay.lines) |ln| {
-        // BiDi (#203): reorder each line into visual order for display.
-        const vis = bidi.reorderUtf8(ln.slice(t), &vbuf);
+        // Arabic joining + BiDi reorder per line for display (#202/#203).
+        const vis = shapeForDisplay(ln.slice(t), &abuf, &vbuf);
         b.drawText(.{ .x = inner.x + ln.x, .y = inner.y + ln.y }, vis, el.text_style);
     }
 }
