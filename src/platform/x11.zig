@@ -163,6 +163,15 @@ extern "X11" fn XChangeProperty(*Display, Window_, Atom, Atom, c_int, c_int, [*]
 extern "X11" fn XSelectInput(*Display, Window_, c_long) c_int;
 extern "X11" fn XMapWindow(*Display, Window_) c_int;
 extern "X11" fn XFlush(*Display) c_int;
+// X resource manager (#207): read the user-configured Xft.dpi. Core libX11 —
+// no extra dependency.
+const XrmDatabase = ?*opaque {};
+const XrmValue = extern struct { size: c_uint, addr: ?[*:0]u8 };
+extern "X11" fn XrmInitialize() void;
+extern "X11" fn XResourceManagerString(*Display) ?[*:0]const u8;
+extern "X11" fn XrmGetStringDatabase([*:0]const u8) XrmDatabase;
+extern "X11" fn XrmDestroyDatabase(XrmDatabase) void;
+extern "X11" fn XrmGetResource(XrmDatabase, [*:0]const u8, [*:0]const u8, *?[*:0]const u8, *XrmValue) c_int;
 extern "X11" fn XCreateFontCursor(*Display, c_uint) XID;
 extern "X11" fn XDefineCursor(*Display, Window_, XID) c_int;
 extern "X11" fn XFreeCursor(*Display, XID) c_int;
@@ -537,9 +546,27 @@ pub const Window = struct {
     }
 };
 
+/// The user-configured Xft.dpi from the X resource manager (#207), or null
+/// when unset (e.g. a bare Xvfb). 96 dpi = scale 1.0.
+fn xftDpi(display: *Display) ?f32 {
+    XrmInitialize();
+    const rm = XResourceManagerString(display) orelse return null;
+    const db = XrmGetStringDatabase(rm);
+    defer XrmDestroyDatabase(db);
+    var type_ret: ?[*:0]const u8 = null;
+    var value: XrmValue = undefined;
+    if (XrmGetResource(db, "Xft.dpi", "Xft.Dpi", &type_ret, &value) == 0) return null;
+    const addr = value.addr orelse return null;
+    return std.fmt.parseFloat(f32, std.mem.span(addr)) catch null;
+}
+
 /// Module-level to match win32/macos (app.zig calls platform.contentPixelSize).
+/// X11 windows are sized in physical pixels; scale = Xft.dpi/96 tells layout how
+/// to upscale logical units (#207). Defaults to 1.0 when Xft.dpi is unset.
 pub fn contentPixelSize(window: *Window) struct { width: usize, height: usize, scale: f64 } {
-    return .{ .width = window.width, .height = window.height, .scale = 1.0 };
+    const dpi = xftDpi(window.display) orelse 96.0;
+    const scale: f64 = @as(f64, dpi) / 96.0;
+    return .{ .width = window.width, .height = window.height, .scale = if (scale > 0.1) scale else 1.0 };
 }
 
 /// Display refresh rate (Hz) for frame pacing (#170). Returning 0 makes the
