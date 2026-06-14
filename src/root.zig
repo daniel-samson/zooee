@@ -31,6 +31,7 @@ pub const app_fixtures = @import("testing/app_fixture.zig");
 
 pub const event = @import("event.zig");
 pub const anim = @import("anim.zig");
+pub const text = @import("text.zig");
 pub const font = struct {
     pub const ttf = @import("font/ttf.zig");
     pub const raster = @import("font/raster.zig");

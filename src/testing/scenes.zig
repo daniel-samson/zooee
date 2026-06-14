@@ -13,6 +13,7 @@ const backend = @import("../backend.zig");
 const style = @import("../style.zig");
 const layout = @import("../layout.zig");
 const geometry = @import("../geometry.zig");
+const text = @import("../text.zig");
 
 const Backend = backend.Backend;
 const Color = style.Color;
@@ -179,6 +180,43 @@ pub fn drawScroll(b: Backend, s: f32) !void {
     }
     b.popTranslate();
     b.popClip();
+}
+
+const TextMeasureCtx = struct {
+    b: Backend,
+    style: style.TextStyle,
+    fn measure(ctx: *const anyopaque, str: []const u8) f32 {
+        const self: *const TextMeasureCtx = @ptrCast(@alignCast(ctx));
+        return self.b.measureText(str, self.style).width;
+    }
+};
+
+/// Text layout (#115): a paragraph word-wrapped to a width, plus a
+/// right-aligned line below it — exercises the wrap + alignment pass through
+/// each backend's glyph renderer. Wrapping uses measureText, identical across
+/// backends, so the GPU output matches raster within the text AA tolerance.
+pub fn drawTextLayout(b: Backend, s: f32) !void {
+    const ts: style.TextStyle = .{ .size = 2.2 * s, .color = Color.rgb(30, 30, 40) };
+    var ctx: TextMeasureCtx = .{ .b = b, .style = ts };
+    const m: text.Measurer = .{ .ctx = &ctx, .measure_fn = TextMeasureCtx.measure };
+    const para = "the quick brown fox jumps over the lazy dog";
+    const line_h = b.measureText("Ag", ts).height;
+    var buf: [8 * 1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    var lay = try text.layout(fba.allocator(), para, m, .{ .max_width = 20 * s, .@"align" = .left, .line_height = line_h });
+    defer lay.deinit(fba.allocator());
+    const ox = 1 * s;
+    const oy = 1 * s;
+    for (lay.lines) |ln| {
+        b.drawText(.{ .x = ox + ln.x, .y = oy + ln.y }, ln.slice(para), ts);
+    }
+    // A right-aligned short line under the paragraph.
+    var lay2 = try text.layout(fba.allocator(), "end.", m, .{ .max_width = 20 * s, .@"align" = .right, .line_height = line_h });
+    defer lay2.deinit(fba.allocator());
+    const oy2 = oy + lay.height + line_h;
+    for (lay2.lines) |ln| {
+        b.drawText(.{ .x = ox + ln.x, .y = oy2 + ln.y }, ln.slice("end."), ts);
+    }
 }
 
 /// Real text rendering (#10): glyphs on raster (font set by the
