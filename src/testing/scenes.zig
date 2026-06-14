@@ -113,6 +113,24 @@ pub fn drawUnicode(b: Backend, s: f32) !void {
     b.drawText(.{ .x = 1 * s, .y = 1 * s }, "café — déjà", .{ .size = 2.5 * s });
 }
 
+/// Multi-stop linear gradient (#118): a 4-stop red→yellow→green→blue band.
+pub fn drawGradientStops(b: Backend, s: f32) !void {
+    var g: style.Gradient = .{ .kind = .linear, .axis = .horizontal, .stop_count = 4 };
+    g.stops[0] = .{ .offset = 0.0, .color = Color.rgb(220, 40, 40) };
+    g.stops[1] = .{ .offset = 0.33, .color = Color.rgb(230, 200, 40) };
+    g.stops[2] = .{ .offset = 0.66, .color = Color.rgb(40, 180, 80) };
+    g.stops[3] = .{ .offset = 1.0, .color = Color.rgb(40, 60, 220) };
+    b.drawRect(.{ .x = 1 * s, .y = 1 * s, .width = 8 * s, .height = 4 * s }, .{ .gradient = g });
+}
+
+/// Radial gradient (#118): white center → blue edge, centered in the rect.
+pub fn drawRadialGradient(b: Backend, s: f32) !void {
+    var g: style.Gradient = .{ .kind = .radial, .cx = 0.5, .cy = 0.5, .radius = 0.5, .stop_count = 2 };
+    g.stops[0] = .{ .offset = 0, .color = Color.white };
+    g.stops[1] = .{ .offset = 1, .color = Color.rgb(40, 60, 220) };
+    b.drawRect(.{ .x = 1 * s, .y = 1 * s, .width = 7 * s, .height = 7 * s }, .{ .gradient = g });
+}
+
 /// Linear gradient fill (#118): a horizontal red→blue and a vertical
 /// green→white rect. Not in `all` (cross-harness goldens); the GPU checks
 /// build local Scenes and compare vs the raster reference.

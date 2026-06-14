@@ -72,29 +72,80 @@ pub const CornerRadius = struct {
     }
 };
 
-/// A two-stop linear gradient fill (#118). Slice 1: axis-aligned (horizontal
-/// or vertical), straight-RGB interpolation. Multi-stop, diagonal, radial, and
-/// sRGB-correct interpolation are follow-ups. When set on a RectStyle it fills
-/// the rect interior in place of `background`.
+/// A gradient fill (#118): linear (axis-aligned) or radial, with N color stops
+/// (straight-RGB interpolation, pixel centers). The 2-stop `from`/`to` form is
+/// kept for back-compat; when `stop_count >= 2` the explicit `stops` win. When
+/// set on a RectStyle it fills the rect interior in place of `background`.
 pub const Gradient = struct {
     pub const Axis = enum { horizontal, vertical };
-    axis: Axis = .horizontal,
-    from: Color,
-    to: Color,
+    pub const Kind = enum(u8) { linear = 0, radial = 1 };
+    pub const Stop = struct { offset: f32, color: Color };
+    pub const max_stops = 8;
 
-    /// The interpolated color at pixel (px,py) within a rect (pixel centers).
+    kind: Kind = .linear,
+    axis: Axis = .horizontal,
+    /// Radial center + radius as fractions of the rect: cx/cy in [0,1] of
+    /// width/height, radius as a fraction of max(width,height).
+    cx: f32 = 0.5,
+    cy: f32 = 0.5,
+    radius: f32 = 0.5,
+    stops: [max_stops]Stop = [_]Stop{.{ .offset = 0, .color = .black }} ** max_stops,
+    stop_count: u8 = 0,
+    /// Back-compat two-stop endpoints (used when stop_count < 2).
+    from: Color = .black,
+    to: Color = .white,
+
+    /// Resolve to an explicit stop list (≥2): the `stops`, or {0:from, 1:to}.
+    pub fn resolved(self: Gradient, out: *[max_stops]Stop) []const Stop {
+        if (self.stop_count >= 2) {
+            const n = @min(self.stop_count, max_stops);
+            return self.stops[0..n];
+        }
+        out[0] = .{ .offset = 0, .color = self.from };
+        out[1] = .{ .offset = 1, .color = self.to };
+        return out[0..2];
+    }
+
+    /// The gradient parameter t (0..1, unclamped) at pixel (px,py).
+    pub fn paramAt(self: Gradient, rect_x: f32, rect_y: f32, rect_w: f32, rect_h: f32, px: f32, py: f32) f32 {
+        return switch (self.kind) {
+            .linear => switch (self.axis) {
+                .horizontal => if (rect_w > 0) (px - rect_x) / rect_w else 0,
+                .vertical => if (rect_h > 0) (py - rect_y) / rect_h else 0,
+            },
+            .radial => blk: {
+                const ccx = rect_x + self.cx * rect_w;
+                const ccy = rect_y + self.cy * rect_h;
+                const rr = self.radius * @max(rect_w, rect_h);
+                const dx = px - ccx;
+                const dy = py - ccy;
+                break :blk if (rr > 0) @sqrt(dx * dx + dy * dy) / rr else 0;
+            },
+        };
+    }
+
+    /// The interpolated color at pixel (px,py) within the rect (pixel centers).
     pub fn colorAt(self: Gradient, rect_x: f32, rect_y: f32, rect_w: f32, rect_h: f32, px: f32, py: f32) Color {
-        const t = switch (self.axis) {
-            .horizontal => if (rect_w > 0) (px - rect_x) / rect_w else 0,
-            .vertical => if (rect_h > 0) (py - rect_y) / rect_h else 0,
-        };
-        const tc = @max(0, @min(1, t));
-        return .{
-            .r = lerp8(self.from.r, self.to.r, tc),
-            .g = lerp8(self.from.g, self.to.g, tc),
-            .b = lerp8(self.from.b, self.to.b, tc),
-            .a = lerp8(self.from.a, self.to.a, tc),
-        };
+        var buf: [max_stops]Stop = undefined;
+        const ss = self.resolved(&buf);
+        const t = @max(0, @min(1, self.paramAt(rect_x, rect_y, rect_w, rect_h, px, py)));
+        if (t <= ss[0].offset) return ss[0].color;
+        var i: usize = 1;
+        while (i < ss.len) : (i += 1) {
+            if (t <= ss[i].offset) {
+                const lo = ss[i - 1];
+                const hi = ss[i];
+                const span = hi.offset - lo.offset;
+                const f = if (span > 0) (t - lo.offset) / span else 0;
+                return .{
+                    .r = lerp8(lo.color.r, hi.color.r, f),
+                    .g = lerp8(lo.color.g, hi.color.g, f),
+                    .b = lerp8(lo.color.b, hi.color.b, f),
+                    .a = lerp8(lo.color.a, hi.color.a, f),
+                };
+            }
+        }
+        return ss[ss.len - 1].color;
     }
 
     fn lerp8(a: u8, b: u8, t: f32) u8 {
