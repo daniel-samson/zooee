@@ -29,6 +29,8 @@ const Msg = enum(u32) {
 const Demo = struct {
     selected: usize = 0,
     checked: [items.len]bool = .{ true, true, true, true, true },
+    /// Wheel-driven scroll offset for the showcase list viewport (#96/#126).
+    scroll_y: f32 = 40,
 
     pub fn view(self: *Demo, arena: std.mem.Allocator, scale: f32) !*const L.Element {
         const rows = try arena.alloc(L.Element, items.len);
@@ -94,7 +96,6 @@ const Demo = struct {
     /// live GPU window: a linear gradient (#118), a square fill rounded-clipped
     /// (#117), a half-opacity group (#121), and a Unicode string (#114).
     fn buildShowcase(self: *Demo, arena: std.mem.Allocator, scale: f32) !*const L.Element {
-        _ = self;
         // Gradient bar (#118): a 4-stop rainbow (multi-stop linear).
         var rainbow: zooee.style.Gradient = .{ .axis = .horizontal, .stop_count = 4 };
         rainbow.stops[0] = .{ .offset = 0.0, .color = Color.rgb(220, 40, 40) };
@@ -301,7 +302,7 @@ const Demo = struct {
             .margin = .{ .bottom = 12 * scale },
             .rect_style = .{ .background = Color.rgb(245, 245, 248), .border = .all(1 * scale, Color.rgb(150, 150, 160)), .corner_radius = .all(6 * scale) },
             .scroll = true,
-            .scroll_y = 40 * scale,
+            .scroll_y = self.scroll_y * scale,
             .children = try arena.dupe(*const L.Element, &.{scroll_content}),
         };
         // Text layout (#115): a wrapped, centered paragraph in a fixed-width box.
@@ -368,6 +369,13 @@ const Demo = struct {
                 else => {},
             },
             .text => |t| if (t.codepoint == 'q') return .quit,
+            .scroll => |s| {
+                // Wheel/trackpad scrolls the showcase list viewport (#126).
+                // Content is ~8 rows × 26px ≈ 200px tall in a 70px box.
+                const step: f32 = if (s.unit == .pixel) s.dy else s.dy * 12;
+                self.scroll_y = @max(0, @min(140, self.scroll_y + step));
+                return .redraw;
+            },
             else => {},
         }
         return .none;

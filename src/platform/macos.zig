@@ -88,6 +88,7 @@ const NSEventType = struct {
     const right_dragged: u64 = 7;
     const key_down: u64 = 10;
     const key_up: u64 = 11;
+    const scroll_wheel: u64 = 22;
 };
 
 fn keyCodeToKey(kc: u16) ?core_event.Key {
@@ -306,6 +307,27 @@ pub const Window = struct {
                         }
                     }
                     continue; // don't sendEvent keyDown — avoids the no-responder beep
+                },
+                NSEventType.scroll_wheel => {
+                    // scrollingDeltaX/Y are pixel-precise on trackpads and
+                    // high-res wheels; hasPreciseScrollingDeltas distinguishes
+                    // them from coarse mouse notches. Positive AppKit deltaY is
+                    // a downward finger-push → content scrolls up, matching our
+                    // ScrollEvent dy convention.
+                    const loc = msg(NSPoint, struct {}, ev, sel("locationInWindow"), .{});
+                    const cv = msg(NSPoint, struct { NSPoint, id }, view, sel("convertPoint:fromView:"), .{ loc, null });
+                    const precise = msg(bool, struct {}, ev, sel("hasPreciseScrollingDeltas"), .{});
+                    const dx = msg(f64, struct {}, ev, sel("scrollingDeltaX"), .{});
+                    const dy = msg(f64, struct {}, ev, sel("scrollingDeltaY"), .{});
+                    const ph = msg(u64, struct {}, ev, sel("momentumPhase"), .{});
+                    const phase: core_event.ScrollPhase = if (ph != 0) .momentum else .continue_;
+                    self.queue.append(self.gpa, .{ .scroll = .{
+                        .position = .{ .x = @floatCast(cv.x * scale), .y = @floatCast((bounds.h - cv.y) * scale) },
+                        .dx = @floatCast(dx),
+                        .dy = @floatCast(dy),
+                        .unit = if (precise) .pixel else .line,
+                        .phase = phase,
+                    } }) catch {};
                 },
                 NSEventType.key_up => continue,
                 else => {},
