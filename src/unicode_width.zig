@@ -21,11 +21,47 @@ pub fn charWidth(cp: u21) u2 {
     return 1;
 }
 
-/// Total display width of a UTF-8 string in cells (#18).
+fn isRegionalIndicator(cp: u21) bool {
+    return cp >= 0x1F1E6 and cp <= 0x1F1FF;
+}
+fn isEmojiModifier(cp: u21) bool {
+    return cp >= 0x1F3FB and cp <= 0x1F3FF; // skin-tone modifiers (Extend)
+}
+
+/// Total display width of a UTF-8 string in cells (#18), grapheme-cluster aware:
+/// a ZWJ emoji sequence (👨‍👩‍👧), a regional-indicator flag pair (🇯🇵), and a
+/// base + skin-tone modifier each measure as a single cluster, not the sum of
+/// their codepoints. Combining marks / variation selectors are already
+/// zero-width via `charWidth`.
 pub fn measureWidth(text: []const u8) usize {
     var w: usize = 0;
+    var join = false; // previous codepoint was ZWJ → next joins this cluster
+    var ri_open = false; // first of a regional-indicator pair seen
     var it = std.unicode.Utf8View.initUnchecked(text).iterator();
-    while (it.nextCodepoint()) |cp| w += charWidth(cp);
+    while (it.nextCodepoint()) |cp| {
+        if (cp == 0x200D) { // ZWJ: zero-width, and suppresses the next base
+            join = true;
+            continue;
+        }
+        if (isRegionalIndicator(cp)) {
+            // Two RIs form one flag (width 2); a lone RI is width 2 on its own.
+            if (ri_open) {
+                ri_open = false; // completes the pair → already counted
+            } else {
+                w += 2;
+                ri_open = true;
+            }
+            join = false;
+            continue;
+        }
+        ri_open = false;
+        if (join) { // joins the previous cluster → adds nothing
+            join = false;
+            continue;
+        }
+        if (isEmojiModifier(cp)) continue; // attaches to the preceding base
+        w += charWidth(cp);
+    }
     return w;
 }
 
@@ -108,4 +144,17 @@ test "measureWidth sums cells across a mixed string" {
     try testing.expectEqual(@as(usize, 6), measureWidth("hi 中a")); // 1+1+1+2+1
     // "e" + combining acute = 1 cell (the mark adds 0).
     try testing.expectEqual(@as(usize, 1), measureWidth("e\u{0301}"));
+}
+
+test "grapheme clusters: ZWJ emoji, flags, skin tone are one cluster (#18)" {
+    // ZWJ family: man + ZWJ + woman + ZWJ + girl → 2 cells, not 6.
+    try testing.expectEqual(@as(usize, 2), measureWidth("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"));
+    // Flag (two regional indicators) → 2 cells, not 4.
+    try testing.expectEqual(@as(usize, 2), measureWidth("\u{1F1EF}\u{1F1F5}")); // 🇯🇵
+    // Two flags → 4.
+    try testing.expectEqual(@as(usize, 4), measureWidth("\u{1F1EF}\u{1F1F5}\u{1F1FA}\u{1F1F8}"));
+    // Emoji + skin-tone modifier → 2 cells (modifier adds 0).
+    try testing.expectEqual(@as(usize, 2), measureWidth("\u{1F44B}\u{1F3FD}")); // 👋🏽
+    // Mixed: "hi " + flag → 3 + 2 = 5.
+    try testing.expectEqual(@as(usize, 5), measureWidth("hi \u{1F1EF}\u{1F1F5}"));
 }
