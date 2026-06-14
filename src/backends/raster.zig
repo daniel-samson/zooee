@@ -19,6 +19,7 @@ const style = @import("../style.zig");
 const backend = @import("../backend.zig");
 const ttf = @import("../font/ttf.zig");
 const glyph_raster = @import("../font/raster.zig");
+const fontset = @import("../font/fontset.zig");
 
 const Backend = backend.Backend;
 const Color = style.Color;
@@ -48,9 +49,12 @@ pub const RasterBackend = struct {
     clear_color: Color = .white,
     char_width: f32 = 8,
     line_height: f32 = 16,
-    /// Real text when set (setFont); placeholder blocks otherwise.
-    font: ?ttf.Font = null,
-    glyph_cache: std.AutoHashMapUnmanaged(u32, glyph_raster.Bitmap) = .empty,
+    /// Real text when set (setFont/setFontSet); placeholder blocks otherwise.
+    /// A FontSet so bold/italic and Unicode fallback pick the right face (#114).
+    fonts: ?fontset.FontSet = null,
+    /// Keyed by (face_id<<32 | glyph<<16 | size) so the same glyph index from
+    /// two different faces doesn't collide (#114).
+    glyph_cache: std.AutoHashMapUnmanaged(u64, glyph_raster.Bitmap) = .empty,
 
     const TextureData = struct {
         width: u32,
@@ -122,19 +126,27 @@ pub const RasterBackend = struct {
         self.glyph_cache.deinit(self.gpa);
     }
 
-    /// Use a TTF for text (borrowed bytes must outlive the backend).
+    /// Use a single TTF for text — sets it as the regular face (borrowed bytes
+    /// must outlive the backend). For bold/italic + Unicode fallback, use
+    /// `setFontSet`.
     pub fn setFont(self: *RasterBackend, data: []const u8) !void {
-        self.font = try ttf.Font.parse(data);
+        var set: fontset.FontSet = .{};
+        set.setFace(fontset.FontSet.regular, try ttf.Font.parse(data));
+        self.fonts = set;
     }
 
-    fn cachedGlyph(self: *RasterBackend, glyph: u16, size_px: u16) ?*glyph_raster.Bitmap {
-        const key: u32 = (@as(u32, glyph) << 16) | size_px;
+    /// Use a full face set: bold/italic variants + a Unicode fallback chain.
+    pub fn setFontSet(self: *RasterBackend, set: fontset.FontSet) void {
+        self.fonts = set;
+    }
+
+    fn cachedGlyph(self: *RasterBackend, face_id: u8, face: *const ttf.Font, glyph: u16, size_px: u16) ?*glyph_raster.Bitmap {
+        const key: u64 = (@as(u64, face_id) << 32) | (@as(u64, glyph) << 16) | size_px;
         if (self.glyph_cache.getPtr(key)) |bmp| return bmp;
-        const font = &(self.font.?);
-        const outline = (font.outline(self.gpa, glyph) catch return null) orelse return null;
+        const outline = (face.outline(self.gpa, glyph) catch return null) orelse return null;
         var o = outline;
         defer o.deinit(self.gpa);
-        const bmp = glyph_raster.rasterize(self.gpa, font, o, @floatFromInt(size_px)) catch return null;
+        const bmp = glyph_raster.rasterize(self.gpa, face, o, @floatFromInt(size_px)) catch return null;
         self.glyph_cache.put(self.gpa, key, bmp) catch return null;
         return self.glyph_cache.getPtr(key);
     }
@@ -395,7 +407,7 @@ pub const RasterBackend = struct {
 
     fn drawText(ptr: *anyopaque, origin: geometry.Point, text: []const u8, text_style: style.TextStyle) void {
         const self = self_(ptr);
-        if (self.font != null) {
+        if (self.fonts != null) {
             self.drawTextGlyphs(origin, text, text_style);
             return;
         }
@@ -423,11 +435,12 @@ pub const RasterBackend = struct {
     }
 
     fn drawTextGlyphs(self: *RasterBackend, origin: geometry.Point, text: []const u8, text_style: style.TextStyle) void {
-        const font = &(self.font.?);
+        const set = &(self.fonts.?);
         const size_px: u16 = @intFromFloat(@max(4, text_style.size));
-        const upem: f32 = @floatFromInt(font.units_per_em);
-        const fscale = @as(f32, @floatFromInt(size_px)) / upem;
-        const ascent = @as(f32, @floatFromInt(font.ascent)) * fscale;
+        // Baseline comes from the primary face so mixed-face runs share a grid.
+        const primary = set.primary();
+        const ascent = @as(f32, @floatFromInt(primary.ascent)) * (@as(f32, @floatFromInt(size_px)) / @as(f32, @floatFromInt(primary.units_per_em)));
+        const fstyle: fontset.Style = .{ .bold = text_style.bold, .italic = text_style.italic };
         const color = text_style.color orelse Color.black;
         const clip = self.currentClip();
 
@@ -435,9 +448,11 @@ pub const RasterBackend = struct {
         const baseline = origin.y + ascent;
         var it = std.unicode.Utf8View.initUnchecked(text).iterator();
         while (it.nextCodepoint()) |cp| {
-            const glyph = font.glyphIndex(cp);
-            const metrics = font.hMetrics(glyph);
-            if (self.cachedGlyph(glyph, size_px)) |bmp| {
+            const r = set.resolve(cp, fstyle);
+            const face = set.face(r.face_id);
+            const fscale = @as(f32, @floatFromInt(size_px)) / @as(f32, @floatFromInt(face.units_per_em));
+            const metrics = face.hMetrics(r.glyph);
+            if (self.cachedGlyph(r.face_id, face, r.glyph, size_px)) |bmp| {
                 const gx: i32 = @as(i32, @intFromFloat(@round(pen_x))) + bmp.x_off;
                 const gy: i32 = @as(i32, @intFromFloat(@round(baseline))) + bmp.y_off;
                 var y: usize = 0;
@@ -695,15 +710,18 @@ pub const RasterBackend = struct {
 
     fn measureText(ptr: *anyopaque, text: []const u8, text_style: style.TextStyle) geometry.Size {
         const self = self_(ptr);
-        if (self.font) |*font| {
-            const upem: f32 = @floatFromInt(font.units_per_em);
-            const fscale = text_style.size / upem;
+        if (self.fonts) |*set| {
+            const fstyle: fontset.Style = .{ .bold = text_style.bold, .italic = text_style.italic };
             var width: f32 = 0;
             var it = std.unicode.Utf8View.initUnchecked(text).iterator();
             while (it.nextCodepoint()) |cp| {
-                width += @as(f32, @floatFromInt(font.hMetrics(font.glyphIndex(cp)).advance)) * fscale;
+                const r = set.resolve(cp, fstyle);
+                const face = set.face(r.face_id);
+                width += @as(f32, @floatFromInt(face.hMetrics(r.glyph).advance)) * (text_style.size / @as(f32, @floatFromInt(face.units_per_em)));
             }
-            const line = @as(f32, @floatFromInt(font.ascent - font.descent + font.line_gap)) * fscale;
+            // Line height from the primary face's vertical metrics.
+            const primary = set.primary();
+            const line = @as(f32, @floatFromInt(primary.ascent - primary.descent + primary.line_gap)) * (text_style.size / @as(f32, @floatFromInt(primary.units_per_em)));
             return .{ .width = width, .height = line };
         }
         const n = std.unicode.utf8CountCodepoints(text) catch text.len;
