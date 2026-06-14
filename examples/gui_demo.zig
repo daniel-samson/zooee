@@ -34,6 +34,10 @@ const Demo = struct {
     /// Pointer-inside state (#127): the panel border brightens while the
     /// cursor is over the window (driven by pointer_enter/leave).
     pointer_inside: bool = false,
+    /// Drag-and-drop state (#128): the drop zone highlights while a drag is
+    /// over it and reports the last dropped item count.
+    drag_over: bool = false,
+    dropped: usize = 0,
 
     pub fn view(self: *Demo, arena: std.mem.Allocator, scale: f32) !*const L.Element {
         const rows = try arena.alloc(L.Element, items.len);
@@ -318,6 +322,26 @@ const Demo = struct {
             .text_wrap = true,
             .text_align = .center,
         };
+        // Drop zone (#128): highlights while a drag is over it; shows the last
+        // dropped item count. Live drops need per-platform DnD registration.
+        const drop_label = if (self.dropped > 0)
+            try std.fmt.allocPrint(arena, "dropped {d} item(s)", .{self.dropped})
+        else
+            "drop files here";
+        const drop_zone = try arena.create(L.Element);
+        drop_zone.* = .{
+            .width = 240 * scale,
+            .height = 28 * scale,
+            .margin = .{ .bottom = 10 * scale },
+            .padding = .all(6 * scale),
+            .text = drop_label,
+            .text_style = .{ .color = Color.rgb(90, 90, 110), .size = 13 * scale },
+            .rect_style = .{
+                .background = if (self.drag_over) Color.rgb(225, 240, 255) else Color.rgb(245, 246, 250),
+                .border = .all(1 * scale, if (self.drag_over) Color.rgb(0, 120, 255) else Color.rgb(170, 175, 190)),
+                .corner_radius = .all(5 * scale),
+            },
+        };
         // Unicode (#114): accents + em-dash exercise the dynamic glyph atlas.
         const uni = try arena.create(L.Element);
         uni.* = .{
@@ -335,7 +359,7 @@ const Demo = struct {
                 .border = .all(2 * scale, if (self.pointer_inside) Color.rgb(0, 120, 255) else Color.rgb(120, 120, 130)),
                 .corner_radius = .all(10 * scale),
             },
-            .children = try arena.dupe(*const L.Element, &.{ grad_bar, swatches, card_wrap, icons, button, scroller, paragraph, uni }),
+            .children = try arena.dupe(*const L.Element, &.{ grad_bar, swatches, card_wrap, icons, button, scroller, paragraph, drop_zone, uni }),
         };
         return panel;
     }
@@ -390,6 +414,25 @@ const Demo = struct {
                 self.pointer_inside = false;
                 return .redraw;
             },
+            // Drag-and-drop (#128): highlight the drop zone, count drops.
+            .drag_enter, .drag_over => {
+                self.drag_over = true;
+                return .redraw;
+            },
+            .drag_leave => {
+                self.drag_over = false;
+                return .redraw;
+            },
+            .drop => |dd| {
+                self.drag_over = false;
+                self.dropped = switch (dd.data) {
+                    .files => |f| f.len,
+                    .urls => |u| u.len,
+                    .text => 1,
+                    .unknown => 0,
+                };
+                return .redraw;
+            },
             else => {},
         }
         return .none;
@@ -399,5 +442,5 @@ const Demo = struct {
 pub fn main(init: std.process.Init) !void {
     var demo: Demo = .{};
     const title: [:0]const u8 = if (force_software) "zooee - raster" else "zooee - GPU";
-    try zooee.app.runWindow(Demo, Msg, &demo, init, .{ .title = title, .width = 760, .height = 560, .force_software = force_software });
+    try zooee.app.runWindow(Demo, Msg, &demo, init, .{ .title = title, .width = 760, .height = 620, .force_software = force_software });
 }

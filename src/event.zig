@@ -128,6 +128,32 @@ pub const ScrollPhase = enum {
     momentum,
 };
 
+/// What a drag carries (#128). Borrowed slices, valid only for the duration of
+/// the event dispatch — apps that keep data must copy it.
+pub const DragData = union(enum) {
+    /// Absolute file-system paths (Finder/Explorer drops).
+    files: []const []const u8,
+    /// UTF-8 text.
+    text: []const u8,
+    /// URL strings.
+    urls: []const []const u8,
+    /// A drag whose payload type isn't surfaced yet (enter/leave probes).
+    unknown: void,
+};
+
+/// Operation the source offers / the target accepts (#128).
+pub const DragOperation = enum { none, copy, move, link };
+
+/// An OS drag interacting with the window (#128): file/text/URL drops from
+/// other apps. `drag_over` lets the app accept/reject by position before the
+/// `drop`; `operation` is the proposed (enter/over) or committed (drop) action.
+pub const DragEvent = struct {
+    window: WindowId = main_window,
+    position: geometry.Point,
+    data: DragData = .unknown,
+    operation: DragOperation = .copy,
+};
+
 pub const Event = union(enum) {
     key_down: KeyEvent,
     /// Key release (#127): held-key state, modifier release, games.
@@ -141,6 +167,11 @@ pub const Event = union(enum) {
     /// Pointer left the window — clears stuck hover state (#127).
     pointer_leave: PointerEvent,
     scroll: ScrollEvent,
+    /// Drag-and-drop from another app (#128): enter → over* → (drop | leave).
+    drag_enter: DragEvent,
+    drag_over: DragEvent,
+    drag_leave: DragEvent,
+    drop: DragEvent,
     resized: ResizeEvent,
     focus_gained: WindowId,
     focus_lost: WindowId,
