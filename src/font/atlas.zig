@@ -73,6 +73,18 @@ pub const Atlas = struct {
         self.gpa.free(self.pixels);
     }
 
+    /// Kerning adjustment (#116) to add to the pen between `prev_cp` and `cp`,
+    /// in atlas pixels (same units as `Glyph.advance`). Only same-face pairs
+    /// kern; cross-face (fallback) pairs return 0.
+    pub fn kernCp(self: *const Atlas, prev_cp: u21, cp: u21, style: fontset.Style) f32 {
+        const a = self.set.resolve(prev_cp, style);
+        const b = self.set.resolve(cp, style);
+        if (a.face_id != b.face_id) return 0;
+        const face = self.set.face(b.face_id);
+        const sc = self.size_px / @as(f32, @floatFromInt(face.units_per_em));
+        return @as(f32, @floatFromInt(face.kern(a.glyph, b.glyph))) * sc;
+    }
+
     /// The atlas entry for a codepoint at `style`, resolving the face (bold/
     /// italic/fallback) via the FontSet and rasterizing + packing on first use.
     /// Always returns a valid `advance`; `w == 0` if blank/unpacked.

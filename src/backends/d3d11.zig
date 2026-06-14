@@ -1600,8 +1600,10 @@ pub const D3dGlyphRenderer = struct {
         defer verts.deinit(gpa);
         var pen = x;
         const baseline = y + self.atlas.ascent;
+        var prev_cp: ?u21 = null;
         var it = std.unicode.Utf8View.initUnchecked(text).iterator();
         while (it.nextCodepoint()) |cp| {
+            if (prev_cp) |pc| pen += self.atlas.kernCp(pc, cp, fstyle); // #116
             const e = self.atlas.glyphForCp(cp, fstyle);
             if (e.w > 0) {
                 const gx = @round(pen) + e.x_off;
@@ -1619,6 +1621,7 @@ pub const D3dGlyphRenderer = struct {
                 try verts.appendSlice(gpa, &quad);
             }
             pen += e.advance;
+            prev_cp = cp;
         }
         if (verts.items.len == 0) return;
         try self.uploadAtlas();
