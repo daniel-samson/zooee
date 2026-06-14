@@ -338,11 +338,39 @@ pub fn main(init: std.process.Init) !void {
             try out.print("GL Backend vs raster [{s}]: bad_frac={d:.4} {s}\n", .{ scene.name, frac, if (scene_ok) "PASS" else "FAIL" });
         }
         // Multi-stop + radial gradients (#118 follow-up), vs raster.
-        inline for (.{
-            .{ "gradient_stops", @as(u32, 10), @as(u32, 6), zooee.fixtures.drawGradientStops },
-            .{ "radial", @as(u32, 9), @as(u32, 9), zooee.fixtures.drawRadialGradient },
-        }) |sc| {
-            const scene: zooee.fixtures.Scene = .{ .name = sc[0], .width = @floatFromInt(sc[1]), .height = @floatFromInt(sc[2]), .draw = sc[3] };
+        {
+            const scene: zooee.fixtures.Scene = .{ .name = "gradient_stops", .width = 10, .height = 6, .draw = zooee.fixtures.drawGradientStops };
+            try zooee.fixtures.run(scene, glb.interface(), 8);
+            const glpx = try glb.readPixels();
+            var ras = zooee.backends.raster.RasterBackend.init(gpa);
+            defer ras.deinit();
+            try ras.setFont(zooee.test_font_ttf);
+            try zooee.fixtures.run(scene, ras.interface(), 8);
+            var bad: usize = 0;
+            const n = @min(glpx.len, ras.pixels.len) / 4;
+            for (0..n) |p| {
+                var md: u8 = 0;
+                for (0..3) |ch| {
+                    const a = glpx[p * 4 + ch];
+                    const bch = ras.pixels[p * 4 + ch];
+                    const d = if (a > bch) a - bch else bch - a;
+                    if (d > md) md = d;
+                }
+                if (md > 32) bad += 1;
+            }
+            const frac = @as(f32, @floatFromInt(bad)) / @as(f32, @floatFromInt(n));
+            const scene_ok = frac < 0.05;
+            if (!scene_ok) backend_ok = false;
+            try out.print("GL Backend vs raster [{s}]: bad_frac={d:.4} {s}\n", .{ scene.name, frac, if (scene_ok) "PASS" else "FAIL" });
+            // DIAG: band is 64px wide at (8,8); sample t≈0.19/0.5/0.81 at y=20.
+            const W = 80;
+            inline for ([_]usize{ 20, 40, 60 }) |sx| {
+                const i = (20 * W + sx) * 4;
+                try out.print("  DIAG x={d} gl=({d},{d},{d}) raster=({d},{d},{d})\n", .{ sx, glpx[i], glpx[i + 1], glpx[i + 2], ras.pixels[i], ras.pixels[i + 1], ras.pixels[i + 2] });
+            }
+        }
+        {
+            const scene: zooee.fixtures.Scene = .{ .name = "radial", .width = 9, .height = 9, .draw = zooee.fixtures.drawRadialGradient };
             try zooee.fixtures.run(scene, glb.interface(), 8);
             const glpx = try glb.readPixels();
             var ras = zooee.backends.raster.RasterBackend.init(gpa);
