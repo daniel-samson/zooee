@@ -559,7 +559,27 @@ pub const Window = struct {
         const bounds = msg(NSRect, struct {}, view, sel("bounds"), .{});
         const loc: NSPoint = .{ .x = x, .y = bounds.h - y };
         _ = msg(bool, struct { id, NSPoint, id }, m, sel("popUpMenuPositioningItem:atLocation:inView:"), .{ null, loc, view });
-        return if (menu_selected_id == 0) null else menu_selected_id;
+        const r = menu_selected_id;
+        menu_selected_id = 0; // clear so a later takeMenuCommand() isn't fooled
+        return if (r == 0) null else r;
+    }
+
+    /// Install `items` as the application menu bar (#129). Each top-level item
+    /// should carry a submenu (File, Edit, …); macOS shows the first as the app
+    /// menu. Chosen items are reported via `takeMenuCommand`.
+    pub fn setMenuBar(self: *Window, items: []const menu_mod.Item) void {
+        _ = self;
+        const app = msg(id, struct {}, cls("NSApplication"), sel("sharedApplication"), .{});
+        _ = msg(void, struct { id }, app, sel("setMainMenu:"), .{buildMenu(items)});
+    }
+
+    /// Drain the most recent menu-bar selection (#129): returns the chosen
+    /// item id once, then null until the next selection. Poll each frame.
+    pub fn takeMenuCommand(self: *Window) ?u32 {
+        _ = self;
+        const r = menu_selected_id;
+        menu_selected_id = 0;
+        return if (r == 0) null else r;
     }
 
     pub fn minimise(self: *Window) void {
