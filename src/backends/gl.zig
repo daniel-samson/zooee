@@ -802,6 +802,111 @@ pub const PathRenderer = struct {
     }
 };
 
+// Stroked polyline (#120). Same v_px top-down pixel pos; the PS keeps a
+// fragment within hw² (squared half-width) of any segment — geometry.segDist2.
+const stroke_frag: [*:0]const u8 =
+    \\#version 120
+    \\uniform vec2 pts[64];
+    \\uniform int count;
+    \\uniform float hw2;
+    \\uniform int closed;
+    \\uniform vec4 color;
+    \\varying vec2 v_px;
+    \\float segd2(vec2 a, vec2 b, vec2 p){ vec2 v=b-a; vec2 w=p-a; float vv=dot(v,v); float t=(vv>0.0)?clamp(dot(w,v)/vv,0.0,1.0):0.0; vec2 d=a+t*v-p; return dot(d,d); }
+    \\void main(){
+    \\  vec2 p = v_px;
+    \\  int last = (closed != 0) ? count : count - 1;
+    \\  bool hit = false;
+    \\  for (int i = 0; i < 64; i++) {
+    \\    if (i >= last) break;
+    \\    vec2 a = pts[i]; vec2 b = pts[int(mod(float(i + 1), float(count)))];
+    \\    if (segd2(a, b, p) <= hw2) { hit = true; break; }
+    \\  }
+    \\  if (!hit) discard;
+    \\  gl_FragColor = color;
+    \\}
+;
+
+/// Strokes a polyline (#120) — the GL port of geometry.pointNearPolyline.
+pub const StrokeRenderer = struct {
+    gl: Gl,
+    program: GLuint,
+    vao: GLuint,
+    vbo: GLuint,
+    pos_loc: GLuint,
+    u_viewport: GLint,
+    u_pts: GLint,
+    u_count: GLint,
+    u_hw2: GLint,
+    u_closed: GLint,
+    u_color: GLint,
+    vw: f32 = 0,
+    vh: f32 = 0,
+
+    pub fn init() Error!StrokeRenderer {
+        const gl = try Gl.load();
+        const vs = QuadRenderer.compile(gl, GL_VERTEX_SHADER, path_vert) orelse return error.NoContext;
+        const fs = QuadRenderer.compile(gl, GL_FRAGMENT_SHADER, stroke_frag) orelse return error.NoContext;
+        const prog = gl.createProgram();
+        gl.attachShader(prog, vs);
+        gl.attachShader(prog, fs);
+        gl.linkProgram(prog);
+        var ok: GLint = 0;
+        gl.getProgramiv(prog, GL_LINK_STATUS, &ok);
+        if (ok == 0) return error.NoContext;
+        var vao: GLuint = 0;
+        gl.genVertexArrays(1, @ptrCast(&vao));
+        var vbo: GLuint = 0;
+        gl.genBuffers(1, @ptrCast(&vbo));
+        return .{
+            .gl = gl,
+            .program = prog,
+            .vao = vao,
+            .vbo = vbo,
+            .pos_loc = @intCast(gl.getAttribLocation(prog, "pos")),
+            .u_viewport = gl.getUniformLocation(prog, "viewport"),
+            .u_pts = gl.getUniformLocation(prog, "pts"),
+            .u_count = gl.getUniformLocation(prog, "count"),
+            .u_hw2 = gl.getUniformLocation(prog, "hw2"),
+            .u_closed = gl.getUniformLocation(prog, "closed"),
+            .u_color = gl.getUniformLocation(prog, "color"),
+        };
+    }
+
+    pub fn stroke(self: *StrokeRenderer, points: []const geometry.Point, hw: f32, color: [4]f32, closed: bool) void {
+        if (points.len < 2) return;
+        const gl = self.gl;
+        const n = @min(points.len, 64);
+        var flat: [128]f32 = undefined;
+        var minx = points[0].x;
+        var miny = points[0].y;
+        var maxx = points[0].x;
+        var maxy = points[0].y;
+        for (0..n) |i| {
+            flat[i * 2] = points[i].x;
+            flat[i * 2 + 1] = points[i].y;
+            minx = @min(minx, points[i].x);
+            miny = @min(miny, points[i].y);
+            maxx = @max(maxx, points[i].x);
+            maxy = @max(maxy, points[i].y);
+        }
+        gl.useProgram(self.program);
+        gl.uniform2f(self.u_viewport, self.vw, self.vh);
+        gl.uniform2fv(self.u_pts, @intCast(n), &flat);
+        gl.uniform1i(self.u_count, @intCast(n));
+        gl.uniform1f(self.u_hw2, hw * hw);
+        gl.uniform1i(self.u_closed, if (closed) 1 else 0);
+        gl.uniform4f(self.u_color, color[0], color[1], color[2], color[3]);
+        const verts = [_]f32{ minx - hw, miny - hw, maxx + hw, miny - hw, minx - hw, maxy + hw, maxx + hw, maxy + hw };
+        gl.bindVertexArray(self.vao);
+        gl.bindBuffer(GL_ARRAY_BUFFER, self.vbo);
+        gl.bufferData(GL_ARRAY_BUFFER, @sizeOf(@TypeOf(verts)), &verts, GL_STATIC_DRAW);
+        gl.vertexAttribPointer(self.pos_loc, 2, GL_FLOAT, GL_FALSE, 0, @ptrFromInt(0));
+        gl.enableVertexAttribArray(self.pos_loc);
+        gl.drawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
+};
+
 const comp_vert: [*:0]const u8 =
     \\#version 120
     \\attribute vec2 pos;
@@ -1725,6 +1830,7 @@ pub const GlBackend = struct {
     grad: GradientRenderer,
     shadow: ShadowRenderer,
     path: PathRenderer,
+    stroke: StrokeRenderer,
     comp: LayerCompositor,
     rclip: RoundClipCompositor,
     /// Active group-opacity layers (#121): each holds its offscreen FBO +
@@ -1760,6 +1866,7 @@ pub const GlBackend = struct {
             .grad = try GradientRenderer.init(),
             .shadow = try ShadowRenderer.init(),
             .path = try PathRenderer.init(),
+            .stroke = try StrokeRenderer.init(),
             .comp = try LayerCompositor.init(),
             .rclip = try RoundClipCompositor.init(),
         };
@@ -1778,6 +1885,7 @@ pub const GlBackend = struct {
             .grad = try GradientRenderer.init(),
             .shadow = try ShadowRenderer.init(),
             .path = try PathRenderer.init(),
+            .stroke = try StrokeRenderer.init(),
             .comp = try LayerCompositor.init(),
             .rclip = try RoundClipCompositor.init(),
             .default_fb = true,
@@ -1826,6 +1934,7 @@ pub const GlBackend = struct {
         .draw_text = drawText,
         .draw_image = drawImage,
         .fill_path = fillPath,
+        .stroke_path = strokePath,
         .push_clip = pushClip,
         .pop_clip = popClip,
         .push_clip_rounded = pushClipRounded,
@@ -1975,6 +2084,14 @@ pub const GlBackend = struct {
         self.path.vw = @floatFromInt(self.width);
         self.path.vh = @floatFromInt(self.height);
         self.path.fill(points, col(color));
+    }
+
+    fn strokePath(ptr: *anyopaque, points: []const geometry.Point, width: f32, color: style.Color, closed: bool) void {
+        const self = self_(ptr);
+        enableBlend();
+        self.stroke.vw = @floatFromInt(self.width);
+        self.stroke.vh = @floatFromInt(self.height);
+        self.stroke.stroke(points, width * 0.5, col(color), closed);
     }
 
     fn applyScissor(self: *GlBackend) void {
