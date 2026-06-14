@@ -571,6 +571,32 @@ pub fn main(init: std.process.Init) !void {
             if (!scene_ok) backend_ok = false;
             try out.print("GL Backend vs raster [{s}]: bad_frac={d:.4} {s}\n", .{ scene.name, frac, if (scene_ok) "PASS" else "FAIL" });
         }
+        // Text layout (#115): wrapped paragraph + aligned line (text AA, 0.05).
+        {
+            const scene: zooee.fixtures.Scene = .{ .name = "text_layout", .width = 24, .height = 12, .draw = zooee.fixtures.drawTextLayout };
+            try zooee.fixtures.run(scene, glb.interface(), 8);
+            const glpx = try glb.readPixels();
+            var ras = zooee.backends.raster.RasterBackend.init(gpa);
+            defer ras.deinit();
+            try ras.setFont(zooee.test_font_ttf);
+            try zooee.fixtures.run(scene, ras.interface(), 8);
+            var bad: usize = 0;
+            const n = @min(glpx.len, ras.pixels.len) / 4;
+            for (0..n) |p| {
+                var md: u8 = 0;
+                for (0..3) |ch| {
+                    const a = glpx[p * 4 + ch];
+                    const bch = ras.pixels[p * 4 + ch];
+                    const d = if (a > bch) a - bch else bch - a;
+                    if (d > md) md = d;
+                }
+                if (md > 32) bad += 1;
+            }
+            const frac = @as(f32, @floatFromInt(bad)) / @as(f32, @floatFromInt(n));
+            const scene_ok = frac < 0.05;
+            if (!scene_ok) backend_ok = false;
+            try out.print("GL Backend vs raster [{s}]: bad_frac={d:.4} {s}\n", .{ scene.name, frac, if (scene_ok) "PASS" else "FAIL" });
+        }
         // Layout-integrated effects (#117/#121/#118 via Element): gradient +
         // rounded clip + opacity through the layout engine, vs raster.
         {

@@ -19,6 +19,7 @@ const std = @import("std");
 const geometry = @import("geometry.zig");
 const style = @import("style.zig");
 const backend_mod = @import("backend.zig");
+const text_mod = @import("text.zig");
 
 const Backend = backend_mod.Backend;
 const Rect = geometry.Rect;
@@ -73,6 +74,10 @@ pub const Element = struct {
     children: []const *const Element = &.{},
     text: ?[]const u8 = null,
     text_style: style.TextStyle = .{},
+    /// Wrap text to the content-box width (#115). Off = single line (only
+    /// explicit newlines split). Honors `text_align`.
+    text_wrap: bool = false,
+    text_align: text_mod.Align = .left,
 
     // Filled path (#120): a closed polygon in the element's LOCAL coords
     // (relative to its border-box origin), filled with `path_color` (even-odd).
@@ -198,7 +203,11 @@ fn renderNode(b: Backend, placements: []const Placement, i: *usize) void {
     }
     if (el.text) |t| {
         const inner = contentBox(el, p.rect);
-        b.drawText(inner.origin(), t, el.text_style);
+        if (el.text_wrap or hasNewline(t)) {
+            drawWrappedText(b, el, t, inner);
+        } else {
+            b.drawText(inner.origin(), t, el.text_style);
+        }
     }
 
     // Scroll viewport (#96): clip children to the content box and pan them by
@@ -216,6 +225,61 @@ fn renderNode(b: Backend, placements: []const Placement, i: *usize) void {
 
     if (clipped) b.popClip();
     if (layered) b.popLayer();
+}
+
+fn hasNewline(t: []const u8) bool {
+    return std.mem.indexOfScalar(u8, t, '\n') != null;
+}
+
+/// Measurement bridge: a `text.Measurer` backed by `Backend.measureText` at a
+/// fixed style, for the wrapping/alignment pass (#115).
+const MeasureCtx = struct {
+    b: Backend,
+    style: style.TextStyle,
+    fn measure(ctx: *const anyopaque, s: []const u8) f32 {
+        const self: *const MeasureCtx = @ptrCast(@alignCast(ctx));
+        return self.b.measureText(s, self.style).width;
+    }
+};
+
+/// Measure wrapped/multiline text: the block width and total height for the
+/// given content width (#115). `wrap_w` null = only explicit newlines split.
+fn measureWrapped(b: Backend, el: *const Element, t: []const u8, wrap_w: ?f32) Size {
+    var buf: [16 * 1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    var ctx: MeasureCtx = .{ .b = b, .style = el.text_style };
+    const m: text_mod.Measurer = .{ .ctx = &ctx, .measure_fn = MeasureCtx.measure };
+    const line_h = b.measureText("Ag", el.text_style).height;
+    var lay = text_mod.layout(fba.allocator(), t, m, .{
+        .max_width = wrap_w,
+        .@"align" = el.text_align,
+        .line_height = line_h,
+    }) catch return b.measureText(t, el.text_style);
+    defer lay.deinit(fba.allocator());
+    return .{ .width = lay.width, .height = lay.height };
+}
+
+/// Lay out `t` into wrapped/aligned lines within `inner` and draw each line.
+/// Uses a stack buffer for the line list (no per-frame heap); very long
+/// paragraphs beyond the buffer fall back to a single drawText.
+fn drawWrappedText(b: Backend, el: *const Element, t: []const u8, inner: Rect) void {
+    var buf: [16 * 1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    var ctx: MeasureCtx = .{ .b = b, .style = el.text_style };
+    const m: text_mod.Measurer = .{ .ctx = &ctx, .measure_fn = MeasureCtx.measure };
+    const line_h = b.measureText("Ag", el.text_style).height;
+    var lay = text_mod.layout(fba.allocator(), t, m, .{
+        .max_width = if (el.text_wrap) inner.width else null,
+        .@"align" = el.text_align,
+        .line_height = line_h,
+    }) catch {
+        b.drawText(inner.origin(), t, el.text_style);
+        return;
+    };
+    defer lay.deinit(fba.allocator());
+    for (lay.lines) |ln| {
+        b.drawText(.{ .x = inner.x + ln.x, .y = inner.y + ln.y }, ln.slice(t), el.text_style);
+    }
 }
 
 /// The content box: border-box minus border widths and padding.
@@ -237,7 +301,14 @@ fn measure(b: Backend, el: *const Element) Size {
 
     var content: Size = .{};
     if (el.text) |t| {
-        content = b.measureText(t, el.text_style);
+        if ((el.text_wrap and el.width != null) or hasNewline(t)) {
+            // Wrapped/multiline text reserves the full block height so siblings
+            // flow below it (#115).
+            const wrap_w: ?f32 = if (el.text_wrap and el.width != null) el.width.? - chrome_w else null;
+            content = measureWrapped(b, el, t, wrap_w);
+        } else {
+            content = b.measureText(t, el.text_style);
+        }
     } else if (el.children.len > 0) {
         var main: f32 = 0;
         var cross: f32 = 0;
