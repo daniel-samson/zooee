@@ -68,6 +68,20 @@ fn cls(comptime name: [:0]const u8) Class {
     return objc_getClass(name.ptr);
 }
 
+/// Push a fresh NSAutoreleasePool. Metal creates a swarm of autoreleased
+/// objects per frame — the CAMetalDrawable from `nextDrawable`, render-pass
+/// descriptors, command buffers — and without draining a pool each frame they
+/// pile up until the layer's small drawable pool exhausts (the loop stalls) or
+/// memory balloons. The run loop wraps every frame in push/drain. Returns the
+/// pool to hand to `drainPool`.
+pub fn pushPool() id {
+    return msg(id, struct {}, msg(id, struct {}, cls("NSAutoreleasePool"), sel("alloc"), .{}), sel("init"), .{});
+}
+
+pub fn drainPool(pool: id) void {
+    _ = msg(void, struct {}, pool, sel("drain"), .{});
+}
+
 fn nsString(text: [*:0]const u8) id {
     return msg(id, struct { [*:0]const u8 }, cls("NSString"), sel("stringWithUTF8String:"), .{text});
 }

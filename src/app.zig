@@ -489,6 +489,11 @@ fn runWindowMetal(
         placements: *[]layout_mod.Placement,
 
         fn draw(self: *@This()) void {
+            // Drain this frame's autoreleased Metal objects (drawable, command
+            // buffer, descriptors) so they don't pile up across frames — covers
+            // both the loop and the modal-resize redraw callback.
+            const pool = metal_backend.pushPool();
+            defer metal_backend.drainPool(pool);
             _ = self.arena.reset(.retain_capacity);
             const a = self.arena.allocator();
             const px = platform.contentPixelSize(self.win);
