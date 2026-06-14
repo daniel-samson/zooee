@@ -117,6 +117,16 @@ pub fn Driver(comptime Model: type, comptime Msg: type) type {
             return cmd;
         }
 
+        /// A discrete wheel scroll (line unit) at a point (#126).
+        pub fn scroll(self: *Self, x: f32, y: f32, dx: f32, dy: f32) !Command {
+            return self.send(.{ .scroll = .{ .position = .{ .x = x, .y = y }, .dx = dx, .dy = dy, .unit = .line } });
+        }
+
+        /// A smooth (pixel-unit) trackpad scroll with an explicit phase (#126).
+        pub fn scrollPixel(self: *Self, x: f32, y: f32, dx: f32, dy: f32, phase: event_mod.ScrollPhase) !Command {
+            return self.send(.{ .scroll = .{ .position = .{ .x = x, .y = y }, .dx = dx, .dy = dy, .unit = .pixel, .phase = phase } });
+        }
+
         pub fn key(self: *Self, k: event_mod.Key) !Command {
             return self.send(.{ .key_down = .{ .key = k } });
         }
@@ -166,6 +176,7 @@ const Toggle = struct {
     on: bool = false,
     keys: u32 = 0,
     chars: u32 = 0,
+    scroll_y: f32 = 0,
 
     const Msg = enum { tapped };
 
@@ -199,6 +210,11 @@ const Toggle = struct {
         switch (ev) {
             .key_down => self.keys += 1,
             .text => self.chars += 1,
+            .scroll => |s| {
+                // Clamp to a 0..100 content range — the typical app pattern.
+                self.scroll_y = std.math.clamp(self.scroll_y + s.dy * 10, 0, 100);
+                return .redraw;
+            },
             else => {},
         }
         return .none;
@@ -248,6 +264,19 @@ test "scripted sequence: two clicks return to the start state" {
     const script = [_]struct { x: f32, y: f32 }{ .{ .x = 5, .y = 5 }, .{ .x = 5, .y = 5 } };
     for (script) |s| _ = try d.click(s.x, s.y);
     try testing.expect(!model.on); // toggled twice
+}
+
+test "wheel scroll routes to onEvent and updates + clamps offset" {
+    var model: Toggle = .{};
+    var d = try Driver(Toggle, Toggle.Msg).init(testing.allocator, &model, .{ .width = 40, .height = 20 });
+    defer d.deinit();
+    const cmd = try d.scroll(10, 10, 0, 3); // 3 lines → +30
+    try testing.expectEqual(Command.redraw, cmd);
+    try testing.expectApproxEqAbs(@as(f32, 30), model.scroll_y, 1e-3);
+    _ = try d.scroll(10, 10, 0, 20); // +200 but clamps at 100
+    try testing.expectApproxEqAbs(@as(f32, 100), model.scroll_y, 1e-3);
+    _ = try d.scrollPixel(10, 10, 0, -50, .momentum); // back down, clamps at 0
+    try testing.expectApproxEqAbs(@as(f32, 0), model.scroll_y, 1e-3);
 }
 
 test "resize relays out to the new viewport" {
