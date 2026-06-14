@@ -44,6 +44,8 @@ pub const font = struct {
     pub const raster = @import("font/raster.zig");
     pub const system = @import("font/system.zig");
     pub const atlas = @import("font/atlas.zig");
+    pub const fontset = @import("font/fontset.zig");
+    pub const FontSet = fontset.FontSet;
 };
 
 pub const platform = struct {
