@@ -122,6 +122,63 @@ extern "kernel32" fn GetModuleHandleW(?[*:0]const u16) callconv(WINAPI) HINSTANC
 
 const core_event = @import("../event.zig");
 const cursor_mod = @import("../cursor.zig");
+const clipboard_mod = @import("../clipboard.zig");
+
+// System clipboard (#19/#209) via the Win32 clipboard API + CF_UNICODETEXT.
+const CF_UNICODETEXT: u32 = 13;
+const GMEM_MOVEABLE: u32 = 0x0002;
+extern "user32" fn OpenClipboard(?HWND) callconv(WINAPI) win.BOOL;
+extern "user32" fn CloseClipboard() callconv(WINAPI) win.BOOL;
+extern "user32" fn EmptyClipboard() callconv(WINAPI) win.BOOL;
+extern "user32" fn GetClipboardData(u32) callconv(WINAPI) ?*anyopaque;
+extern "user32" fn SetClipboardData(u32, ?*anyopaque) callconv(WINAPI) ?*anyopaque;
+extern "kernel32" fn GlobalAlloc(u32, usize) callconv(WINAPI) ?*anyopaque;
+extern "kernel32" fn GlobalLock(?*anyopaque) callconv(WINAPI) ?*anyopaque;
+extern "kernel32" fn GlobalUnlock(?*anyopaque) callconv(WINAPI) win.BOOL;
+
+/// System clipboard backed by the Win32 clipboard (#209). Implements the core
+/// `Clipboard` interface, mirroring the macOS `SystemClipboard`. Cross-app
+/// interop needs on-device QA (no hosted GUI runner).
+pub const SystemClipboard = struct {
+    gpa: std.mem.Allocator,
+
+    pub fn init(gpa: std.mem.Allocator) SystemClipboard {
+        return .{ .gpa = gpa };
+    }
+
+    pub fn interface(self: *SystemClipboard) clipboard_mod.Clipboard {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable: clipboard_mod.Clipboard.VTable = .{ .get_text = getText, .set_text = setText };
+
+    fn getText(ptr: *anyopaque, gpa: std.mem.Allocator) anyerror!?[]u8 {
+        _ = ptr;
+        if (OpenClipboard(null) == 0) return null;
+        defer _ = CloseClipboard();
+        const h = GetClipboardData(CF_UNICODETEXT) orelse return null;
+        const p = GlobalLock(h) orelse return null;
+        defer _ = GlobalUnlock(h);
+        const u16ptr: [*:0]const u16 = @ptrCast(@alignCast(p));
+        return try std.unicode.utf16LeToUtf8Alloc(gpa, std.mem.span(u16ptr));
+    }
+
+    fn setText(ptr: *anyopaque, text: []const u8) anyerror!void {
+        const self: *SystemClipboard = @ptrCast(@alignCast(ptr));
+        const u16buf = try std.unicode.utf8ToUtf16LeAllocZ(self.gpa, text);
+        defer self.gpa.free(u16buf);
+        const h = GlobalAlloc(GMEM_MOVEABLE, (u16buf.len + 1) * 2) orelse return error.OutOfMemory;
+        const dst = GlobalLock(h) orelse return error.OutOfMemory;
+        const dstp: [*]u16 = @ptrCast(@alignCast(dst));
+        @memcpy(dstp[0..u16buf.len], u16buf);
+        dstp[u16buf.len] = 0;
+        _ = GlobalUnlock(h);
+        if (OpenClipboard(null) == 0) return error.AccessDenied;
+        defer _ = CloseClipboard();
+        _ = EmptyClipboard();
+        _ = SetClipboardData(CF_UNICODETEXT, h); // system takes ownership of h
+    }
+};
 /// Native windows emit the same core events as the terminal session, so
 /// one app loop drives every surface (#5).
 pub const Event = core_event.Event;
