@@ -24,7 +24,16 @@ const system_font = @import("font/system.zig");
 const geometry = @import("geometry.zig");
 const display = @import("display.zig");
 const theme_mod = @import("theme.zig");
+const style_mod = @import("style.zig");
 pub const Theme = theme_mod.Theme;
+
+/// The Model's current backend clear color, if it exposes an optional
+/// `background() Color` hook (theming) — lets a runtime theme change track the
+/// window/backdrop color. Null when the model has no such hook.
+fn modelBackground(comptime Model: type, model: *Model) ?style_mod.Color {
+    if (@hasDecl(Model, "background")) return model.background();
+    return null;
+}
 
 pub const Command = enum { none, redraw, quit };
 
@@ -285,6 +294,8 @@ pub fn runWindow(
         placements: *[]layout_mod.Placement,
 
         fn draw(self: *@This()) void {
+            // Runtime theme changes track the clear color (theming toggle).
+            if (@hasDecl(Model, "background")) self.raster.clear_color = self.model.background();
             _ = self.arena.reset(.retain_capacity);
             const a = self.arena.allocator();
             const px = platform.contentPixelSize(self.win);
@@ -410,6 +421,7 @@ fn runWindowGl(
             }
         }
         if (animate(Model, model, dt) == .redraw) dirty = true;
+        if (modelBackground(Model, model)) |c| glb.clear_color = c.rgbaF(); // theming toggle
 
         if (dirty) {
             // Headless capture hook: render once, read the GL back buffer,
@@ -494,6 +506,8 @@ fn runWindowMetal(
             // both the loop and the modal-resize redraw callback.
             const pool = metal_backend.pushPool();
             defer metal_backend.drainPool(pool);
+            // Runtime theme changes track the clear color (theming toggle).
+            if (modelBackground(Model, self.model)) |c| self.mb.clear_color = c.rgbaF();
             _ = self.arena.reset(.retain_capacity);
             const a = self.arena.allocator();
             const px = platform.contentPixelSize(self.win);
@@ -635,6 +649,7 @@ fn runWindowD3d(
             }
         }
         if (animate(Model, model, dt) == .redraw) dirty = true;
+        if (modelBackground(Model, model)) |c| db.clear_color = c.rgbaF(); // theming toggle
 
         if (dirty) {
             // Headless capture hook: render one frame to the offscreen RT,

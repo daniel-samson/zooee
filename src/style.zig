@@ -19,6 +19,16 @@ pub const Color = struct {
     pub fn rgb(r: u8, g: u8, b: u8) Color {
         return .{ .r = r, .g = g, .b = b };
     }
+
+    /// The color as a 0..1 RGBA quad — the form the GPU clear paths want.
+    pub fn rgbaF(self: Color) [4]f32 {
+        return .{
+            @as(f32, @floatFromInt(self.r)) / 255.0,
+            @as(f32, @floatFromInt(self.g)) / 255.0,
+            @as(f32, @floatFromInt(self.b)) / 255.0,
+            @as(f32, @floatFromInt(self.a)) / 255.0,
+        };
+    }
 };
 
 pub const BorderSide = struct {
