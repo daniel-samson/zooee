@@ -22,7 +22,33 @@ const pages = [_]Page{
     .{ .name = "List", .body = "A selectable list — the master/nav pattern. Each row dispatches on click; the selected row is highlighted. (The sidebar on the left is itself a List.) Virtualization (#29) and keyboard nav (#16) are follow-ups." },
     .{ .name = "Scroll", .body = "A scroll viewport: a fixed-size box that clips its content and pans it on wheel/trackpad. Offsets are clamped to the content extent. Scroll inside the box below." },
     .{ .name = "Card", .body = "Surfaces / panels: a background, rounded corners, an optional border, and an elevation shadow. The building block for content blocks." },
+    .{ .name = "Selection", .body = "Checkbox, toggle/switch, and radio group — boolean and single-choice selection. Click any control to change it. Checked state is prop-driven; clicks dispatch on_change." },
 };
+
+/// Message ids for the Selection page's interactive controls.
+const sel_check: u32 = 2000;
+const sel_toggle: u32 = 2001;
+const sel_radio_base: u32 = 2010; // +0/+1/+2 for the three radio options
+
+/// Live examples for the Selection page (#277): checkbox, toggle, radio group.
+fn selectionExamples(u: *ui.Ui, check_on: bool, toggle_on: bool, radio: usize) !Widget {
+    const opts = [_][]const u8{ "Small", "Medium", "Large" };
+    const radios = try u.arena.alloc(Widget, opts.len);
+    for (opts, 0..) |name, i| radios[i] = try u.radio(.{
+        .checked = (radio == i),
+        .label = name,
+        .on_change = sel_radio_base + @as(u32, @intCast(i)),
+    });
+    return u.column(.{ .gap = 18 }, &.{
+        try example(u, "checkbox", try u.checkbox(.{ .checked = check_on, .label = "I agree to the terms", .on_change = sel_check })),
+        try example(u, "toggle / switch", try u.toggle(.{ .checked = toggle_on, .label = "Wi-Fi", .on_change = sel_toggle })),
+        try example(u, "radio group (single choice)", try u.column(.{ .gap = 8 }, radios)),
+        try example(u, "disabled states", try u.row(.{ .gap = 20 }, &.{
+            try u.checkbox(.{ .checked = true, .label = "Checked", .disabled = true }),
+            try u.toggle(.{ .checked = true, .label = "On", .disabled = true }),
+        })),
+    });
+}
 
 /// Live examples for the Card page (#275): elevation levels + a bordered card.
 fn cardExamples(u: *ui.Ui) !Widget {
@@ -167,6 +193,9 @@ const Docs = struct {
     selected: usize = 0,
     list_demo: usize = 1, // selected row on the List page's demo
     scroll_y: f32 = 0, // offset for the Scroll page's viewport
+    sel_check: bool = false, // Selection page: checkbox
+    sel_toggle: bool = true, // Selection page: toggle
+    sel_radio: usize = 1, // Selection page: radio choice
 
     pub fn viewUi(self: *Docs, u: *ui.Ui) !Widget {
         // Master: a selectable list of pages — dogfooding the List widget (#273).
@@ -199,6 +228,8 @@ const Docs = struct {
             try blocks.append(u.arena, try scrollExamples(u, self.scroll_y));
         } else if (std.mem.eql(u8, page.name, "Card")) {
             try blocks.append(u.arena, try cardExamples(u));
+        } else if (std.mem.eql(u8, page.name, "Selection")) {
+            try blocks.append(u.arena, try selectionExamples(u, self.sel_check, self.sel_toggle, self.sel_radio));
         }
         const detail = try u.column(.{ .grow = 1, .padding = .all(28), .gap = 14 }, blocks.items);
 
@@ -207,6 +238,17 @@ const Docs = struct {
 
     pub fn update(self: *Docs, msg: Msg) zooee.app.Command {
         const raw: u32 = @intFromEnum(msg);
+        // Selection-page controls (base 2000) — checked first (range overlaps list).
+        if (raw == sel_check) {
+            self.sel_check = !self.sel_check;
+            return .redraw;
+        } else if (raw == sel_toggle) {
+            self.sel_toggle = !self.sel_toggle;
+            return .redraw;
+        } else if (raw >= sel_radio_base and raw < sel_radio_base + 3) {
+            self.sel_radio = raw - sel_radio_base;
+            return .redraw;
+        }
         // List-page demo rows (base 1000) vs sidebar page selection.
         if (raw >= list_demo_base) {
             self.list_demo = raw - list_demo_base;
