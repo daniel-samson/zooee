@@ -82,6 +82,10 @@ const Demo = struct {
     /// Set when the user picks File → Open…; drained by the loop, which then
     /// shows the native file dialog (#129).
     want_open: bool = false,
+    /// Text queued for the system clipboard by Copy (#178); drained by the loop.
+    clip_out: ?[]const u8 = null,
+    /// Set by Paste; the loop reads the clipboard and calls onPaste (#178).
+    want_paste: bool = false,
     /// Buffer backing `last_action` when it must hold a formatted string (the
     /// opened file path); literals are used otherwise.
     action_buf: [256]u8 = undefined,
@@ -125,8 +129,11 @@ const Demo = struct {
     /// App-loop hook (#129): handle a chosen menu item id (context or menu bar).
     pub fn onMenuCommand(self: *Demo, id: u32) zooee.app.Command {
         switch (@as(MenuId, @enumFromInt(id))) {
-            .copy => self.last_action = "copied selection",
-            .paste => self.last_action = "pasted from clipboard",
+            .copy => {
+                self.clip_out = items[self.selected]; // copy the selected row label
+                self.last_action = std.fmt.bufPrint(&self.action_buf, "copied: {s}", .{items[self.selected]}) catch "copied";
+            },
+            .paste => self.want_paste = true, // loop reads the clipboard → onPaste
             .inspect => {
                 self.inspect = !self.inspect;
                 self.last_action = if (self.inspect) "dev inspect ON" else "dev inspect OFF";
@@ -157,6 +164,27 @@ const Demo = struct {
     pub fn onFileChosen(self: *Demo, path: []const u8) zooee.app.Command {
         const base = std.fs.path.basename(path);
         self.last_action = std.fmt.bufPrint(&self.action_buf, "opened: {s}", .{base}) catch "opened a file";
+        return .redraw;
+    }
+
+    /// App-loop hook (#178): drain text queued by Copy for the system clipboard.
+    pub fn takeClipboardWrite(self: *Demo) ?[]const u8 {
+        const t = self.clip_out;
+        self.clip_out = null;
+        return t;
+    }
+
+    /// App-loop hook (#178): drain a pending Paste request.
+    pub fn requestPaste(self: *Demo) bool {
+        const r = self.want_paste;
+        self.want_paste = false;
+        return r;
+    }
+
+    /// App-loop hook (#178): the loop read this text from the system clipboard.
+    pub fn onPaste(self: *Demo, text: []const u8) zooee.app.Command {
+        const n = @min(text.len, 40);
+        self.last_action = std.fmt.bufPrint(&self.action_buf, "pasted: {s}", .{text[0..n]}) catch "pasted";
         return .redraw;
     }
 
