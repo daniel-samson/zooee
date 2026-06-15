@@ -33,7 +33,7 @@ const dialog = @import("dialog.zig");
 /// `viewUi(ui) Widget` hook (lowered to Elements via `Ui`), else the raw
 /// `view(arena, scale) *Element` contract. Lets models adopt the widget API
 /// without changing the loops.
-fn buildTree(comptime Model: type, model: *Model, arena: std.mem.Allocator, scale: f32) !*const layout_mod.Element {
+pub fn buildTree(comptime Model: type, model: *Model, arena: std.mem.Allocator, scale: f32) !*const layout_mod.Element {
     if (@hasDecl(Model, "viewUi")) {
         var u = ui_mod.Ui.init(arena);
         u.scale = scale;
