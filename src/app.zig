@@ -562,6 +562,10 @@ fn runWindowMetal(
         layer: *metal_backend.MetalLayer,
         arena: *std.heap.ArenaAllocator,
         placements: *[]layout_mod.Placement,
+        /// Present this frame synchronously (low-latency) instead of via the
+        /// display link. Set during interactive pointer drags so dragged content
+        /// (e.g. a split divider) stays under the cursor, same as a live resize.
+        sync_present: bool = false,
 
         fn draw(self: *@This()) void {
             // Drain this frame's autoreleased Metal objects (drawable, command
@@ -585,7 +589,7 @@ fn runWindowMetal(
             self.backend.endFrame() catch return;
             // Transaction-synced present only during a live-resize drag; async
             // (display-link-paced) otherwise, so steady animation stays smooth.
-            self.mb.presentTo(self.layer, self.win.inLiveResize());
+            self.mb.presentTo(self.layer, self.win.inLiveResize() or self.sync_present);
         }
     };
     var frame: Frame = .{ .model = model, .win = window, .backend = b, .mb = &mb, .layer = &layer, .arena = &frame_arena, .placements = &placements };
@@ -601,13 +605,16 @@ fn runWindowMetal(
     setupMenuBar(Model, window, model); // #129: install the native menu bar
     loop: while (true) {
         const dt = fl.delta(io);
+        var pointer_drag = false; // a pointer event drove this frame → present synced
         for (window.pumpEvents()) |ev| {
             applyCursor(Model, window, model, placements, ev, &last_cursor);
-            switch (dispatch(Model, Msg, model, ev, placements)) {
+            const cmd = dispatch(Model, Msg, model, ev, placements);
+            switch (cmd) {
                 .none => {},
                 .redraw => dirty = true,
                 .quit => break :loop,
             }
+            if (cmd == .redraw and isPointerEvent(ev)) pointer_drag = true;
             // Native right-click context menu (#129): pops at the click and
             // routes the choice through the model's onMenuCommand.
             if (handleContextMenu(Model, window, model, ev) == .redraw) dirty = true;
@@ -615,6 +622,7 @@ fn runWindowMetal(
         // Native menu-bar selections + file-open requests (#129).
         if (frameOsHooks(Model, window, model, gpa, io) == .redraw) dirty = true;
         if (animate(Model, model, dt) == .redraw) dirty = true;
+        frame.sync_present = pointer_drag; // low-latency present while dragging
 
         if (dirty) {
             // Headless capture hook: render one frame to the RT, read it, exit.
@@ -994,6 +1002,16 @@ fn applyCursor(comptime Model: type, window: anytype, model: *Model, placements:
         },
         else => {},
     }
+}
+
+/// True for pointer button/move events — used to flag a frame as an interactive
+/// drag so the Metal loop presents it synchronously (low latency) instead of via
+/// the display link (which buffers a frame and makes dragged content lag).
+fn isPointerEvent(ev: event_mod.Event) bool {
+    return switch (ev) {
+        .pointer_down, .pointer_up, .pointer_move => true,
+        else => false,
+    };
 }
 
 /// The model's active cursor override (#123), or null to fall back to geometric
