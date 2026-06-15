@@ -20,6 +20,7 @@ const std = @import("std");
 const layout_mod = @import("../layout.zig");
 const event_mod = @import("../event.zig");
 const app_mod = @import("../app.zig");
+const ui_mod = @import("../ui.zig");
 const raster_mod = @import("../backends/raster.zig");
 const geometry = @import("../geometry.zig");
 
@@ -77,7 +78,9 @@ pub fn Driver(comptime Model: type, comptime Msg: type) type {
             if (self.result) |*r| r.deinit(self.arena.allocator());
             _ = self.arena.reset(.retain_capacity);
             const a = self.arena.allocator();
-            const root = try self.model.view(a, self.scale);
+            // Build through the same path the real loops use (#4): prefers a
+            // `viewUi(ui) Widget` hook, falls back to `view(arena, scale)`.
+            const root = try app_mod.buildTree(Model, self.model, a, self.scale);
             self.result = try layout_mod.layout(a, self.raster.interface(), root, self.viewport);
         }
 
@@ -355,6 +358,37 @@ test "click toggles model state and the rendered color" {
 
     _ = try d.render();
     try testing.expectEqual(@as(u8, 200), d.pixelAt(10, 10)[1]); // green.g after
+}
+
+// A widget-layer model: built with `viewUi` (host/composite, #4) instead of the
+// raw `view`. Proves the driver and the real loops dispatch widget clicks
+// through the same path (the thing that was hard to verify by pixel-clicking).
+const WidgetApp = struct {
+    hit: u32 = 0,
+    pub const Msg = enum(u32) { _ };
+    pub fn viewUi(self: *WidgetApp, u: *ui_mod.Ui) !ui_mod.Widget {
+        _ = self;
+        return u.button(.{ .label = "go", .on_click = 7 });
+    }
+    pub fn update(self: *WidgetApp, msg: Msg) Command {
+        self.hit = @intFromEnum(msg);
+        return .redraw;
+    }
+    pub fn onEvent(self: *WidgetApp, ev: event_mod.Event) Command {
+        _ = self;
+        _ = ev;
+        return .none;
+    }
+};
+
+test "viewUi widget button click dispatches through the real path (#4/#130)" {
+    var m: WidgetApp = .{};
+    var d = try Driver(WidgetApp, WidgetApp.Msg).init(testing.allocator, &m, .{ .width = 120, .height = 60 });
+    defer d.deinit();
+    _ = try d.render();
+    try testing.expectEqual(@as(u32, 0), m.hit);
+    _ = try d.click(2, 2); // inside the top-left button (its padding box)
+    try testing.expectEqual(@as(u32, 7), m.hit); // on_click=7 routed to update
 }
 
 test "click outside the element does not dispatch" {
