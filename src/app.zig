@@ -929,7 +929,35 @@ fn frameOsHooks(comptime Model: type, window: anytype, model: *Model, gpa: std.m
             } else |_| {}
         }
     }
+    // System clipboard (#178): copy text the model hands us, and on a paste
+    // request read the clipboard and deliver it to onPaste.
+    if (@hasDecl(Model, "takeClipboardWrite")) {
+        if (model.takeClipboardWrite()) |text| {
+            var clip = systemClipboard(window, gpa);
+            clip.interface().setText(text) catch {};
+        }
+    }
+    if (@hasDecl(Model, "requestPaste") and @hasDecl(Model, "onPaste")) {
+        if (model.requestPaste()) {
+            var clip = systemClipboard(window, gpa);
+            if (clip.interface().getText(gpa)) |maybe| {
+                if (maybe) |text| {
+                    defer gpa.free(text);
+                    if (model.onPaste(text) == .redraw) cmd = .redraw;
+                }
+            } else |_| {}
+        }
+    }
     return cmd;
+}
+
+/// Construct the platform clipboard. X11 needs the window (display + selection
+/// ownership); macOS/Windows use a global pasteboard and take the allocator.
+fn systemClipboard(window: anytype, gpa: std.mem.Allocator) WindowPlatform.SystemClipboard {
+    return if (builtin.os.tag == .linux)
+        WindowPlatform.SystemClipboard.init(window)
+    else
+        WindowPlatform.SystemClipboard.init(gpa);
 }
 
 /// On a pointer_move, resolve the cursor under the pointer and apply it to the

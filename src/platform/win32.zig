@@ -215,7 +215,7 @@ pub const SystemClipboard = struct {
 
     fn getText(ptr: *anyopaque, gpa: std.mem.Allocator) anyerror!?[]u8 {
         _ = ptr;
-        if (OpenClipboard(null) == 0) return null;
+        if (!OpenClipboard(null).toBool()) return null;
         defer _ = CloseClipboard();
         const h = GetClipboardData(CF_UNICODETEXT) orelse return null;
         const p = GlobalLock(h) orelse return null;
@@ -234,7 +234,7 @@ pub const SystemClipboard = struct {
         @memcpy(dstp[0..u16buf.len], u16buf);
         dstp[u16buf.len] = 0;
         _ = GlobalUnlock(h);
-        if (OpenClipboard(null) == 0) return error.AccessDenied;
+        if (!OpenClipboard(null).toBool()) return error.AccessDenied;
         defer _ = CloseClipboard();
         _ = EmptyClipboard();
         _ = SetClipboardData(CF_UNICODETEXT, h); // system takes ownership of h

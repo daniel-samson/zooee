@@ -357,7 +357,10 @@ pub const SystemClipboard = struct {
         var tries: usize = 0;
         while (tries < 100) : (tries += 1) {
             if (XCheckTypedEvent(w.display, SelectionNotify, &ev) != 0) break;
-            std.Thread.sleep(5 * std.time.ns_per_ms);
+            // 0.16 removed std.Thread.sleep in favour of Io-based sleep; this
+            // X11 path is synchronous and Linux-only, so use the raw syscall.
+            var ts: std.os.linux.timespec = .{ .sec = 0, .nsec = 5 * std.time.ns_per_ms };
+            _ = std.os.linux.nanosleep(&ts, null);
         } else return null;
         if (ev.xselection.property == 0) return null; // no owner / refused
         var atype: Atom = 0;
