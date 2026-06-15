@@ -771,26 +771,27 @@ pub const MetalExactRectRenderer = struct {
         \\    float2 px = u.rect.xy + corner[vid] * u.rect.zw;
         \\    return float4(px.x / u.viewport_hasbg.x * 2.0 - 1.0, 1.0 - px.y / u.viewport_hasbg.y * 2.0, 0, 1);
         \\}
-        \\static bool cornerOut(float2 p, float trad, float cx, float cy, float2 r0, float2 rsz) {
+        \\static bool cornerOut(float2 p, float trad, float cx, float cy, bool left, bool top) {
         \\    if (trad <= 0.0) return false;
-        \\    bool in_x = (cx <= r0.x + rsz.x * 0.5) ? (p.x < cx) : (p.x > cx);
-        \\    bool in_y = (cy <= r0.y + rsz.y * 0.5) ? (p.y < cy) : (p.y > cy);
+        \\    bool in_x = left ? (p.x < cx) : (p.x > cx);
+        \\    bool in_y = top  ? (p.y < cy) : (p.y > cy);
         \\    if (in_x && in_y) { float dx = p.x - cx; float dy = p.y - cy; return dx*dx + dy*dy > trad*trad; }
         \\    return false;
         \\}
         \\static bool insideRounded(float4 r, float4 rd, float2 p) {
         \\    if (p.x < r.x || p.x >= r.x + r.z || p.y < r.y || p.y >= r.y + r.w) return false;
         \\    float mx = min(r.z, r.w) * 0.5;
-        \\    float2 r0 = r.xy; float2 rsz = r.zw;
-        \\    // Clamp each corner radius BEFORE placing its center, else a radius
-        \\    // past half-height moves the center over the midline and the corner
-        \\    // renders square (pill clamp).
+        \\    // Clamp each corner radius BEFORE placing its center (so a radius past
+        \\    // half-height can't push the center past the midline), and pass each
+        \\    // corner's outward direction explicitly — inferring it from
+        \\    // center-vs-midline fails for an exact pill, where all centers sit on
+        \\    // the midline and the bottom corners would test the wrong half.
         \\    float tl = min(rd.x, mx); float tr = min(rd.y, mx);
         \\    float br = min(rd.z, mx); float bl = min(rd.w, mx);
-        \\    if (cornerOut(p, tl, r.x + tl,       r.y + tl,       r0, rsz)) return false;
-        \\    if (cornerOut(p, tr, r.x + r.z - tr, r.y + tr,       r0, rsz)) return false;
-        \\    if (cornerOut(p, br, r.x + r.z - br, r.y + r.w - br, r0, rsz)) return false;
-        \\    if (cornerOut(p, bl, r.x + bl,       r.y + r.w - bl, r0, rsz)) return false;
+        \\    if (cornerOut(p, tl, r.x + tl,       r.y + tl,       true,  true )) return false;
+        \\    if (cornerOut(p, tr, r.x + r.z - tr, r.y + tr,       false, true )) return false;
+        \\    if (cornerOut(p, br, r.x + r.z - br, r.y + r.w - br, false, false)) return false;
+        \\    if (cornerOut(p, bl, r.x + bl,       r.y + r.w - bl, true,  false)) return false;
         \\    return true;
         \\}
         \\static float4 borderColorAt(constant U& u, float2 p) {
