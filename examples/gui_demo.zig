@@ -610,6 +610,24 @@ const Demo = struct {
             .scroll_y = self.scroll_y * scale,
             .children = try arena.dupe(*const L.Element, &.{scroll_content}),
         };
+        // Taller boxes (#117): same corner-radius progression at a different
+        // aspect ratio (44×72), so the rounding is obvious and the max radius
+        // makes a vertical capsule (semicircle top + bottom). The last box uses
+        // a "max" radius (clamped to half the width).
+        const tall_radii = [_]f32{ 0, 8, 16, 22, 9999 };
+        const tall = try arena.alloc(L.Element, tall_radii.len);
+        const tall_ptrs = try arena.alloc(*const L.Element, tall_radii.len);
+        for (tall_radii, 0..) |rad, ti| {
+            tall[ti] = .{
+                .width = 44 * scale,
+                .height = 72 * scale,
+                .margin = .{ .right = 8 * scale },
+                .rect_style = .{ .background = row_colors[ti], .corner_radius = .all(rad * scale) },
+            };
+            tall_ptrs[ti] = &tall[ti];
+        }
+        const tall_row = try arena.create(L.Element);
+        tall_row.* = .{ .direction = .row, .margin = .{ .bottom = 12 * scale }, .children = tall_ptrs };
         // Text layout (#115): a wrapped, centered paragraph in a fixed-width box.
         const paragraph = try arena.create(L.Element);
         paragraph.* = .{
@@ -705,7 +723,7 @@ const Demo = struct {
                 .border = .all(2 * scale, if (self.pointer_inside) self.theme.accent else self.theme.border),
                 .corner_radius = .all(10 * scale),
             },
-            .children = try arena.dupe(*const L.Element, &.{ grad_bar, track, swatches, layers, card_wrap, icons, button, scroller, paragraph, drop_zone, ime_label, uni, shaping, deco }),
+            .children = try arena.dupe(*const L.Element, &.{ grad_bar, track, swatches, layers, card_wrap, icons, button, scroller, tall_row, paragraph, drop_zone, ime_label, uni, shaping, deco }),
         };
         return panel;
     }
