@@ -1380,6 +1380,25 @@ const MTLScissorRect = extern struct { x: u64, y: u64, width: u64, height: u64 }
 /// interface (backend.zig) so layout.render() drives Metal. Renders into an
 /// owned offscreen RT; one render encoder per frame, pipeline switched per
 /// draw. initOnLayer (windowed) lands in slice 7.
+/// Persistent text-measurement cache (#264). Shaping a run (cmap → kerning →
+/// ligatures → Arabic) is repeated for every text element on every frame and
+/// dominates layout time. The UI's text is overwhelmingly stable frame-to-frame,
+/// so memoizing (text, size, style) → Size makes relayout nearly free. Keyed by
+/// the byte content (owned copies), not the transient per-frame slice.
+const MeasureKey = struct { text: []const u8, size_bits: u32, bold: bool, italic: bool };
+const MeasureCtx = struct {
+    pub fn hash(_: MeasureCtx, k: MeasureKey) u64 {
+        var h = std.hash.Wyhash.init(0);
+        h.update(k.text);
+        h.update(std.mem.asBytes(&k.size_bits));
+        h.update(&.{ @intFromBool(k.bold), @intFromBool(k.italic) });
+        return h.final();
+    }
+    pub fn eql(_: MeasureCtx, a: MeasureKey, b: MeasureKey) bool {
+        return a.size_bits == b.size_bits and a.bold == b.bold and a.italic == b.italic and std.mem.eql(u8, a.text, b.text);
+    }
+};
+
 pub const MetalBackend = struct {
     gpa: std.mem.Allocator,
     ctx: MetalContext,
@@ -1414,6 +1433,9 @@ pub const MetalBackend = struct {
     rounds: std.ArrayList(RoundClip) = .empty,
     clip_ops: std.ArrayList(ClipOp) = .empty,
     fonts: ?fontset.FontSet = null,
+    /// (text, size, style) → measured Size (#264). Cleared when the font set
+    /// changes; freed in deinit. Keys own their text bytes.
+    measure_cache: std.HashMapUnmanaged(MeasureKey, geometry.Size, MeasureCtx, std.hash_map.default_max_load_percentage) = .empty,
     enc: id = null,
     cmdbuf: id = null,
     owns_ctx: bool = true,
@@ -1467,6 +1489,8 @@ pub const MetalBackend = struct {
     }
 
     pub fn deinit(self: *MetalBackend) void {
+        self.clearMeasureCache(); // free cached text keys (#264)
+        self.measure_cache.deinit(self.gpa);
         var it = self.glyphs.valueIterator();
         while (it.next()) |g| g.deinit();
         self.glyphs.deinit(self.gpa);
@@ -1549,10 +1573,12 @@ pub const MetalBackend = struct {
         var set: fontset.FontSet = .{};
         set.setFace(fontset.FontSet.regular, try ttf.Font.parse(data));
         self.fonts = set;
+        self.clearMeasureCache(); // metrics changed (#264)
     }
 
     pub fn setFontSet(self: *MetalBackend, set: fontset.FontSet) void {
         self.fonts = set;
+        self.clearMeasureCache(); // metrics changed (#264)
     }
 
     pub fn interface(self: *MetalBackend) Backend {
@@ -1912,11 +1938,30 @@ pub const MetalBackend = struct {
     fn measureText(ptr: *anyopaque, text: []const u8, ts: style.TextStyle) geometry.Size {
         const self = self_(ptr);
         if (self.fonts) |*set| {
-            const mtr = set.measure(text, ts.size, .{ .bold = ts.effectiveBold(), .italic = ts.italic });
-            return .{ .width = mtr.width, .height = mtr.height };
+            const key: MeasureKey = .{ .text = text, .size_bits = @bitCast(ts.size), .bold = ts.effectiveBold(), .italic = ts.italic };
+            if (self.measure_cache.getContext(key, .{})) |sz| return sz; // #264 hit
+            const mtr = set.measure(text, ts.size, .{ .bold = key.bold, .italic = key.italic });
+            const sz: geometry.Size = .{ .width = mtr.width, .height = mtr.height };
+            // Memoize with an owned key. Bound it so dynamic text can't grow it
+            // without limit; on OOM just skip caching (correctness unaffected).
+            if (self.measure_cache.count() >= 8192) self.clearMeasureCache();
+            if (self.gpa.dupe(u8, text)) |owned| {
+                var k = key;
+                k.text = owned;
+                self.measure_cache.putContext(self.gpa, k, sz, .{}) catch self.gpa.free(owned);
+            } else |_| {}
+            return sz;
         }
         const n = std.unicode.utf8CountCodepoints(text) catch text.len;
         return .{ .width = @as(f32, @floatFromInt(n)) * 8, .height = 16 };
+    }
+
+    /// Free the cached measurement keys and empty the map (#264). Called when
+    /// the font set changes (metrics invalidated) and on deinit.
+    fn clearMeasureCache(self: *MetalBackend) void {
+        var it = self.measure_cache.keyIterator();
+        while (it.next()) |k| self.gpa.free(k.text);
+        self.measure_cache.clearRetainingCapacity();
     }
 
     fn snap(ptr: *anyopaque, value: f32, axis: geometry.Axis) f32 {
