@@ -569,6 +569,9 @@ fn runWindowMetal(
         /// display link. Set during interactive pointer drags so dragged content
         /// (e.g. a split divider) stays under the cursor, same as a live resize.
         sync_present: bool = false,
+        io: std.Io,
+        /// Print a per-phase timing breakdown for this frame (ZOOEE_LATENCY).
+        profile: bool = false,
 
         fn draw(self: *@This()) void {
             // Drain this frame's autoreleased Metal objects (drawable, command
@@ -576,6 +579,16 @@ fn runWindowMetal(
             // both the loop and the modal-resize redraw callback.
             const pool = metal_backend.pushPool();
             defer metal_backend.drainPool(pool);
+            const prof = self.profile;
+            var t = if (prof) std.Io.Timestamp.now(self.io, .awake).nanoseconds else 0;
+            const lap = struct {
+                fn f(on: bool, iox: std.Io, prev: *i96) i64 {
+                    if (!on) return 0;
+                    const now = std.Io.Timestamp.now(iox, .awake).nanoseconds;
+                    defer prev.* = now;
+                    return @intCast(@divTrunc(now - prev.*, 1000));
+                }
+            }.f;
             // Runtime theme changes track the clear color (theming toggle).
             if (modelBackground(Model, self.model)) |c| self.mb.clear_color = c.rgbaF();
             _ = self.arena.reset(.retain_capacity);
@@ -584,18 +597,23 @@ fn runWindowMetal(
             self.layer.resize(@intCast(px.width), @intCast(px.height));
             const scale: f32 = @floatCast(px.scale);
             const root = buildTree(Model, self.model, a, scale) catch return;
+            const t_build = lap(prof, self.io, &t);
             const viewport: geometry.Size = .{ .width = @floatFromInt(px.width), .height = @floatFromInt(px.height) };
             const result = layout_mod.layout(a, self.backend, root, viewport) catch return;
+            const t_layout = lap(prof, self.io, &t);
             self.placements.* = result.placements;
             self.backend.beginFrame(viewport) catch return;
             layout_mod.render(self.backend, result);
             self.backend.endFrame() catch return;
+            const t_render = lap(prof, self.io, &t);
             // Transaction-synced present only during a live-resize drag; async
             // (display-link-paced) otherwise, so steady animation stays smooth.
             self.mb.presentTo(self.layer, self.win.inLiveResize() or self.sync_present);
+            const t_present = lap(prof, self.io, &t);
+            if (prof) std.debug.print("[latency] build {d}us  layout {d}us  render {d}us  present {d}us\n", .{ t_build, t_layout, t_render, t_present });
         }
     };
-    var frame: Frame = .{ .model = model, .win = window, .backend = b, .mb = &mb, .layer = &layer, .arena = &frame_arena, .placements = &placements };
+    var frame: Frame = .{ .model = model, .win = window, .backend = b, .mb = &mb, .layer = &layer, .arena = &frame_arena, .placements = &placements, .io = io };
     window.setRedraw(&frame, struct {
         fn call(p: ?*anyopaque) void {
             const f: *Frame = @ptrCast(@alignCast(p));
@@ -646,14 +664,8 @@ fn runWindowMetal(
                 try writePpm(gpa, io, path, pixels, mb.width, mb.height);
                 return;
             }
-            if (latency_log and pointer_drag) {
-                const t0 = std.Io.Timestamp.now(io, .awake).nanoseconds;
-                frame.draw();
-                const us = @divTrunc(std.Io.Timestamp.now(io, .awake).nanoseconds - t0, 1000);
-                std.debug.print("[latency] drag frame build+present: {d}us\n", .{us});
-            } else {
-                frame.draw();
-            }
+            frame.profile = latency_log and pointer_drag;
+            frame.draw();
             dirty = false;
         }
 
