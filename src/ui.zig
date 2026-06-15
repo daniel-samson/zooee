@@ -37,6 +37,7 @@ pub const Widget = union(enum) {
     button: Button,
     icon: Icon,
     list: List,
+    scroll: ScrollView,
     composite: Composite,
 };
 
@@ -166,6 +167,23 @@ pub const List = struct {
 /// Provisional selected-row highlight (replaced by a theme token in #21).
 const list_selected_bg = Color.rgb(60, 120, 240);
 
+/// Scroll viewport (host, #274): a fixed-size box that clips its content and
+/// pans it by `(scroll_x, scroll_y)` — the offsets are content-clamped by the
+/// layout engine (#96). Bind the offsets to model state and update them from
+/// scroll events (the loop routes wheel/trackpad to `onEvent`). Scrollbar
+/// visuals are a follow-up (#21 theme).
+pub const ScrollView = struct {
+    width: ?f32 = null,
+    height: ?f32 = null,
+    scroll_x: f32 = 0,
+    scroll_y: f32 = 0,
+    direction: layout.Direction = .column,
+    gap: f32 = 0,
+    padding: layout.EdgeInsets = .{},
+    background: ?Color = null,
+    children: []const Widget = &.{},
+};
+
 /// A composite widget: an arena-stored value + a generated expander that calls
 /// its `view(ui) !Widget`. Created via `Ui.widget`.
 pub const Composite = struct {
@@ -245,6 +263,13 @@ pub const Ui = struct {
         var l = opts;
         l.rows = try self.arena.dupe(ListRow, rows);
         return .{ .list = l };
+    }
+
+    /// Scroll viewport. `children` is copied into the arena (like the containers).
+    pub fn scroll(self: *Ui, opts: ScrollView, children: []const Widget) !Widget {
+        var sv = opts;
+        sv.children = try self.arena.dupe(Widget, children);
+        return .{ .scroll = sv };
     }
 
     /// Format text into the arena (for dynamic labels) — caller-owned for the frame.
@@ -358,6 +383,22 @@ pub const Ui = struct {
                     .gap = 2 * s,
                     .width = if (l.width) |lw| lw * s else null,
                     .children = rows,
+                };
+            },
+            .scroll => |sv| {
+                const kids = try self.arena.alloc(*const Element, sv.children.len);
+                for (sv.children, 0..) |c, i| kids[i] = try self.lower(c);
+                el.* = .{
+                    .direction = sv.direction,
+                    .gap = sv.gap * s,
+                    .padding = scaleInsets(sv.padding, s),
+                    .width = if (sv.width) |x| x * s else null,
+                    .height = if (sv.height) |x| x * s else null,
+                    .scroll = true,
+                    .scroll_x = sv.scroll_x * s,
+                    .scroll_y = sv.scroll_y * s,
+                    .children = kids,
+                    .rect_style = .{ .background = sv.background },
                 };
             },
             .composite => |c| return self.lower(try c.expand(c.ctx, self)),
@@ -546,6 +587,22 @@ test "lower: list rows are clickable; selected row is highlighted (#273)" {
     // Only the selected row paints a background.
     try testing.expect(el.children[0].rect_style.background == null);
     try testing.expect(el.children[1].rect_style.background != null);
+}
+
+test "lower: scroll view is a clamped viewport with offset+children (#274)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ui = Ui.init(arena.allocator());
+
+    const el = try ui.lower(try ui.scroll(.{ .width = 200, .height = 150, .scroll_y = 40 }, &.{
+        ui.text("a", .{}),
+        ui.text("b", .{}),
+    }));
+    try testing.expect(el.scroll);
+    try testing.expectEqual(@as(f32, 40), el.scroll_y);
+    try testing.expectEqual(@as(?f32, 200), el.width);
+    try testing.expectEqual(@as(?f32, 150), el.height);
+    try testing.expectEqual(@as(usize, 2), el.children.len);
 }
 
 test "fmt allocates a frame-owned label" {

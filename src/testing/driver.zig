@@ -424,6 +424,44 @@ test "viewUi list row click selects through the real path (#273/#130)" {
     try testing.expectEqual(@as(usize, 2), m.selected);
 }
 
+// A scroll-view model (#274): wheel events adjust the bound offset, which the
+// ScrollView renders; the layout engine clamps it to the content extent.
+const ScrollApp = struct {
+    offset: f32 = 0,
+    pub const Msg = enum(u32) { _ };
+    pub fn viewUi(self: *ScrollApp, u: *ui_mod.Ui) !ui_mod.Widget {
+        return u.scroll(.{ .width = 100, .height = 60, .scroll_y = self.offset }, &.{
+            u.text("line 1", .{}), u.text("line 2", .{}), u.text("line 3", .{}),
+            u.text("line 4", .{}), u.text("line 5", .{}), u.text("line 6", .{}),
+        });
+    }
+    pub fn update(self: *ScrollApp, msg: Msg) Command {
+        _ = self;
+        _ = msg;
+        return .none;
+    }
+    pub fn onEvent(self: *ScrollApp, ev: event_mod.Event) Command {
+        switch (ev) {
+            .scroll => |s| {
+                self.offset = @max(0, self.offset + s.dy * 10);
+                return .redraw;
+            },
+            else => {},
+        }
+        return .none;
+    }
+};
+
+test "viewUi scroll view: wheel updates the bound offset (#274/#130)" {
+    var m: ScrollApp = .{};
+    var d = try Driver(ScrollApp, ScrollApp.Msg).init(testing.allocator, &m, .{ .width = 120, .height = 80 });
+    defer d.deinit();
+    _ = try d.render();
+    try testing.expectEqual(@as(f32, 0), m.offset);
+    _ = try d.scroll(20, 20, 0, 3); // wheel down inside the viewport
+    try testing.expect(m.offset > 0);
+}
+
 test "click outside the element does not dispatch" {
     var model: Toggle = .{};
     var d = try Driver(Toggle, Toggle.Msg).init(testing.allocator, &model, .{ .width = 100, .height = 60 });
