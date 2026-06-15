@@ -38,6 +38,7 @@ pub const Widget = union(enum) {
     icon: Icon,
     list: List,
     scroll: ScrollView,
+    card: Card,
     composite: Composite,
 };
 
@@ -184,6 +185,40 @@ pub const ScrollView = struct {
     children: []const Widget = &.{},
 };
 
+/// Surface / Card / Panel (host, #275): a content container with a background,
+/// rounded corners, an optional border, and an elevation shadow (#119). Used for
+/// the detail blocks. Colors/elevation are provisional until the theme (#21).
+pub const Elevation = enum { none, low, medium, high };
+
+pub const Card = struct {
+    direction: layout.Direction = .column,
+    gap: f32 = 0,
+    padding: layout.EdgeInsets = layout.EdgeInsets.all(16),
+    width: ?f32 = null,
+    height: ?f32 = null,
+    background: ?Color = card_surface,
+    corner_radius: f32 = 10,
+    border_width: f32 = 0,
+    border_color: Color = card_border,
+    elevation: Elevation = .low,
+    children: []const Widget = &.{},
+};
+
+const card_surface = Color.rgb(38, 38, 44);
+const card_border = Color.rgb(70, 70, 78);
+
+/// Elevation → drop shadow (#119). Higher = larger offset + blur. The shadow's
+/// corner radius is set from the card's at lowering time.
+fn elevationShadow(e: Elevation) ?style.BoxShadow {
+    const shade = Color{ .r = 0, .g = 0, .b = 0, .a = 90 };
+    return switch (e) {
+        .none => null,
+        .low => .{ .color = shade, .dy = 1, .blur = 4 },
+        .medium => .{ .color = shade, .dy = 3, .blur = 10 },
+        .high => .{ .color = shade, .dy = 6, .blur = 20 },
+    };
+}
+
 /// A composite widget: an arena-stored value + a generated expander that calls
 /// its `view(ui) !Widget`. Created via `Ui.widget`.
 pub const Composite = struct {
@@ -270,6 +305,13 @@ pub const Ui = struct {
         var sv = opts;
         sv.children = try self.arena.dupe(Widget, children);
         return .{ .scroll = sv };
+    }
+
+    /// Surface / card. `children` is copied into the arena (like the containers).
+    pub fn card(self: *Ui, opts: Card, children: []const Widget) !Widget {
+        var c = opts;
+        c.children = try self.arena.dupe(Widget, children);
+        return .{ .card = c };
     }
 
     /// Format text into the arena (for dynamic labels) — caller-owned for the frame.
@@ -399,6 +441,31 @@ pub const Ui = struct {
                     .scroll_y = sv.scroll_y * s,
                     .children = kids,
                     .rect_style = .{ .background = sv.background },
+                };
+            },
+            .card => |cd| {
+                const kids = try self.arena.alloc(*const Element, cd.children.len);
+                for (cd.children, 0..) |c, i| kids[i] = try self.lower(c);
+                var shadow = elevationShadow(cd.elevation);
+                if (shadow) |*sh| {
+                    sh.corner_radius = cd.corner_radius * s;
+                    sh.dx *= s;
+                    sh.dy *= s;
+                    sh.blur *= s;
+                }
+                el.* = .{
+                    .direction = cd.direction,
+                    .gap = cd.gap * s,
+                    .padding = scaleInsets(cd.padding, s),
+                    .width = if (cd.width) |x| x * s else null,
+                    .height = if (cd.height) |x| x * s else null,
+                    .children = kids,
+                    .rect_style = .{
+                        .background = cd.background,
+                        .corner_radius = .all(cd.corner_radius * s),
+                        .border = if (cd.border_width > 0) .all(cd.border_width * s, cd.border_color) else .none,
+                        .shadow = shadow,
+                    },
                 };
             },
             .composite => |c| return self.lower(try c.expand(c.ctx, self)),
@@ -603,6 +670,27 @@ test "lower: scroll view is a clamped viewport with offset+children (#274)" {
     try testing.expectEqual(@as(?f32, 200), el.width);
     try testing.expectEqual(@as(?f32, 150), el.height);
     try testing.expectEqual(@as(usize, 2), el.children.len);
+}
+
+test "lower: card has surface fill, rounded corners, border + elevation shadow (#275)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ui = Ui.init(arena.allocator());
+
+    const el = try ui.lower(try ui.card(.{ .border_width = 1, .elevation = .medium, .corner_radius = 12 }, &.{
+        ui.text("title", .{ .variant = .heading }),
+    }));
+    try testing.expect(el.rect_style.background != null);
+    try testing.expectEqual(@as(f32, 12), el.rect_style.corner_radius.top_left);
+    try testing.expect(!el.rect_style.border.isNone());
+    try testing.expect(el.rect_style.shadow != null);
+    // Shadow inherits the card's corner radius so it rounds with the surface.
+    try testing.expectEqual(@as(f32, 12), el.rect_style.shadow.?.corner_radius);
+    try testing.expectEqual(@as(usize, 1), el.children.len);
+
+    // elevation .none → no shadow.
+    const flat = try ui.lower(try ui.card(.{ .elevation = .none }, &.{}));
+    try testing.expect(flat.rect_style.shadow == null);
 }
 
 test "fmt allocates a frame-owned label" {
