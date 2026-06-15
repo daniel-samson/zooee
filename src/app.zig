@@ -26,7 +26,22 @@ const display = @import("display.zig");
 const theme_mod = @import("theme.zig");
 const style_mod = @import("style.zig");
 const cursor_mod = @import("cursor.zig");
+const ui_mod = @import("ui.zig");
 const dialog = @import("dialog.zig");
+
+/// Build the frame's Element tree from the Model (#4): prefer the widget-layer
+/// `viewUi(ui) Widget` hook (lowered to Elements via `Ui`), else the raw
+/// `view(arena, scale) *Element` contract. Lets models adopt the widget API
+/// without changing the loops.
+fn buildTree(comptime Model: type, model: *Model, arena: std.mem.Allocator, scale: f32) !*const layout_mod.Element {
+    if (@hasDecl(Model, "viewUi")) {
+        var u = ui_mod.Ui.init(arena);
+        u.scale = scale;
+        return u.lower(try model.viewUi(&u));
+    }
+    return model.view(arena, scale);
+}
+
 const window_mod = @import("window.zig");
 pub const Theme = theme_mod.Theme;
 
@@ -180,7 +195,7 @@ pub fn run(
         // Not a TTY: render one frame plainly and exit (CI-safe).
         var frame_arena = std.heap.ArenaAllocator.init(gpa);
         defer frame_arena.deinit();
-        const root = try model.view(frame_arena.allocator(), 1);
+        const root = try buildTree(Model, model, frame_arena.allocator(), 1);
         var result = try layout_mod.layout(frame_arena.allocator(), b, root, .{ .width = 60, .height = 14 });
         try b.beginFrame(.{ .width = 60, .height = 14 });
         layout_mod.render(b, result);
@@ -211,7 +226,7 @@ pub fn run(
             if (modelBackground(Model, model)) |c| term.clear_color = c; // runtime theme
             _ = frame_arena.reset(.retain_capacity);
             const arena = frame_arena.allocator();
-            const root = try model.view(arena, 1);
+            const root = try buildTree(Model, model, arena, 1);
             const viewport = session.size();
             const result = try layout_mod.layout(arena, b, root, viewport);
             placements = result.placements;
@@ -326,7 +341,7 @@ pub fn runWindow(
             const scale: f32 = @floatCast(px.scale);
             self.raster.char_width = 8 * scale;
             self.raster.line_height = 16 * scale;
-            const root = self.model.view(a, scale) catch return;
+            const root = buildTree(Model, self.model, a, scale) catch return;
             const viewport: geometry.Size = .{ .width = @floatFromInt(px.width), .height = @floatFromInt(px.height) };
             const result = layout_mod.layout(a, self.backend, root, viewport) catch return;
             self.placements.* = result.placements;
@@ -430,7 +445,7 @@ fn runWindowGl(
             self.win.glUpdate(); // resync the GL context with the window size (macOS resize)
             const px = platform.contentPixelSize(self.win);
             const scale: f32 = @floatCast(px.scale);
-            const root = self.model.view(a, scale) catch return;
+            const root = buildTree(Model, self.model, a, scale) catch return;
             const viewport: geometry.Size = .{ .width = @floatFromInt(px.width), .height = @floatFromInt(px.height) };
             const result = layout_mod.layout(a, self.backend, root, viewport) catch return;
             self.placements.* = result.placements;
@@ -478,7 +493,7 @@ fn runWindowGl(
                 window.glUpdate();
                 const px = platform.contentPixelSize(window);
                 const scale: f32 = @floatCast(px.scale);
-                const root = try model.view(arena, scale);
+                const root = try buildTree(Model, model, arena, scale);
                 const viewport: geometry.Size = .{ .width = @floatFromInt(px.width), .height = @floatFromInt(px.height) };
                 const result = try layout_mod.layout(arena, b, root, viewport);
                 placements = result.placements;
@@ -561,7 +576,7 @@ fn runWindowMetal(
             const px = platform.contentPixelSize(self.win);
             self.layer.resize(@intCast(px.width), @intCast(px.height));
             const scale: f32 = @floatCast(px.scale);
-            const root = self.model.view(a, scale) catch return;
+            const root = buildTree(Model, self.model, a, scale) catch return;
             const viewport: geometry.Size = .{ .width = @floatFromInt(px.width), .height = @floatFromInt(px.height) };
             const result = layout_mod.layout(a, self.backend, root, viewport) catch return;
             self.placements.* = result.placements;
@@ -608,7 +623,7 @@ fn runWindowMetal(
                 const arena = frame_arena.allocator();
                 const px = platform.contentPixelSize(window);
                 const scale: f32 = @floatCast(px.scale);
-                const root = try model.view(arena, scale);
+                const root = try buildTree(Model, model, arena, scale);
                 const viewport: geometry.Size = .{ .width = @floatFromInt(px.width), .height = @floatFromInt(px.height) };
                 const result = try layout_mod.layout(arena, b, root, viewport);
                 placements = result.placements;
@@ -680,7 +695,7 @@ fn runWindowD3d(
             const px = platform.contentPixelSize(self.win);
             self.swapchain.resize(@intCast(px.width), @intCast(px.height)) catch {};
             const scale: f32 = @floatCast(px.scale);
-            const root = self.model.view(a, scale) catch return;
+            const root = buildTree(Model, self.model, a, scale) catch return;
             const viewport: geometry.Size = .{ .width = @floatFromInt(px.width), .height = @floatFromInt(px.height) };
             const result = layout_mod.layout(a, self.backend, root, viewport) catch return;
             self.placements.* = result.placements;
@@ -727,7 +742,7 @@ fn runWindowD3d(
                 const arena = frame_arena.allocator();
                 const px = platform.contentPixelSize(window);
                 const scale: f32 = @floatCast(px.scale);
-                const root = try model.view(arena, scale);
+                const root = try buildTree(Model, model, arena, scale);
                 const viewport: geometry.Size = .{ .width = @floatFromInt(px.width), .height = @floatFromInt(px.height) };
                 const result = try layout_mod.layout(arena, b, root, viewport);
                 placements = result.placements;
@@ -835,7 +850,7 @@ pub fn renderOffscreen(
     viewport: geometry.Size,
     scale: f32,
 ) !layout_mod.LayoutResult {
-    const root = try model.view(arena, scale);
+    const root = try buildTree(Model, model, arena, scale);
     const result = try layout_mod.layout(arena, b, root, viewport);
     try b.beginFrame(viewport);
     layout_mod.render(b, result);
@@ -1010,6 +1025,25 @@ fn hitMsg(placements: []const layout_mod.Placement, p: geometry.Point, kind: Int
 
 const testing = std.testing;
 const record = @import("backends/record.zig");
+
+test "buildTree prefers viewUi and lowers it to an Element tree (#4)" {
+    const M = struct {
+        pub fn viewUi(self: *@This(), u: *ui_mod.Ui) !ui_mod.Widget {
+            _ = self;
+            return u.column(.{ .gap = 4 }, &.{
+                u.text("hi", .{}),
+                u.button(.{ .label = "go", .on_click = 9 }),
+            });
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var m: M = .{};
+    const el = try buildTree(M, &m, arena.allocator(), 2);
+    try testing.expectEqual(@as(usize, 2), el.children.len);
+    try testing.expectEqualStrings("hi", el.children[0].text.?);
+    try testing.expectEqual(@as(?u32, 9), el.children[1].on_click);
+}
 
 test "hitMsg picks the topmost interactive element" {
     const e1: layout_mod.Element = .{ .on_click = 1 };

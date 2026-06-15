@@ -75,6 +75,9 @@ pub const Composite = struct {
 /// theme, and platform — #5/#21). Threaded into `view` and the builders.
 pub const Ui = struct {
     arena: std.mem.Allocator,
+    /// Device-pixel scale (DPI). Widgets author in logical units; the value is
+    /// available for sizing decisions. (Auto-scaling lowering is a follow-up.)
+    scale: f32 = 1,
 
     pub fn init(arena: std.mem.Allocator) Ui {
         return .{ .arena = arena };
