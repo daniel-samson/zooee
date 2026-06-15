@@ -536,6 +536,9 @@ fn runWindowMetal(
     const gpa = init.arena.allocator();
     const io = init.io;
     const capture_path = init.environ_map.get("ZOOEE_CAPTURE");
+    // Opt-in latency readout (#268): prints pump→present time on drag frames so
+    // the input-to-photon budget can be measured, not guessed.
+    const latency_log = init.environ_map.contains("ZOOEE_LATENCY");
 
     var ctx = try metal_backend.MetalContext.create();
     defer ctx.destroy();
@@ -562,6 +565,13 @@ fn runWindowMetal(
         layer: *metal_backend.MetalLayer,
         arena: *std.heap.ArenaAllocator,
         placements: *[]layout_mod.Placement,
+        /// Present this frame synchronously (low-latency) instead of via the
+        /// display link. Set during interactive pointer drags so dragged content
+        /// (e.g. a split divider) stays under the cursor, same as a live resize.
+        sync_present: bool = false,
+        io: std.Io,
+        /// Print a per-phase timing breakdown for this frame (ZOOEE_LATENCY).
+        profile: bool = false,
 
         fn draw(self: *@This()) void {
             // Drain this frame's autoreleased Metal objects (drawable, command
@@ -569,6 +579,16 @@ fn runWindowMetal(
             // both the loop and the modal-resize redraw callback.
             const pool = metal_backend.pushPool();
             defer metal_backend.drainPool(pool);
+            const prof = self.profile;
+            var t = if (prof) std.Io.Timestamp.now(self.io, .awake).nanoseconds else 0;
+            const lap = struct {
+                fn f(on: bool, iox: std.Io, prev: *i96) i64 {
+                    if (!on) return 0;
+                    const now = std.Io.Timestamp.now(iox, .awake).nanoseconds;
+                    defer prev.* = now;
+                    return @intCast(@divTrunc(now - prev.*, 1000));
+                }
+            }.f;
             // Runtime theme changes track the clear color (theming toggle).
             if (modelBackground(Model, self.model)) |c| self.mb.clear_color = c.rgbaF();
             _ = self.arena.reset(.retain_capacity);
@@ -577,18 +597,23 @@ fn runWindowMetal(
             self.layer.resize(@intCast(px.width), @intCast(px.height));
             const scale: f32 = @floatCast(px.scale);
             const root = buildTree(Model, self.model, a, scale) catch return;
+            const t_build = lap(prof, self.io, &t);
             const viewport: geometry.Size = .{ .width = @floatFromInt(px.width), .height = @floatFromInt(px.height) };
             const result = layout_mod.layout(a, self.backend, root, viewport) catch return;
+            const t_layout = lap(prof, self.io, &t);
             self.placements.* = result.placements;
             self.backend.beginFrame(viewport) catch return;
             layout_mod.render(self.backend, result);
             self.backend.endFrame() catch return;
+            const t_render = lap(prof, self.io, &t);
             // Transaction-synced present only during a live-resize drag; async
             // (display-link-paced) otherwise, so steady animation stays smooth.
-            self.mb.presentTo(self.layer, self.win.inLiveResize());
+            self.mb.presentTo(self.layer, self.win.inLiveResize() or self.sync_present);
+            const t_present = lap(prof, self.io, &t);
+            if (prof) std.debug.print("[latency] build {d}us  layout {d}us  render {d}us  present {d}us\n", .{ t_build, t_layout, t_render, t_present });
         }
     };
-    var frame: Frame = .{ .model = model, .win = window, .backend = b, .mb = &mb, .layer = &layer, .arena = &frame_arena, .placements = &placements };
+    var frame: Frame = .{ .model = model, .win = window, .backend = b, .mb = &mb, .layer = &layer, .arena = &frame_arena, .placements = &placements, .io = io };
     window.setRedraw(&frame, struct {
         fn call(p: ?*anyopaque) void {
             const f: *Frame = @ptrCast(@alignCast(p));
@@ -601,13 +626,16 @@ fn runWindowMetal(
     setupMenuBar(Model, window, model); // #129: install the native menu bar
     loop: while (true) {
         const dt = fl.delta(io);
+        var pointer_drag = false; // a pointer event drove this frame → present synced
         for (window.pumpEvents()) |ev| {
             applyCursor(Model, window, model, placements, ev, &last_cursor);
-            switch (dispatch(Model, Msg, model, ev, placements)) {
+            const cmd = dispatch(Model, Msg, model, ev, placements);
+            switch (cmd) {
                 .none => {},
                 .redraw => dirty = true,
                 .quit => break :loop,
             }
+            if (cmd == .redraw and isPointerEvent(ev)) pointer_drag = true;
             // Native right-click context menu (#129): pops at the click and
             // routes the choice through the model's onMenuCommand.
             if (handleContextMenu(Model, window, model, ev) == .redraw) dirty = true;
@@ -615,6 +643,7 @@ fn runWindowMetal(
         // Native menu-bar selections + file-open requests (#129).
         if (frameOsHooks(Model, window, model, gpa, io) == .redraw) dirty = true;
         if (animate(Model, model, dt) == .redraw) dirty = true;
+        frame.sync_present = pointer_drag; // low-latency present while dragging
 
         if (dirty) {
             // Headless capture hook: render one frame to the RT, read it, exit.
@@ -635,13 +664,19 @@ fn runWindowMetal(
                 try writePpm(gpa, io, path, pixels, mb.width, mb.height);
                 return;
             }
+            frame.profile = latency_log and pointer_drag;
             frame.draw();
             dirty = false;
         }
 
         // Re-pace if the window moved to a different-refresh monitor (#27).
         if (fl.shouldRetune()) fl.retune(platform.refreshHz(window));
-        try fl.pace(io);
+        // Skip the pacing sleep on frames driven by a pointer drag: the sync
+        // present already paces us, and sleeping would age the *next* input by
+        // up to a full refresh before we pump it (the residual divider lag).
+        // Holding still mid-drag emits no events → pointer_drag is false → we
+        // pace normally, so this never busy-spins.
+        if (!pointer_drag) try fl.pace(io);
     }
 }
 
@@ -994,6 +1029,16 @@ fn applyCursor(comptime Model: type, window: anytype, model: *Model, placements:
         },
         else => {},
     }
+}
+
+/// True for pointer button/move events — used to flag a frame as an interactive
+/// drag so the Metal loop presents it synchronously (low latency) instead of via
+/// the display link (which buffers a frame and makes dragged content lag).
+fn isPointerEvent(ev: event_mod.Event) bool {
+    return switch (ev) {
+        .pointer_down, .pointer_up, .pointer_move => true,
+        else => false,
+    };
 }
 
 /// The model's active cursor override (#123), or null to fall back to geometric
