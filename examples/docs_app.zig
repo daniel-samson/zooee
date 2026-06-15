@@ -17,6 +17,7 @@ const pages = [_]Page{
     .{ .name = "Welcome", .body = "Welcome to zooee — a native, cross-platform UI in Zig.\n\nThis app is the component gallery: pick an item on the left to see it, with variants and examples. The look adapts per OS (macOS / WinUI / Linux) and is still being tuned." },
     .{ .name = "Layout", .body = "Flex containers (row / column) with gap, padding, and grow. `spacer()` fills free space to push siblings apart; `divider()` draws a 1px rule across the cross axis." },
     .{ .name = "Button", .body = "Buttons trigger actions. Variants: primary, secondary, danger. (Live examples land as the Button component is built, #271.)" },
+    .{ .name = "Icon", .body = "Vector icons drawn with the path renderer. They tint with the current role and dim when disabled. Starter set: plus, check, play, chevron." },
     .{ .name = "Text", .body = "Text and labels: titles, headings, body, captions — with the shaping pipeline (Latin, Arabic, BiDi). (#270)" },
     .{ .name = "List", .body = "A virtualized list: the master/nav pattern, only visible rows built. (#273)" },
     .{ .name = "Card", .body = "Surfaces/cards: background, border, corner radius, elevation — the detail content blocks. (#275)" },
@@ -31,6 +32,29 @@ fn example(u: *ui.Ui, caption: []const u8, demo: Widget) !Widget {
             .background = Color.rgb(32, 32, 38),
             .corner_radius = 8,
         }, &.{demo}),
+    });
+}
+
+/// Live examples for the Icon page (#272): the starter set, tints, sizes.
+fn iconExamples(u: *ui.Ui) !Widget {
+    return u.column(.{ .gap = 18 }, &.{
+        try example(u, "the starter set", try u.row(.{ .gap = 16 }, &.{
+            u.icon(.{ .name = .plus, .size = 24 }),
+            u.icon(.{ .name = .check, .size = 24 }),
+            u.icon(.{ .name = .play, .size = 24 }),
+            u.icon(.{ .name = .chevron_right, .size = 24 }),
+        })),
+        try example(u, "role tints", try u.row(.{ .gap = 16 }, &.{
+            u.icon(.{ .name = .check, .size = 24, .role = .primary }),
+            u.icon(.{ .name = .check, .size = 24, .role = .secondary }),
+            u.icon(.{ .name = .check, .size = 24, .role = .danger }),
+            u.icon(.{ .name = .check, .size = 24, .disabled = true }),
+        })),
+        try example(u, "sizes", try u.row(.{ .gap = 16 }, &.{
+            u.icon(.{ .name = .play, .size = 16 }),
+            u.icon(.{ .name = .play, .size = 24 }),
+            u.icon(.{ .name = .play, .size = 40 }),
+        })),
     });
 }
 
@@ -126,6 +150,8 @@ const Docs = struct {
             try blocks.append(u.arena, try textExamples(u));
         } else if (std.mem.eql(u8, page.name, "Button")) {
             try blocks.append(u.arena, try buttonExamples(u));
+        } else if (std.mem.eql(u8, page.name, "Icon")) {
+            try blocks.append(u.arena, try iconExamples(u));
         }
         const detail = try u.column(.{ .grow = 1, .padding = .all(28), .gap = 14 }, blocks.items);
 
