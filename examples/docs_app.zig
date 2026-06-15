@@ -198,6 +198,7 @@ const Docs = struct {
     sel_radio: usize = 1, // Selection page: radio choice
     sidebar_w: f32 = 210, // resizable sidebar width (logical px)
     dragging: bool = false, // divider drag in progress
+    drag_offset: f32 = 0, // pointer-to-divider gap at grab (device px), so the line tracks exactly
     scale: f32 = 1, // captured each frame so onEvent can map device px → logical
 
     pub fn viewUi(self: *Docs, u: *ui.Ui) !Widget {
@@ -286,12 +287,13 @@ const Docs = struct {
                 const edge = self.sidebar_w * self.scale;
                 if (@abs(p.position.x - edge) <= 10 * self.scale) {
                     self.dragging = true;
+                    self.drag_offset = p.position.x - edge; // keep the grabbed point under the cursor
                     return .redraw;
                 }
             },
             .pointer_move => |p| {
                 if (self.dragging) {
-                    self.sidebar_w = std.math.clamp(p.position.x / self.scale, sidebar_min, sidebar_max);
+                    self.sidebar_w = std.math.clamp((p.position.x - self.drag_offset) / self.scale, sidebar_min, sidebar_max);
                     return .redraw;
                 }
             },
@@ -309,6 +311,12 @@ const Docs = struct {
     pub fn background(self: *Docs) Color {
         _ = self;
         return Color.rgb(20, 20, 24); // provisional dark backdrop
+    }
+
+    /// Lock the resize cursor for the whole divider drag (#123): without this the
+    /// pointer outruns the divider's hit rect and the cursor flips back.
+    pub fn cursor(self: *Docs) ?zooee.Cursor {
+        return if (self.dragging) .ew_resize else null;
     }
 };
 
