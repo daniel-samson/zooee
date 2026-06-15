@@ -15,11 +15,47 @@ const force_software = @import("build_options").force_software;
 const Page = struct { name: []const u8, body: []const u8 };
 const pages = [_]Page{
     .{ .name = "Welcome", .body = "Welcome to zooee — a native, cross-platform UI in Zig.\n\nThis app is the component gallery: pick an item on the left to see it, with variants and examples. The look adapts per OS (macOS / WinUI / Linux) and is still being tuned." },
+    .{ .name = "Layout", .body = "Flex containers (row / column) with gap, padding, and grow. `spacer()` fills free space to push siblings apart; `divider()` draws a 1px rule across the cross axis." },
     .{ .name = "Button", .body = "Buttons trigger actions. Variants: primary, secondary, danger. (Live examples land as the Button component is built, #271.)" },
     .{ .name = "Text", .body = "Text and labels: titles, headings, body, captions — with the shaping pipeline (Latin, Arabic, BiDi). (#270)" },
     .{ .name = "List", .body = "A virtualized list: the master/nav pattern, only visible rows built. (#273)" },
     .{ .name = "Card", .body = "Surfaces/cards: background, border, corner radius, elevation — the detail content blocks. (#275)" },
 };
+
+/// A labelled example block: a caption above a bordered demo surface.
+fn example(u: *ui.Ui, caption: []const u8, demo: Widget) !Widget {
+    return u.column(.{ .gap = 6 }, &.{
+        u.text(caption, .{ .size = 13, .role = .secondary }),
+        try u.column(.{
+            .padding = .all(16),
+            .background = Color.rgb(32, 32, 38),
+            .corner_radius = 8,
+        }, &.{demo}),
+    });
+}
+
+/// Live examples for the Layout page (#269): row/spacer/divider in action.
+fn layoutExamples(u: *ui.Ui) !Widget {
+    return u.column(.{ .gap = 18 }, &.{
+        try example(u, "row with a spacer pushing the ends apart", try u.row(.{}, &.{
+            u.text("start", .{}),
+            u.spacer(),
+            u.text("end", .{}),
+        })),
+        try example(u, "items separated by vertical dividers", try u.row(.{ .gap = 12 }, &.{
+            u.text("one", .{}),
+            u.divider(.row),
+            u.text("two", .{}),
+            u.divider(.row),
+            u.text("three", .{}),
+        })),
+        try example(u, "a horizontal divider between stacked rows", try u.column(.{ .gap = 10 }, &.{
+            u.text("above", .{}),
+            u.divider(.column),
+            u.text("below", .{}),
+        })),
+    });
+}
 
 const Msg = enum(u32) { _ };
 
@@ -43,12 +79,15 @@ const Docs = struct {
             .background = Color.rgb(28, 28, 32),
         }, items);
 
-        // Detail: the selected page.
+        // Detail: the selected page — heading, description, then live examples.
         const page = pages[self.selected];
-        const detail = try u.column(.{ .grow = 1, .padding = .all(28), .gap = 14 }, &.{
-            u.text(page.name, .{ .size = 28, .bold = true }),
-            u.text(page.body, .{ .size = 15 }),
-        });
+        var blocks: std.ArrayList(Widget) = .empty;
+        try blocks.append(u.arena, u.text(page.name, .{ .size = 28, .bold = true }));
+        try blocks.append(u.arena, u.text(page.body, .{ .size = 15 }));
+        if (std.mem.eql(u8, page.name, "Layout")) {
+            try blocks.append(u.arena, try layoutExamples(u));
+        }
+        const detail = try u.column(.{ .grow = 1, .padding = .all(28), .gap = 14 }, blocks.items);
 
         return u.row(.{}, &.{ sidebar, detail });
     }
