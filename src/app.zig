@@ -603,14 +603,16 @@ fn runWindowMetal(
             const t_layout = lap(prof, self.io, &t);
             self.placements.* = result.placements;
             self.backend.beginFrame(viewport) catch return;
+            const t_begin = lap(prof, self.io, &t);
             layout_mod.render(self.backend, result);
+            const t_walk = lap(prof, self.io, &t);
             self.backend.endFrame() catch return;
-            const t_render = lap(prof, self.io, &t);
+            const t_end = lap(prof, self.io, &t);
             // Transaction-synced present only during a live-resize drag; async
             // (display-link-paced) otherwise, so steady animation stays smooth.
             self.mb.presentTo(self.layer, self.win.inLiveResize() or self.sync_present);
             const t_present = lap(prof, self.io, &t);
-            if (prof) std.debug.print("[latency] build {d}us  layout {d}us  render {d}us  present {d}us\n", .{ t_build, t_layout, t_render, t_present });
+            if (prof) std.debug.print("[latency] build {d}us  layout {d}us  begin {d}us  walk {d}us  end {d}us  present {d}us\n", .{ t_build, t_layout, t_begin, t_walk, t_end, t_present });
         }
     };
     var frame: Frame = .{ .model = model, .win = window, .backend = b, .mb = &mb, .layer = &layer, .arena = &frame_arena, .placements = &placements, .io = io };

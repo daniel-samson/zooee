@@ -577,6 +577,24 @@ pub const MetalRoundedRectRenderer = struct {
 // and draws text as textured quads tinted by the color. Ported from the GL
 // GlyphRenderer (#11); same atlas approach.
 
+/// One positioned glyph in a cached shaped run (#264): which face/glyph and its
+/// pen offset from the run start (kerning + advances already accumulated). The
+/// expensive shaping (cmap/GPOS/GSUB/Arabic) is done once; draw just re-reads the
+/// atlas entry (a cheap hash hit) and emits a quad at base + pen_rel.
+const ShapedGlyph = struct { face_id: u8, glyph: u16, pen_rel: f32 };
+const ShapeKey = struct { text: []const u8, bold: bool, italic: bool };
+const ShapeCtx = struct {
+    pub fn hash(_: ShapeCtx, k: ShapeKey) u64 {
+        var h = std.hash.Wyhash.init(0);
+        h.update(k.text);
+        h.update(&.{ @intFromBool(k.bold), @intFromBool(k.italic) });
+        return h.final();
+    }
+    pub fn eql(_: ShapeCtx, a: ShapeKey, b: ShapeKey) bool {
+        return a.bold == b.bold and a.italic == b.italic and std.mem.eql(u8, a.text, b.text);
+    }
+};
+
 pub const MetalGlyphRenderer = struct {
     device: id,
     queue: id,
@@ -587,6 +605,10 @@ pub const MetalGlyphRenderer = struct {
     enc: id = null,
     vw: f32 = 0,
     vh: f32 = 0,
+    gpa: std.mem.Allocator,
+    /// (text, style) → shaped run (#264). Size is fixed per renderer. Keys own
+    /// their bytes; freed in deinit. Bounded at 8192 entries.
+    shape_cache: std.HashMapUnmanaged(ShapeKey, []const ShapedGlyph, ShapeCtx, std.hash_map.default_max_load_percentage) = .empty,
 
     const dim: u32 = 512;
 
@@ -620,10 +642,13 @@ pub const MetalGlyphRenderer = struct {
             .atlas = atlas,
             .atlas_tex = atlas_tex,
             .sampler = sampler,
+            .gpa = gpa,
         };
     }
 
     pub fn deinit(self: *MetalGlyphRenderer) void {
+        self.clearShapeCache(self.gpa); // free cached runs + keys (#264)
+        self.shape_cache.deinit(self.gpa);
         release(self.sampler);
         release(self.atlas_tex);
         release(self.pipeline);
@@ -645,20 +670,58 @@ pub const MetalGlyphRenderer = struct {
     /// Draw `text` (UTF-8, any codepoint) with top-left at (x,y) px (baseline =
     /// y + ascent), tinted `color`. Glyphs are rasterized + packed on demand
     /// into the dynamic atlas (#114); call uploadIfDirty before commit.
-    pub fn drawText(self: *MetalGlyphRenderer, gpa: std.mem.Allocator, x: f32, y: f32, text: []const u8, color: [4]f32, fstyle: fontset.Style) !void {
-        var verts: std.ArrayList(f32) = .empty;
-        defer verts.deinit(gpa);
-        var pen = x;
-        const baseline = y + self.atlas.ascent;
+    /// The shaped run for (text, style), built once and memoized (#264). Pen
+    /// offsets are relative to the run start, so the cached run is reusable at any
+    /// draw position. Shaping (cmap/GPOS/GSUB/Arabic) is the costly part skipped
+    /// on a hit; the per-glyph atlas lookup at draw is a cheap hash hit.
+    fn shapedRun(self: *MetalGlyphRenderer, gpa: std.mem.Allocator, text: []const u8, fstyle: fontset.Style) ![]const ShapedGlyph {
+        const key: ShapeKey = .{ .text = text, .bold = fstyle.bold, .italic = fstyle.italic };
+        if (self.shape_cache.getContext(key, .{})) |run| return run;
+        var list: std.ArrayList(ShapedGlyph) = .empty;
+        errdefer list.deinit(gpa);
+        var pen: f32 = 0;
         var prev: ?fontset.Glyph = null;
         var sh = fontset.Shaper.init(self.atlas.set, fstyle, text);
         while (sh.next()) |g| {
             if (prev) |pg| if (pg.face_id == g.face_id) {
                 pen += self.atlas.kernGid(g.face_id, pg.glyph, g.glyph); // #116/#201
             };
-            const e = self.atlas.glyphForGid(g.face_id, g.glyph);
+            try list.append(gpa, .{ .face_id = g.face_id, .glyph = g.glyph, .pen_rel = pen });
+            pen += self.atlas.glyphForGid(g.face_id, g.glyph).advance;
+            prev = g;
+        }
+        const run = try list.toOwnedSlice(gpa);
+        errdefer gpa.free(run);
+        if (self.shape_cache.count() >= 8192) self.clearShapeCache(gpa);
+        const owned = try gpa.dupe(u8, text);
+        var k = key;
+        k.text = owned;
+        self.shape_cache.putContext(gpa, k, run, .{}) catch |e| {
+            gpa.free(owned);
+            return e;
+        };
+        return run;
+    }
+
+    /// Free cached shaped runs + their keys (#264).
+    fn clearShapeCache(self: *MetalGlyphRenderer, gpa: std.mem.Allocator) void {
+        var it = self.shape_cache.iterator();
+        while (it.next()) |kv| {
+            gpa.free(kv.key_ptr.text);
+            gpa.free(kv.value_ptr.*);
+        }
+        self.shape_cache.clearRetainingCapacity();
+    }
+
+    pub fn drawText(self: *MetalGlyphRenderer, gpa: std.mem.Allocator, x: f32, y: f32, text: []const u8, color: [4]f32, fstyle: fontset.Style) !void {
+        const run = try self.shapedRun(gpa, text, fstyle);
+        var verts: std.ArrayList(f32) = .empty;
+        defer verts.deinit(gpa);
+        const baseline = y + self.atlas.ascent;
+        for (run) |sg| {
+            const e = self.atlas.glyphForGid(sg.face_id, sg.glyph);
             if (e.w > 0) {
-                const gx = @round(pen) + e.x_off;
+                const gx = @round(x + sg.pen_rel) + e.x_off;
                 const gy = @round(baseline) + e.y_off;
                 const x1 = gx + e.w;
                 const y1 = gy + e.h;
@@ -673,8 +736,6 @@ pub const MetalGlyphRenderer = struct {
                 };
                 try verts.appendSlice(gpa, &quad);
             }
-            pen += e.advance;
-            prev = g;
         }
         if (verts.items.len == 0) return;
         const vbuf = msg(id, struct { [*]const f32, u64, u64 }, self.device, sel("newBufferWithBytes:length:options:"), .{ verts.items.ptr, verts.items.len * 4, 0 });
