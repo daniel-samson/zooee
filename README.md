@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/daniel-samson/zooee/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/daniel-samson/zooee/actions/workflows/ci.yml)
 
-Zooee is a cross-platform UI framework written in [Zig](https://ziglang.org/), with pluggable rendering backends: write your interface once and run it in the terminal, as a GPU-accelerated native window, or in the browser via WebAssembly.
+Zooee is a cross-platform UI framework written in [Zig](https://ziglang.org/), with pluggable rendering backends: write your interface once and run it in the terminal, as a GPU-accelerated native window, or in the browser via WebAssembly. Zooee makes your app look and feel like it is native to the target operating system; not jaring to your users.
 
 > **Status: pre-1.0, but the engine works.** All four rendering backends, the layout engine, real text layout, the animation system, theming, and the full input/event stack are implemented and CI-verified (see [Features](#features)). What's still in flight is the high-level component library, the web/wasm backend, and some per-platform OS plumbing. The API is not yet stable — expect breaking changes.
 
