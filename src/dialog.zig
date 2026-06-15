@@ -30,11 +30,13 @@ pub const OpenOptions = struct {
 
 /// Show the native open dialog and return the selected absolute path (owned by
 /// `gpa`, free with `gpa.free`) or null if cancelled. Blocks until dismissed.
-pub fn openFile(gpa: std.mem.Allocator, opts: OpenOptions) !?[]u8 {
+/// `io` is only used on Linux (to run the external picker); macOS/Windows
+/// ignore it.
+pub fn openFile(gpa: std.mem.Allocator, io: std.Io, opts: OpenOptions) !?[]u8 {
     return switch (builtin.os.tag) {
         .macos => openFileMac(gpa, opts),
         .windows => openFileWindows(gpa, opts),
-        .linux => openFileLinux(gpa, opts),
+        .linux => openFileLinux(gpa, io, opts),
         else => error.NoNativeDialog,
     };
 }
@@ -152,20 +154,20 @@ fn openFileWindows(gpa: std.mem.Allocator, opts: OpenOptions) !?[]u8 {
 
 // --- Linux/X11: zenity or kdialog --------------------------------------------
 
-fn openFileLinux(gpa: std.mem.Allocator, opts: OpenOptions) !?[]u8 {
+fn openFileLinux(gpa: std.mem.Allocator, io: std.Io, opts: OpenOptions) !?[]u8 {
     // Try zenity (GNOME) then kdialog (KDE). Both print the chosen path to
     // stdout and exit non-zero on cancel.
     const zenity: []const []const u8 = if (opts.directory)
         &.{ "zenity", "--file-selection", "--directory" }
     else
         &.{ "zenity", "--file-selection" };
-    if (try runPicker(gpa, zenity)) |p| return p;
+    if (try runPicker(gpa, io, zenity)) |p| return p;
 
     const kdialog: []const []const u8 = if (opts.directory)
         &.{ "kdialog", "--getexistingdirectory", "." }
     else
         &.{ "kdialog", "--getopenfilename", "." };
-    if (try runPicker(gpa, kdialog)) |p| return p;
+    if (try runPicker(gpa, io, kdialog)) |p| return p;
 
     return error.NoNativeDialog;
 }
@@ -173,27 +175,15 @@ fn openFileLinux(gpa: std.mem.Allocator, opts: OpenOptions) !?[]u8 {
 /// Run an external picker and return its stdout path, or null on cancel.
 /// Returns error.NoNativeDialog if the binary isn't installed (so the caller
 /// can try the next one).
-fn runPicker(gpa: std.mem.Allocator, argv: []const []const u8) !?[]u8 {
-    var child = std.process.Child.init(argv, gpa);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-    child.spawn() catch return error.NoNativeDialog; // binary missing
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
-    if (child.stdout) |so| {
-        var buf: [4096]u8 = undefined;
-        while (true) {
-            const n = so.read(&buf) catch break;
-            if (n == 0) break;
-            try out.appendSlice(gpa, buf[0..n]);
-        }
-    }
-    const term = try child.wait();
-    switch (term) {
-        .Exited => |code| if (code != 0) return null, // user cancelled
+fn runPicker(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8) !?[]u8 {
+    const result = std.process.run(gpa, io, .{ .argv = argv }) catch return error.NoNativeDialog;
+    defer gpa.free(result.stderr);
+    defer gpa.free(result.stdout);
+    switch (result.term) {
+        .exited => |code| if (code != 0) return null, // user cancelled
         else => return null,
     }
-    const trimmed = std.mem.trimRight(u8, out.items, "\r\n");
+    const trimmed = std.mem.trimEnd(u8, result.stdout, "\r\n");
     if (trimmed.len == 0) return null;
     return try gpa.dupe(u8, trimmed);
 }
@@ -205,7 +195,8 @@ fn runPicker(gpa: std.mem.Allocator, argv: []const []const u8) !?[]u8 {
 
 test "openFile reports no native dialog on unsupported platforms" {
     if (builtin.os.tag == .macos or builtin.os.tag == .windows or builtin.os.tag == .linux) return error.SkipZigTest;
-    try std.testing.expectError(error.NoNativeDialog, openFile(std.testing.allocator, .{}));
+    // io is unused on the unsupported-platform branch (returns before touching it).
+    try std.testing.expectError(error.NoNativeDialog, openFile(std.testing.allocator, undefined, .{}));
 }
 
 test "OpenOptions defaults" {

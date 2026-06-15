@@ -361,7 +361,7 @@ pub fn runWindow(
             if (handleContextMenu(Model, window, model, ev) == .redraw) dirty = true;
         }
         // Native menu-bar selections + file-open requests (#129).
-        if (frameOsHooks(Model, window, model, gpa) == .redraw) dirty = true;
+        if (frameOsHooks(Model, window, model, gpa, io) == .redraw) dirty = true;
         if (animate(Model, model, dt) == .redraw) dirty = true;
 
         if (dirty) {
@@ -465,7 +465,7 @@ fn runWindowGl(
             if (handleContextMenu(Model, window, model, ev) == .redraw) dirty = true;
         }
         // Native menu-bar selections + file-open requests (#129).
-        if (frameOsHooks(Model, window, model, gpa) == .redraw) dirty = true;
+        if (frameOsHooks(Model, window, model, gpa, io) == .redraw) dirty = true;
         if (animate(Model, model, dt) == .redraw) dirty = true;
         if (modelBackground(Model, model)) |c| glb.clear_color = c.rgbaF(); // theming toggle
 
@@ -598,7 +598,7 @@ fn runWindowMetal(
             if (handleContextMenu(Model, window, model, ev) == .redraw) dirty = true;
         }
         // Native menu-bar selections + file-open requests (#129).
-        if (frameOsHooks(Model, window, model, gpa) == .redraw) dirty = true;
+        if (frameOsHooks(Model, window, model, gpa, io) == .redraw) dirty = true;
         if (animate(Model, model, dt) == .redraw) dirty = true;
 
         if (dirty) {
@@ -715,7 +715,7 @@ fn runWindowD3d(
             if (handleContextMenu(Model, window, model, ev) == .redraw) dirty = true;
         }
         // Native menu-bar selections + file-open requests (#129).
-        if (frameOsHooks(Model, window, model, gpa) == .redraw) dirty = true;
+        if (frameOsHooks(Model, window, model, gpa, io) == .redraw) dirty = true;
         if (animate(Model, model, dt) == .redraw) dirty = true;
         if (modelBackground(Model, model)) |c| db.clear_color = c.rgbaF(); // theming toggle
 
@@ -912,7 +912,7 @@ fn setupMenuBar(comptime Model: type, window: anytype, model: *Model) void {
 /// requested it (via `takeOpenRequest`), show the native file-open dialog and
 /// hand the chosen path to `onFileChosen`. Returns `.redraw` if anything
 /// changed model state. No-ops without the corresponding hooks.
-fn frameOsHooks(comptime Model: type, window: anytype, model: *Model, gpa: std.mem.Allocator) Command {
+fn frameOsHooks(comptime Model: type, window: anytype, model: *Model, gpa: std.mem.Allocator, io: std.Io) Command {
     var cmd: Command = .none;
     if (@hasDecl(Model, "menuBar")) {
         if (window.takeMenuCommand()) |id| {
@@ -921,7 +921,7 @@ fn frameOsHooks(comptime Model: type, window: anytype, model: *Model, gpa: std.m
     }
     if (@hasDecl(Model, "takeOpenRequest") and @hasDecl(Model, "onFileChosen")) {
         if (model.takeOpenRequest()) {
-            if (dialog.openFile(gpa, .{ .title = "Open a file" })) |maybe| {
+            if (dialog.openFile(gpa, io, .{ .title = "Open a file" })) |maybe| {
                 if (maybe) |path| {
                     defer gpa.free(path);
                     if (model.onFileChosen(path) == .redraw) cmd = .redraw;
