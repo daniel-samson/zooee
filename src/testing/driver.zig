@@ -391,6 +391,39 @@ test "viewUi widget button click dispatches through the real path (#4/#130)" {
     try testing.expectEqual(@as(u32, 7), m.hit); // on_click=7 routed to update
 }
 
+// A list-backed model: clicking a row selects it (the master/nav pattern, #273).
+const ListApp = struct {
+    selected: usize = 0,
+    pub const Msg = enum(u32) { _ };
+    pub fn viewUi(self: *ListApp, u: *ui_mod.Ui) !ui_mod.Widget {
+        return u.list(.{ .selected = self.selected, .width = 120 }, &.{
+            .{ .label = "Row A", .on_click = 0 },
+            .{ .label = "Row B", .on_click = 1 },
+            .{ .label = "Row C", .on_click = 2 },
+        });
+    }
+    pub fn update(self: *ListApp, msg: Msg) Command {
+        self.selected = @intFromEnum(msg);
+        return .redraw;
+    }
+    pub fn onEvent(self: *ListApp, ev: event_mod.Event) Command {
+        _ = self;
+        _ = ev;
+        return .none;
+    }
+};
+
+test "viewUi list row click selects through the real path (#273/#130)" {
+    var m: ListApp = .{};
+    var d = try Driver(ListApp, ListApp.Msg).init(testing.allocator, &m, .{ .width = 140, .height = 140 });
+    defer d.deinit();
+    _ = try d.render();
+    try testing.expectEqual(@as(usize, 0), m.selected);
+    // Third row: rows stack from the top with ~2px gap + ~34px row height.
+    _ = try d.click(20, 75);
+    try testing.expectEqual(@as(usize, 2), m.selected);
+}
+
 test "click outside the element does not dispatch" {
     var model: Toggle = .{};
     var d = try Driver(Toggle, Toggle.Msg).init(testing.allocator, &model, .{ .width = 100, .height = 60 });
