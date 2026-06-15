@@ -365,7 +365,7 @@ pub fn runWindow(
     loop: while (true) {
         const dt = fl.delta(io);
         for (window.pumpEvents()) |ev| {
-            applyCursor(window, placements, ev, &last_cursor);
+            applyCursor(Model, window, model, placements, ev, &last_cursor);
             switch (dispatch(Model, Msg, model, ev, placements)) {
                 .none => {},
                 .redraw => dirty = true,
@@ -469,7 +469,7 @@ fn runWindowGl(
     loop: while (true) {
         const dt = fl.delta(io);
         for (window.pumpEvents()) |ev| {
-            applyCursor(window, placements, ev, &last_cursor);
+            applyCursor(Model, window, model, placements, ev, &last_cursor);
             switch (dispatch(Model, Msg, model, ev, placements)) {
                 .none => {},
                 .redraw => dirty = true,
@@ -602,7 +602,7 @@ fn runWindowMetal(
     loop: while (true) {
         const dt = fl.delta(io);
         for (window.pumpEvents()) |ev| {
-            applyCursor(window, placements, ev, &last_cursor);
+            applyCursor(Model, window, model, placements, ev, &last_cursor);
             switch (dispatch(Model, Msg, model, ev, placements)) {
                 .none => {},
                 .redraw => dirty = true,
@@ -719,7 +719,7 @@ fn runWindowD3d(
     loop: while (true) {
         const dt = fl.delta(io);
         for (window.pumpEvents()) |ev| {
-            applyCursor(window, placements, ev, &last_cursor);
+            applyCursor(Model, window, model, placements, ev, &last_cursor);
             switch (dispatch(Model, Msg, model, ev, placements)) {
                 .none => {},
                 .redraw => dirty = true,
@@ -979,10 +979,14 @@ fn systemClipboard(window: anytype, gpa: std.mem.Allocator) WindowPlatform.Syste
 /// window — but only when it changed, so the GPU loops don't hammer the OS
 /// cursor API every frame. `last` carries the shape across iterations. Generic
 /// over the window type (each platform Window exposes `setCursor`).
-fn applyCursor(window: anytype, placements: []const layout_mod.Placement, ev: event_mod.Event, last: *cursor_mod.Cursor) void {
+fn applyCursor(comptime Model: type, window: anytype, model: *Model, placements: []const layout_mod.Placement, ev: event_mod.Event, last: *cursor_mod.Cursor) void {
     switch (ev) {
         .pointer_move => |p| {
-            const shape = cursorFor(placements, p.position);
+            // A model `cursor()` override wins over geometric resolution — this
+            // is how a drag locks the cursor (e.g. a splitter): while dragging,
+            // the pointer outruns the divider's hit rect, so geometry alone would
+            // flip back to `.default`. (Element-level pointer capture is #5.)
+            const shape = cursorOverride(Model, model) orelse cursorFor(placements, p.position);
             if (shape != last.*) {
                 window.setCursor(shape);
                 last.* = shape;
@@ -990,6 +994,14 @@ fn applyCursor(window: anytype, placements: []const layout_mod.Placement, ev: ev
         },
         else => {},
     }
+}
+
+/// The model's active cursor override (#123), or null to fall back to geometric
+/// resolution. A model opts in with `pub fn cursor(self) ?Cursor` — used to lock
+/// the cursor during a drag.
+pub fn cursorOverride(comptime Model: type, model: *Model) ?cursor_mod.Cursor {
+    if (@hasDecl(Model, "cursor")) return model.cursor();
+    return null;
 }
 
 /// The cursor shape (#123) the topmost region under `p` requests, or

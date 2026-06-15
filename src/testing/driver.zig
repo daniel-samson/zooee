@@ -88,6 +88,14 @@ pub fn Driver(comptime Model: type, comptime Msg: type) type {
             return if (self.result) |r| r.placements else &.{};
         }
 
+        /// The cursor shape the app would show at (x, y) — the same resolution
+        /// the production loop runs on pointer_move (#123). Lets tests assert
+        /// hover affordances (resize gutters, pointer regions) headlessly.
+        pub fn cursorAt(self: *Self, x: f32, y: f32) @import("../cursor.zig").Cursor {
+            return app_mod.cursorOverride(Model, self.model) orelse
+                app_mod.cursorFor(self.placements(), .{ .x = x, .y = y });
+        }
+
         /// Inject one event through the production dispatch path. Relays out the
         /// view if the resulting command is `redraw` (so subsequent events hit
         /// the updated tree). Returns the command.
@@ -522,6 +530,9 @@ const SplitApp = struct {
         }
         return .none;
     }
+    pub fn cursor(self: *SplitApp) ?@import("../cursor.zig").Cursor {
+        return if (self.dragging) .ew_resize else null;
+    }
 };
 
 test "viewUi split divider drag resizes the leading pane (#268/#130)" {
@@ -530,10 +541,18 @@ test "viewUi split divider drag resizes the leading pane (#268/#130)" {
     defer d.deinit();
     _ = try d.render();
     try testing.expectEqual(@as(f32, 200), m.width);
+    // The divider's grab gutter shows the horizontal-resize cursor; the panes don't.
+    try testing.expectEqual(@import("../cursor.zig").Cursor.ew_resize, d.cursorAt(202, 150));
+    try testing.expectEqual(@import("../cursor.zig").Cursor.default, d.cursorAt(80, 150));
     _ = try d.pointerDown(200, 150); // grab the divider at x≈200
     _ = try d.move(280, 150); // drag right
+    // Cursor stays locked to the resize shape mid-drag, even though the pointer
+    // (x=280) has outrun the divider's hit rect (now at x≈280 but tested far off).
+    try testing.expectEqual(@import("../cursor.zig").Cursor.ew_resize, d.cursorAt(450, 150));
     _ = try d.pointerUp(280, 150);
     try testing.expectEqual(@as(f32, 280), m.width);
+    // Released: cursor falls back to geometric resolution (default off the divider).
+    try testing.expectEqual(@import("../cursor.zig").Cursor.default, d.cursorAt(450, 150));
     // A press away from the divider does not start a drag.
     _ = try d.pointerDown(50, 150);
     _ = try d.move(120, 150);
