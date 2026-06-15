@@ -490,6 +490,56 @@ test "viewUi checkbox click toggles through the real path (#277/#130)" {
     try testing.expect(m.on);
 }
 
+// A split-view model (#268): dragging the divider resizes the leading pane.
+// The app tracks drag state from pointer events and clamps the width.
+const SplitApp = struct {
+    width: f32 = 200,
+    dragging: bool = false,
+    pub const Msg = enum(u32) { _ };
+    pub fn viewUi(self: *SplitApp, u: *ui_mod.Ui) !ui_mod.Widget {
+        return u.split(
+            .{ .leading_size = self.width, .divider = 4 },
+            try u.column(.{}, &.{u.text("nav", .{})}),
+            try u.column(.{}, &.{u.text("content", .{})}),
+        );
+    }
+    pub fn update(self: *SplitApp, msg: Msg) Command {
+        _ = self;
+        _ = msg;
+        return .none;
+    }
+    pub fn onEvent(self: *SplitApp, ev: event_mod.Event) Command {
+        switch (ev) {
+            .pointer_down => |p| if (@abs(p.position.x - self.width) <= 6) {
+                self.dragging = true;
+            },
+            .pointer_move => |p| if (self.dragging) {
+                self.width = std.math.clamp(p.position.x, 100, 400);
+                return .redraw;
+            },
+            .pointer_up => self.dragging = false,
+            else => {},
+        }
+        return .none;
+    }
+};
+
+test "viewUi split divider drag resizes the leading pane (#268/#130)" {
+    var m: SplitApp = .{};
+    var d = try Driver(SplitApp, SplitApp.Msg).init(testing.allocator, &m, .{ .width = 500, .height = 300 });
+    defer d.deinit();
+    _ = try d.render();
+    try testing.expectEqual(@as(f32, 200), m.width);
+    _ = try d.pointerDown(200, 150); // grab the divider at x≈200
+    _ = try d.move(280, 150); // drag right
+    _ = try d.pointerUp(280, 150);
+    try testing.expectEqual(@as(f32, 280), m.width);
+    // A press away from the divider does not start a drag.
+    _ = try d.pointerDown(50, 150);
+    _ = try d.move(120, 150);
+    try testing.expectEqual(@as(f32, 280), m.width);
+}
+
 test "click outside the element does not dispatch" {
     var model: Toggle = .{};
     var d = try Driver(Toggle, Toggle.Msg).init(testing.allocator, &model, .{ .width = 100, .height = 60 });

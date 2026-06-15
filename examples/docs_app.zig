@@ -196,17 +196,21 @@ const Docs = struct {
     sel_check: bool = false, // Selection page: checkbox
     sel_toggle: bool = true, // Selection page: toggle
     sel_radio: usize = 1, // Selection page: radio choice
+    sidebar_w: f32 = 210, // resizable sidebar width (logical px)
+    dragging: bool = false, // divider drag in progress
+    scale: f32 = 1, // captured each frame so onEvent can map device px → logical
 
     pub fn viewUi(self: *Docs, u: *ui.Ui) !Widget {
-        // Master: a selectable list of pages — dogfooding the List widget (#273).
+        self.scale = u.scale; // for the divider-drag math in onEvent
+        // Master: the sidebar — a box (div) spanning the pane, holding the nav
+        // List. Top padding clears the traffic lights under the integrated bar.
         const rows = try u.arena.alloc(ui.ListRow, pages.len);
         for (pages, 0..) |p, i| rows[i] = .{ .label = p.name, .on_click = @intCast(i) };
         const sidebar = try u.column(.{
-            .width = 210,
-            .padding = .all(12),
+            .padding = .{ .top = 36, .left = 12, .right = 12, .bottom = 12 },
             .background = Color.rgb(28, 28, 32),
         }, &.{
-            try u.list(.{ .selected = self.selected, .width = 186 }, rows),
+            try u.list(.{ .selected = self.selected }, rows),
         });
 
         // Detail: the selected page — heading, description, then live examples.
@@ -233,7 +237,8 @@ const Docs = struct {
         }
         const detail = try u.column(.{ .grow = 1, .padding = .all(28), .gap = 14 }, blocks.items);
 
-        return u.row(.{}, &.{ sidebar, detail });
+        // Resizable split: drag the divider → sidebar_w changes → relayout next frame.
+        return u.split(.{ .leading_size = self.sidebar_w, .divider = 1 }, sidebar, detail);
     }
 
     pub fn update(self: *Docs, msg: Msg) zooee.app.Command {
@@ -262,6 +267,10 @@ const Docs = struct {
         return .none;
     }
 
+    // Sidebar resize limits (logical px).
+    const sidebar_min: f32 = 150;
+    const sidebar_max: f32 = 360;
+
     pub fn onEvent(self: *Docs, ev: zooee.event.Event) zooee.app.Command {
         switch (ev) {
             .text => |t| if (t.codepoint == 'q') return .quit,
@@ -269,6 +278,27 @@ const Docs = struct {
             .scroll => |s| {
                 self.scroll_y = @max(0, self.scroll_y + s.dy * 12);
                 return .redraw;
+            },
+            // Divider drag: grab near the sidebar's trailing edge, then track the
+            // pointer. Pointer x is device px; sidebar_w is logical (÷ scale).
+            .pointer_down => |p| {
+                const edge = self.sidebar_w * self.scale;
+                if (@abs(p.position.x - edge) <= 6 * self.scale) {
+                    self.dragging = true;
+                    return .redraw;
+                }
+            },
+            .pointer_move => |p| {
+                if (self.dragging) {
+                    self.sidebar_w = std.math.clamp(p.position.x / self.scale, sidebar_min, sidebar_max);
+                    return .redraw;
+                }
+            },
+            .pointer_up => {
+                if (self.dragging) {
+                    self.dragging = false;
+                    return .redraw;
+                }
             },
             else => {},
         }
@@ -288,7 +318,8 @@ pub fn main(init: std.process.Init) !void {
         .width = 900,
         .height = 600,
         .force_software = force_software,
-        // Native titlebar for now; the per-OS custom titlebar (#64/#268) is a QA-phase tweak.
-        .titlebar = .native,
+        // Integrated: content runs under a transparent title bar (macOS source-list
+        // look). The sidebar's top padding clears the traffic lights.
+        .titlebar = .integrated,
     });
 }
