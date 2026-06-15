@@ -67,6 +67,45 @@ const Demo = struct {
     preedit_len: usize = 0,
     committed: [128]u8 = undefined,
     committed_len: usize = 0,
+    /// Native context menu (#129): the last action chosen from the right-click
+    /// menu, shown in a status label so the menu is visibly wired end-to-end.
+    last_action: []const u8 = "right-click for a menu",
+    /// "Dev Inspect" toggles a debug frame on the live window.
+    inspect: bool = false,
+    /// Stable storage for the menu returned to the app loop (the popup borrows
+    /// it across the call).
+    menu_buf: [context_menu.len]zooee.menu.Item = context_menu,
+
+    /// Native right-click menu items (#129). Returned to the app loop, which
+    /// pops the OS-native menu and reports the chosen id via `onMenuCommand`.
+    const MenuId = enum(u32) { copy = 1, paste = 2, inspect = 3 };
+    const context_menu = [_]zooee.menu.Item{
+        .{ .label = "Copy", .id = @intFromEnum(MenuId.copy), .accelerator = "Cmd+C" },
+        .{ .label = "Paste", .id = @intFromEnum(MenuId.paste), .accelerator = "Cmd+V" },
+        zooee.menu.separator,
+        .{ .label = "Dev Inspect", .id = @intFromEnum(MenuId.inspect) },
+    };
+
+    /// App-loop hook (#129): supply the native context menu for a right-click.
+    pub fn contextMenu(self: *Demo) ?[]const zooee.menu.Item {
+        // "Dev Inspect" shows its current state as a checkmark.
+        self.menu_buf = context_menu;
+        self.menu_buf[3].checked = self.inspect;
+        return &self.menu_buf;
+    }
+
+    /// App-loop hook (#129): handle a chosen context-menu item id.
+    pub fn onMenuCommand(self: *Demo, id: u32) zooee.app.Command {
+        switch (@as(MenuId, @enumFromInt(id))) {
+            .copy => self.last_action = "copied selection",
+            .paste => self.last_action = "pasted from clipboard",
+            .inspect => {
+                self.inspect = !self.inspect;
+                self.last_action = if (self.inspect) "dev inspect ON" else "dev inspect OFF";
+            },
+        }
+        return .redraw;
+    }
 
     pub fn view(self: *Demo, arena: std.mem.Allocator, scale: f32) !*const L.Element {
         const rows = try arena.alloc(L.Element, items.len);
@@ -97,9 +136,17 @@ const Demo = struct {
         title.* = .{
             .text = "zooee — click or hover a row",
             .text_style = .{ .color = self.theme.text, .bold = true, .size = 22 * scale },
-            .margin = .{ .bottom = 12 * scale },
+            .margin = .{ .bottom = 4 * scale },
             // Heading reads as text → I-beam (#123); rows below show the hand.
             .cursor = .text,
+        };
+        // Native context-menu status (#129): updates when you right-click and
+        // pick Copy / Paste / Dev Inspect.
+        const status = try arena.create(L.Element);
+        status.* = .{
+            .text = self.last_action,
+            .text_style = .{ .color = self.theme.text_muted, .size = 13 * scale },
+            .margin = .{ .bottom = 12 * scale },
         };
         // Declarative-animation indicator (#125): a 4px accent bar that *slides*
         // to the selected row (Transition, eased) while *pulsing* its opacity
@@ -155,8 +202,13 @@ const Demo = struct {
         root.* = .{
             .direction = .column,
             .padding = .all(16 * scale),
-            .rect_style = .{ .background = self.theme.background },
-            .children = try arena.dupe(*const L.Element, &.{ title, columns }),
+            // "Dev Inspect" (#129 menu → #26 devtools): a magenta debug frame
+            // makes the toggle visibly do something on the live window.
+            .rect_style = if (self.inspect)
+                .{ .background = self.theme.background, .border = .all(2 * scale, Color.rgb(230, 40, 200)) }
+            else
+                .{ .background = self.theme.background },
+            .children = try arena.dupe(*const L.Element, &.{ title, status, columns }),
         };
         return root;
     }

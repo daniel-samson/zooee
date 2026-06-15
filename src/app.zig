@@ -354,6 +354,9 @@ pub fn runWindow(
                 .redraw => dirty = true,
                 .quit => break :loop,
             }
+            // Native right-click context menu (#129): pops at the click and
+            // routes the choice through the model's onMenuCommand.
+            if (handleContextMenu(Model, window, model, ev) == .redraw) dirty = true;
         }
         if (animate(Model, model, dt) == .redraw) dirty = true;
 
@@ -452,6 +455,9 @@ fn runWindowGl(
                 .redraw => dirty = true,
                 .quit => break :loop,
             }
+            // Native right-click context menu (#129): pops at the click and
+            // routes the choice through the model's onMenuCommand.
+            if (handleContextMenu(Model, window, model, ev) == .redraw) dirty = true;
         }
         if (animate(Model, model, dt) == .redraw) dirty = true;
         if (modelBackground(Model, model)) |c| glb.clear_color = c.rgbaF(); // theming toggle
@@ -579,6 +585,9 @@ fn runWindowMetal(
                 .redraw => dirty = true,
                 .quit => break :loop,
             }
+            // Native right-click context menu (#129): pops at the click and
+            // routes the choice through the model's onMenuCommand.
+            if (handleContextMenu(Model, window, model, ev) == .redraw) dirty = true;
         }
         if (animate(Model, model, dt) == .redraw) dirty = true;
 
@@ -690,6 +699,9 @@ fn runWindowD3d(
                 .redraw => dirty = true,
                 .quit => break :loop,
             }
+            // Native right-click context menu (#129): pops at the click and
+            // routes the choice through the model's onMenuCommand.
+            if (handleContextMenu(Model, window, model, ev) == .redraw) dirty = true;
         }
         if (animate(Model, model, dt) == .redraw) dirty = true;
         if (modelBackground(Model, model)) |c| db.clear_color = c.rgbaF(); // theming toggle
@@ -859,6 +871,22 @@ fn dispatch(
         },
         else => model.onEvent(ev),
     };
+}
+
+/// Native context menu (#129): on a secondary (right) click, if the model
+/// exposes `contextMenu()`, pop the OS-native menu at the click and route the
+/// chosen item id back through `onMenuCommand(id)`. No-ops for models without
+/// the hook, and on X11 (no native menu → popupMenu returns null). Generic over
+/// the window type (each platform Window exposes `popupMenu`).
+fn handleContextMenu(comptime Model: type, window: anytype, model: *Model, ev: event_mod.Event) Command {
+    if (!@hasDecl(Model, "contextMenu")) return .none;
+    if (ev != .pointer_down) return .none;
+    const p = ev.pointer_down;
+    if (!p.buttons.secondary) return .none;
+    const items = model.contextMenu() orelse return .none;
+    const chosen = window.popupMenu(items, p.position.x, p.position.y) orelse return .none;
+    if (@hasDecl(Model, "onMenuCommand")) return model.onMenuCommand(chosen);
+    return .none;
 }
 
 /// On a pointer_move, resolve the cursor under the pointer and apply it to the
