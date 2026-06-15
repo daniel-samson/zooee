@@ -34,6 +34,27 @@ fn example(u: *ui.Ui, caption: []const u8, demo: Widget) !Widget {
     });
 }
 
+/// Live examples for the Button page (#271): role variants, sizes, disabled.
+fn buttonExamples(u: *ui.Ui) !Widget {
+    return u.column(.{ .gap = 18 }, &.{
+        try example(u, "role variants", try u.row(.{ .gap = 10 }, &.{
+            u.button(.{ .label = "Primary", .role = .primary }),
+            u.button(.{ .label = "Secondary", .role = .secondary }),
+            u.button(.{ .label = "Normal", .role = .normal }),
+            u.button(.{ .label = "Danger", .role = .danger }),
+        })),
+        try example(u, "sizes", try u.row(.{ .gap = 10 }, &.{
+            u.button(.{ .label = "Small", .role = .primary, .size = .small }),
+            u.button(.{ .label = "Medium", .role = .primary, .size = .medium }),
+            u.button(.{ .label = "Large", .role = .primary, .size = .large }),
+        })),
+        try example(u, "disabled (dimmed, dispatches nothing)", try u.row(.{ .gap = 10 }, &.{
+            u.button(.{ .label = "Enabled", .role = .primary }),
+            u.button(.{ .label = "Disabled", .role = .primary, .disabled = true }),
+        })),
+    });
+}
+
 /// Live examples for the Text page (#270): the semantic type scale + wrapping.
 fn textExamples(u: *ui.Ui) !Widget {
     return u.column(.{ .gap = 18 }, &.{
@@ -103,6 +124,8 @@ const Docs = struct {
             try blocks.append(u.arena, try layoutExamples(u));
         } else if (std.mem.eql(u8, page.name, "Text")) {
             try blocks.append(u.arena, try textExamples(u));
+        } else if (std.mem.eql(u8, page.name, "Button")) {
+            try blocks.append(u.arena, try buttonExamples(u));
         }
         const detail = try u.column(.{ .grow = 1, .padding = .all(28), .gap = 14 }, blocks.items);
 

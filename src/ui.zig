@@ -85,11 +85,32 @@ fn variantBold(v: TextVariant) bool {
 
 /// Button (host). `on_click` is an app message id (MVU). Look is provisional
 /// until the theme system (#21); interaction state (hover/press) arrives with #5.
+pub const ButtonSize = enum { small, medium, large };
+
 pub const Button = struct {
     label: []const u8,
     role: Role = .normal,
+    size: ButtonSize = .medium,
+    /// Disabled buttons are dimmed and dispatch nothing (interaction state
+    /// hover/press/focus arrives with the framework's InteractionState, #5).
+    disabled: bool = false,
     on_click: ?u32 = null,
 };
+
+fn buttonPad(sz: ButtonSize) struct { x: f32, y: f32 } {
+    return switch (sz) {
+        .small => .{ .x = 8, .y = 4 },
+        .medium => .{ .x = 12, .y = 6 },
+        .large => .{ .x = 18, .y = 10 },
+    };
+}
+fn buttonTextSize(sz: ButtonSize) f32 {
+    return switch (sz) {
+        .small => 13,
+        .medium => 15,
+        .large => 18,
+    };
+}
 
 /// A composite widget: an arena-stored value + a generated expander that calls
 /// its `view(ui) !Widget`. Created via `Ui.widget`.
@@ -216,14 +237,24 @@ pub const Ui = struct {
                     .color = roleTextColor(t.role),
                 },
             },
-            .button => |bt| el.* = .{
-                .text = bt.label,
-                .on_click = bt.on_click,
-                .cursor = .pointer,
-                .padding = .symmetric(12 * s, 6 * s),
-                .text_style = .{ .size = 15 * s, .color = Color.white },
-                // Provisional fill — replaced by the per-OS theme (#21).
-                .rect_style = .{ .background = roleFill(bt.role), .corner_radius = .all(6 * s) },
+            .button => |bt| {
+                const pad = buttonPad(bt.size);
+                el.* = .{
+                    .text = bt.label,
+                    // Disabled: dispatch nothing, no pointer affordance.
+                    .on_click = if (bt.disabled) null else bt.on_click,
+                    .cursor = if (bt.disabled) null else .pointer,
+                    .padding = .symmetric(pad.x * s, pad.y * s),
+                    .text_style = .{
+                        .size = buttonTextSize(bt.size) * s,
+                        .color = if (bt.disabled) Color.rgb(170, 170, 175) else Color.white,
+                    },
+                    // Provisional fill — replaced by the per-OS theme (#21).
+                    .rect_style = .{
+                        .background = if (bt.disabled) Color.rgb(70, 70, 76) else roleFill(bt.role),
+                        .corner_radius = .all(6 * s),
+                    },
+                };
             },
             .composite => |c| return self.lower(try c.expand(c.ctx, self)),
         }
@@ -347,6 +378,22 @@ test "lower: text variant picks size+weight; explicit fields override (#270)" {
     try testing.expectEqual(@as(f32, 40), custom.text_style.size);
     try testing.expect(custom.text_style.bold);
     try testing.expect(custom.text_wrap != .nowrap);
+}
+
+test "lower: button size scales padding/text; disabled drops click+cursor (#271)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ui = Ui.init(arena.allocator());
+
+    const large = try ui.lower(ui.button(.{ .label = "Go", .size = .large, .on_click = 3 }));
+    const small = try ui.lower(ui.button(.{ .label = "Go", .size = .small, .on_click = 3 }));
+    try testing.expect(large.text_style.size > small.text_style.size);
+    try testing.expect(large.padding.left > small.padding.left);
+    try testing.expectEqual(@as(?u32, 3), large.on_click);
+
+    const off = try ui.lower(ui.button(.{ .label = "Nope", .disabled = true, .on_click = 3 }));
+    try testing.expectEqual(@as(?u32, null), off.on_click);
+    try testing.expectEqual(@as(?@import("cursor.zig").Cursor, null), off.cursor);
 }
 
 test "fmt allocates a frame-owned label" {
