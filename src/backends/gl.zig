@@ -1363,10 +1363,15 @@ const exact_frag: [*:0]const u8 =
     \\  if (p.x < r.x || p.x >= r.x + r.z || p.y < r.y || p.y >= r.y + r.w) return false;
     \\  float mx = min(r.z, r.w) * 0.5;
     \\  vec2 r0 = r.xy; vec2 rsz = r.zw;
-    \\  if (cornerOut(p, rd.x, min(rd.x, mx), r.x + rd.x,        r.y + rd.x,        r0, rsz)) return false; // tl
-    \\  if (cornerOut(p, rd.y, min(rd.y, mx), r.x + r.z - rd.y,  r.y + rd.y,        r0, rsz)) return false; // tr
-    \\  if (cornerOut(p, rd.z, min(rd.z, mx), r.x + r.z - rd.z,  r.y + r.w - rd.z,  r0, rsz)) return false; // br
-    \\  if (cornerOut(p, rd.w, min(rd.w, mx), r.x + rd.w,        r.y + r.w - rd.w,  r0, rsz)) return false; // bl
+    \\  // Clamp each corner radius BEFORE placing its center (pill clamp): a raw
+    \\  // radius past half-height pushes the center over the midline and the
+    \\  // corner renders square.
+    \\  float tl = min(rd.x, mx); float tr = min(rd.y, mx);
+    \\  float br = min(rd.z, mx); float bl = min(rd.w, mx);
+    \\  if (cornerOut(p, tl, tl, r.x + tl,        r.y + tl,        r0, rsz)) return false; // tl
+    \\  if (cornerOut(p, tr, tr, r.x + r.z - tr,  r.y + tr,        r0, rsz)) return false; // tr
+    \\  if (cornerOut(p, br, br, r.x + r.z - br,  r.y + r.w - br,  r0, rsz)) return false; // br
+    \\  if (cornerOut(p, bl, bl, r.x + bl,        r.y + r.w - bl,  r0, rsz)) return false; // bl
     \\  return true;
     \\}
     \\vec4 borderColorAt(vec2 p) {
