@@ -69,6 +69,16 @@ pub const EdgeInsets = struct {
 
 pub const Direction = enum { row, column };
 
+/// Main-axis distribution of free space (CSS `justify-content`), applied only
+/// when no child consumes the slack via `grow` (#268). `space_between` puts the
+/// extra between items; the others shift the whole run.
+pub const Justify = enum { start, center, end, space_between };
+
+/// Cross-axis placement of each child (CSS `align-items`, #268). `stretch`
+/// (default) fills the cross extent; the others size the child to its content
+/// and place it at the start/center/end.
+pub const AlignItems = enum { stretch, start, center, end };
+
 /// A layout element. This is the layout engine's input tree; the widget
 /// API (#4) will build these. Lifetime: caller-owned, layout never
 /// mutates the element tree.
@@ -87,6 +97,12 @@ pub const Element = struct {
     // Content: either children in a flex container, or a text leaf.
     direction: Direction = .column,
     gap: f32 = 0,
+    /// Main-axis free-space distribution (#268). Default `.start` (pack from the
+    /// leading edge) — the historical behavior.
+    justify: Justify = .start,
+    /// Cross-axis child placement (#268). Default `.stretch` — the historical
+    /// behavior (children fill the cross extent unless they set an explicit size).
+    align_items: AlignItems = .stretch,
     children: []const *const Element = &.{},
     text: ?[]const u8 = null,
     text_style: style.TextStyle = .{},
@@ -419,17 +435,30 @@ fn place(
     }
     const free_main = @max(0, mainOf(dir, inner.size()) - fixed_main);
 
+    // justify-content (#268): with no grow child to absorb it, distribute the
+    // free main-axis space — shift the run (center/end) or space items apart.
+    var lead_extra: f32 = 0;
+    var between_extra: f32 = 0;
+    if (grow_sum == 0 and free_main > 0) switch (el.justify) {
+        .start => {},
+        .center => lead_extra = free_main / 2,
+        .end => lead_extra = free_main,
+        .space_between => if (el.children.len > 1) {
+            between_extra = free_main / @as(f32, @floatFromInt(el.children.len - 1));
+        },
+    };
+
     // Walk children, snapping each edge as we commit it. The last
     // flexible child absorbs the rounding remainder: its end edge is the
     // container's end edge, not an accumulated sum.
-    var cursor: f32 = mainStart(dir, inner);
+    var cursor: f32 = mainStart(dir, inner) + lead_extra;
     var last_grow_index: ?usize = null;
     for (el.children, 0..) |child, i| {
         if (child.grow > 0) last_grow_index = i;
     }
 
     for (el.children, 0..) |child, i| {
-        if (i != 0) cursor += el.gap;
+        if (i != 0) cursor += el.gap + between_extra;
         cursor += marginMainStart(dir, child.margin);
 
         const child_size = measure(b, child);
@@ -450,16 +479,20 @@ fn place(
             }
         }
 
-        // Cross axis (v1): explicit size wins; text leaves keep their
-        // measured size; containers stretch to fill (minus margins).
+        // Cross axis: explicit size and text leaves keep their measured size;
+        // otherwise `align_items` decides — stretch fills the cross extent
+        // (default), while start/center/end size to content and place it (#268).
         const cross_start = crossStart(dir, inner) + marginCrossStart(dir, child.margin);
         const has_explicit_cross = if (dir == .row) child.height != null else child.width != null;
-        const child_cross = if (has_explicit_cross or child.text != null)
-            crossOf(dir, child_size)
-        else
-            crossOf(dir, inner.size()) - marginCross(dir, child.margin);
-
-        const child_slot = rectFrom(dir, cursor, cross_start, child_main, child_cross);
+        const avail_cross = crossOf(dir, inner.size()) - marginCross(dir, child.margin);
+        const stretch = el.align_items == .stretch and !has_explicit_cross and child.text == null;
+        const child_cross = if (stretch) avail_cross else crossOf(dir, child_size);
+        const align_off: f32 = switch (el.align_items) {
+            .start, .stretch => 0,
+            .center => (avail_cross - child_cross) / 2,
+            .end => avail_cross - child_cross,
+        };
+        const child_slot = rectFrom(dir, cursor, cross_start + align_off, child_main, child_cross);
         try place(gpa, b, child, child_slot, out);
 
         cursor += child_main + marginMainEnd(dir, child.margin);
@@ -564,6 +597,62 @@ test "fixed-size children stack in a column with gap" {
     try testing.expectEqual(@as(f32, 3), res.placements[1].rect.height);
     try testing.expectEqual(@as(f32, 5), res.placements[2].rect.y); // 3 + gap 2
     try testing.expectEqual(@as(f32, 5), res.placements[2].rect.height);
+}
+
+test "justify-content distributes free main-axis space (#268)" {
+    var rec = record.RecordBackend.init(testing.allocator);
+    defer rec.deinit();
+    const a: Element = .{ .width = 4, .height = 4 };
+    const c: Element = .{ .width = 4, .height = 4 };
+    // 20 wide, two 4-wide items → 12 free.
+    {
+        const root: Element = .{ .direction = .row, .justify = .center, .children = &.{ &a, &c } };
+        var res = try layoutWith(&rec, &root, 20, 10);
+        defer res.deinit(testing.allocator);
+        try testing.expectEqual(@as(f32, 6), res.placements[1].rect.x); // 12/2
+        try testing.expectEqual(@as(f32, 10), res.placements[2].rect.x);
+    }
+    {
+        const root: Element = .{ .direction = .row, .justify = .end, .children = &.{ &a, &c } };
+        var res = try layoutWith(&rec, &root, 20, 10);
+        defer res.deinit(testing.allocator);
+        try testing.expectEqual(@as(f32, 12), res.placements[1].rect.x);
+    }
+    {
+        const root: Element = .{ .direction = .row, .justify = .space_between, .children = &.{ &a, &c } };
+        var res = try layoutWith(&rec, &root, 20, 10);
+        defer res.deinit(testing.allocator);
+        try testing.expectEqual(@as(f32, 0), res.placements[1].rect.x);
+        try testing.expectEqual(@as(f32, 16), res.placements[2].rect.x); // 4 + 12 gap
+    }
+}
+
+test "align-items places children on the cross axis (#268)" {
+    var rec = record.RecordBackend.init(testing.allocator);
+    defer rec.deinit();
+    const a: Element = .{ .width = 4, .height = 4 }; // explicit cross (height)
+    {
+        const root: Element = .{ .direction = .row, .align_items = .center, .children = &.{&a} };
+        var res = try layoutWith(&rec, &root, 20, 20);
+        defer res.deinit(testing.allocator);
+        try testing.expectEqual(@as(f32, 8), res.placements[1].rect.y); // (20-4)/2
+        try testing.expectEqual(@as(f32, 4), res.placements[1].rect.height);
+    }
+    {
+        const root: Element = .{ .direction = .row, .align_items = .end, .children = &.{&a} };
+        var res = try layoutWith(&rec, &root, 20, 20);
+        defer res.deinit(testing.allocator);
+        try testing.expectEqual(@as(f32, 16), res.placements[1].rect.y); // 20-4
+    }
+    // Default stretch still fills the cross extent for a sizeless container child.
+    {
+        const child: Element = .{ .width = 4 };
+        const root: Element = .{ .direction = .row, .align_items = .stretch, .children = &.{&child} };
+        var res = try layoutWith(&rec, &root, 20, 20);
+        defer res.deinit(testing.allocator);
+        try testing.expectEqual(@as(f32, 0), res.placements[1].rect.y);
+        try testing.expectEqual(@as(f32, 20), res.placements[1].rect.height);
+    }
 }
 
 test "grow children tile the parent exactly (no rounding seams)" {

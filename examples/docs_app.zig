@@ -15,7 +15,7 @@ const force_software = @import("build_options").force_software;
 const Page = struct { name: []const u8, body: []const u8 };
 const pages = [_]Page{
     .{ .name = "Welcome", .body = "Welcome to zooee — a native, cross-platform UI in Zig.\n\nThis app is the component gallery: pick an item on the left to see it, with variants and examples. The look adapts per OS (macOS / WinUI / Linux) and is still being tuned." },
-    .{ .name = "Layout", .body = "Flex containers (row / column) with gap, padding, and grow. `spacer()` fills free space to push siblings apart; `divider()` draws a 1px rule across the cross axis." },
+    .{ .name = "Layout", .body = "Flex containers (row / column) with gap, padding, grow, and CSS-style justify-content / align-items. `spacer()` fills free space; `divider()` draws a 1px rule across the cross axis." },
     .{ .name = "Button", .body = "Buttons trigger actions. Variants: primary, secondary, danger. (Live examples land as the Button component is built, #271.)" },
     .{ .name = "Icon", .body = "Vector icons drawn with the path renderer. They tint with the current role and dim when disabled. Starter set: plus, check, play, chevron." },
     .{ .name = "Text", .body = "Text and labels: titles, headings, body, captions — with the shaping pipeline (Latin, Arabic, BiDi). (#270)" },
@@ -183,6 +183,15 @@ fn layoutExamples(u: *ui.Ui) !Widget {
             u.text("above", .{}),
             u.divider(.column),
             u.text("below", .{}),
+        })),
+        try example(u, "justify-content: space-between / center / end", try u.column(.{ .gap = 8 }, &.{
+            try u.row(.{ .justify = .space_between }, &.{ u.text("L", .{}), u.text("R", .{}) }),
+            try u.row(.{ .justify = .center }, &.{u.text("centered", .{})}),
+            try u.row(.{ .justify = .end }, &.{u.text("right", .{})}),
+        })),
+        try example(u, "align-items: center — icon + label share a baseline", try u.row(.{ .gap = 8, .align_items = .center }, &.{
+            u.icon(.{ .name = .check, .size = 28, .role = .primary }),
+            u.text("vertically centered against the taller icon", .{}),
         })),
     });
 }
