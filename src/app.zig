@@ -650,7 +650,7 @@ fn runWindowMetal(
                 const t0 = std.Io.Timestamp.now(io, .awake).nanoseconds;
                 frame.draw();
                 const us = @divTrunc(std.Io.Timestamp.now(io, .awake).nanoseconds - t0, 1000);
-                std.log.info("[latency] drag frame build+present: {d}us", .{us});
+                std.debug.print("[latency] drag frame build+present: {d}us\n", .{us});
             } else {
                 frame.draw();
             }
