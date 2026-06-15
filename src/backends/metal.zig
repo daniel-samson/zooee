@@ -782,10 +782,15 @@ pub const MetalExactRectRenderer = struct {
         \\    if (p.x < r.x || p.x >= r.x + r.z || p.y < r.y || p.y >= r.y + r.w) return false;
         \\    float mx = min(r.z, r.w) * 0.5;
         \\    float2 r0 = r.xy; float2 rsz = r.zw;
-        \\    if (cornerOut(p, min(rd.x, mx), r.x + rd.x,       r.y + rd.x,       r0, rsz)) return false;
-        \\    if (cornerOut(p, min(rd.y, mx), r.x + r.z - rd.y, r.y + rd.y,       r0, rsz)) return false;
-        \\    if (cornerOut(p, min(rd.z, mx), r.x + r.z - rd.z, r.y + r.w - rd.z, r0, rsz)) return false;
-        \\    if (cornerOut(p, min(rd.w, mx), r.x + rd.w,       r.y + r.w - rd.w, r0, rsz)) return false;
+        \\    // Clamp each corner radius BEFORE placing its center, else a radius
+        \\    // past half-height moves the center over the midline and the corner
+        \\    // renders square (pill clamp).
+        \\    float tl = min(rd.x, mx); float tr = min(rd.y, mx);
+        \\    float br = min(rd.z, mx); float bl = min(rd.w, mx);
+        \\    if (cornerOut(p, tl, r.x + tl,       r.y + tl,       r0, rsz)) return false;
+        \\    if (cornerOut(p, tr, r.x + r.z - tr, r.y + tr,       r0, rsz)) return false;
+        \\    if (cornerOut(p, br, r.x + r.z - br, r.y + r.w - br, r0, rsz)) return false;
+        \\    if (cornerOut(p, bl, r.x + bl,       r.y + r.w - bl, r0, rsz)) return false;
         \\    return true;
         \\}
         \\static float4 borderColorAt(constant U& u, float2 p) {
