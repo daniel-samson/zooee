@@ -5,6 +5,8 @@ const std = @import("std");
 
 pub const geometry = @import("geometry.zig");
 pub const layout = @import("layout.zig");
+/// Widget layer (#4): semantic widgets that lower to the layout tree.
+pub const ui = @import("ui.zig");
 pub const app = @import("app.zig");
 pub const style = @import("style.zig");
 pub const backend = @import("backend.zig");
