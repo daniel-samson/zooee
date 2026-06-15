@@ -238,8 +238,14 @@ fn renderNode(b: Backend, placements: []const Placement, i: *usize) void {
     // the scroll offset. The element's own frame above is drawn unscrolled.
     const scrolling = el.scroll or el.scroll_x != 0 or el.scroll_y != 0;
     if (scrolling) {
-        b.pushClip(contentBox(el, p.rect));
-        b.pushTranslate(-el.scroll_x, -el.scroll_y);
+        const cbox = contentBox(el, p.rect);
+        // Clamp the scroll offset to the content extent so the viewport can't
+        // pan past its content into empty space (#96).
+        const ext = contentExtent(b, el);
+        const sx = std.math.clamp(el.scroll_x, 0, @max(0, ext.width - cbox.width));
+        const sy = std.math.clamp(el.scroll_y, 0, @max(0, ext.height - cbox.height));
+        b.pushClip(cbox);
+        b.pushTranslate(-sx, -sy);
     }
     for (el.children) |_| renderNode(b, placements, i);
     if (scrolling) {
@@ -359,6 +365,22 @@ fn measure(b: Backend, el: *const Element) Size {
         .width = el.width orelse (content.width + chrome_w),
         .height = el.height orelse (content.height + chrome_h),
     };
+}
+
+/// Natural size of an element's children laid out in its direction, ignoring
+/// the element's own fixed width/height. Used to clamp scroll offsets to the
+/// content extent (#96), so a scroll viewport can't pan past its content into
+/// empty space.
+fn contentExtent(b: Backend, el: *const Element) Size {
+    var main: f32 = 0;
+    var cross: f32 = 0;
+    for (el.children, 0..) |child, i| {
+        const cs = measure(b, child);
+        main += mainOf(el.direction, cs) + marginMain(el.direction, child.margin);
+        if (i != 0) main += el.gap;
+        cross = @max(cross, crossOf(el.direction, cs) + marginCross(el.direction, child.margin));
+    }
+    return sizeFrom(el.direction, main, cross);
 }
 
 /// Place pass: position `el`'s border-box inside `slot` (already
@@ -497,9 +519,34 @@ fn marginCrossStart(dir: Direction, m: EdgeInsets) f32 {
 
 const testing = std.testing;
 const record = @import("backends/record.zig");
+const raster = @import("backends/raster.zig");
 
 fn layoutWith(rec: *record.RecordBackend, root: *const Element, w: f32, h: f32) !LayoutResult {
     return layout(testing.allocator, rec.interface(), root, .{ .width = w, .height = h });
+}
+
+test "scroll viewport clamps the offset to content, never panning into empty space (#96)" {
+    var rb = raster.RasterBackend.init(testing.allocator);
+    defer rb.deinit();
+    const b = rb.interface();
+
+    // A 10px-tall scroll box holding three stacked 10px rows (30px content).
+    const r0: Element = .{ .height = 10, .rect_style = .{ .background = style.Color.rgb(255, 0, 0) } };
+    const r1: Element = .{ .height = 10, .rect_style = .{ .background = style.Color.rgb(0, 255, 0) } };
+    const r2: Element = .{ .height = 10, .rect_style = .{ .background = style.Color.rgb(0, 0, 255) } };
+    const content: Element = .{ .direction = .column, .children = &.{ &r0, &r1, &r2 } };
+    // A wildly-too-large scroll offset must clamp to (30 − 10) = 20, showing the
+    // last row — not pan past it into the cleared (white) background.
+    const box: Element = .{ .width = 10, .height = 10, .scroll = true, .scroll_y = 1000, .children = &.{&content} };
+
+    try b.beginFrame(.{ .width = 10, .height = 10 });
+    var result = try layout(testing.allocator, b, &box, .{ .width = 10, .height = 10 });
+    defer result.deinit(testing.allocator);
+    render(b, result);
+    try b.endFrame();
+
+    // Clamped: the box shows the third (blue) row, not empty white.
+    try testing.expectEqual(style.Color.rgb(0, 0, 255), rb.pixelAt(5, 5));
 }
 
 test "fixed-size children stack in a column with gap" {
