@@ -100,16 +100,23 @@ pub fn build(b: *std.Build) void {
             // One .app: Metal (#101) with the raster fallback built in. Force
             // the raster path for QA with ZOOEE_SOFTWARE=1 — no separate app
             // needed (raster's other role, the golden reference, is headless).
-            installMacApp(b, demos_step, guiDemo(b, mod, target, optimize, "zooee-gui-demo", false), "Zooee", "zooee-gui-demo");
+            installMacApp(b, demos_step, guiDemo(b, mod, target, optimize, "zooee-gui-demo", "examples/gui_demo.zig", false), "Zooee", "zooee-gui-demo");
+            // Component gallery / docs app (#266/#268) — the widget-layer master→detail demo.
+            installMacApp(b, demos_step, guiDemo(b, mod, target, optimize, "zooee-docs-demo", "examples/docs_app.zig", false), "Zooee Docs", "zooee-docs-demo");
         },
         .windows => {
-            const gui = guiDemo(b, mod, target, optimize, "zooee-gui-demo", false);
+            const gui = guiDemo(b, mod, target, optimize, "zooee-gui-demo", "examples/gui_demo.zig", false);
             gui.subsystem = .Windows; // no console window for a GUI app
             demos_step.dependOn(&b.addInstallArtifact(gui, .{}).step);
+            const docs = guiDemo(b, mod, target, optimize, "zooee-docs-demo", "examples/docs_app.zig", false);
+            docs.subsystem = .Windows;
+            demos_step.dependOn(&b.addInstallArtifact(docs, .{}).step);
         },
         .linux => {
-            const gui = guiDemo(b, mod, target, optimize, "zooee-gui-demo", false);
+            const gui = guiDemo(b, mod, target, optimize, "zooee-gui-demo", "examples/gui_demo.zig", false);
             demos_step.dependOn(&b.addInstallArtifact(gui, .{}).step);
+            const docs = guiDemo(b, mod, target, optimize, "zooee-docs-demo", "examples/docs_app.zig", false);
+            demos_step.dependOn(&b.addInstallArtifact(docs, .{}).step);
         },
         else => {},
     }
@@ -120,7 +127,9 @@ pub fn build(b: *std.Build) void {
     b.step("run", "Run the terminal demo").dependOn(&run.step);
     if (os == .macos or os == .windows or os == .linux) {
         b.step("run-gui", "Run the native GUI demo (GPU path)")
-            .dependOn(&b.addRunArtifact(guiDemo(b, mod, target, optimize, "zooee-gui-run", false)).step);
+            .dependOn(&b.addRunArtifact(guiDemo(b, mod, target, optimize, "zooee-gui-run", "examples/gui_demo.zig", false)).step);
+        b.step("run-docs", "Run the component gallery / docs app")
+            .dependOn(&b.addRunArtifact(guiDemo(b, mod, target, optimize, "zooee-docs-run", "examples/docs_app.zig", false)).step);
     }
 }
 
@@ -156,9 +165,10 @@ fn guiDemo(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     name: []const u8,
+    src: []const u8,
     force_software: bool,
 ) *std.Build.Step.Compile {
-    const exe = addExe(b, target, optimize, mod, name, "examples/gui_demo.zig");
+    const exe = addExe(b, target, optimize, mod, name, src);
     const opts = b.addOptions();
     opts.addOption(bool, "force_software", force_software);
     exe.root_module.addOptions("build_options", opts);

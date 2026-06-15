@@ -137,8 +137,11 @@ pub const Ui = struct {
     // --- lowering -----------------------------------------------------------
 
     /// Lower a widget to an `Element` tree (expanding composites). Arena-owned;
-    /// hand the result to `layout.layout`/`render`.
+    /// hand the result to `layout.layout`/`render`. Widgets author in **logical
+    /// units**; lowering multiplies sizes by `scale` so the device-pixel layout
+    /// renders at the right physical size on HiDPI.
     pub fn lower(self: *Ui, w: Widget) !*const Element {
+        const s = self.scale;
         const el = try self.arena.create(Element);
         switch (w) {
             .box => |b| {
@@ -146,37 +149,41 @@ pub const Ui = struct {
                 for (b.children, 0..) |c, i| kids[i] = try self.lower(c);
                 el.* = .{
                     .direction = b.direction,
-                    .gap = b.gap,
-                    .padding = b.padding,
-                    .margin = b.margin,
+                    .gap = b.gap * s,
+                    .padding = scaleInsets(b.padding, s),
+                    .margin = scaleInsets(b.margin, s),
                     .grow = b.grow,
-                    .width = b.width,
-                    .height = b.height,
+                    .width = if (b.width) |x| x * s else null,
+                    .height = if (b.height) |x| x * s else null,
                     .children = kids,
                     .rect_style = .{
                         .background = b.background,
-                        .corner_radius = if (b.corner_radius > 0) .all(b.corner_radius) else .none,
+                        .corner_radius = if (b.corner_radius > 0) .all(b.corner_radius * s) else .none,
                     },
                 };
             },
             .text => |t| el.* = .{
                 .text = t.text,
-                .text_style = .{ .size = t.size, .bold = t.bold, .color = roleTextColor(t.role) },
+                .text_style = .{ .size = t.size * s, .bold = t.bold, .color = roleTextColor(t.role) },
             },
             .button => |bt| el.* = .{
                 .text = bt.label,
                 .on_click = bt.on_click,
                 .cursor = .pointer,
-                .padding = .symmetric(12, 6),
-                .text_style = .{ .size = 15, .color = Color.white },
+                .padding = .symmetric(12 * s, 6 * s),
+                .text_style = .{ .size = 15 * s, .color = Color.white },
                 // Provisional fill — replaced by the per-OS theme (#21).
-                .rect_style = .{ .background = roleFill(bt.role), .corner_radius = .all(6) },
+                .rect_style = .{ .background = roleFill(bt.role), .corner_radius = .all(6 * s) },
             },
             .composite => |c| return self.lower(try c.expand(c.ctx, self)),
         }
         return el;
     }
 };
+
+fn scaleInsets(e: layout.EdgeInsets, s: f32) layout.EdgeInsets {
+    return .{ .top = e.top * s, .right = e.right * s, .bottom = e.bottom * s, .left = e.left * s };
+}
 
 // Provisional role palette (replaced by the theme system, #21).
 fn roleFill(role: Role) Color {
