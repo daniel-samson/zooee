@@ -17,6 +17,7 @@
 const std = @import("std");
 const layout = @import("layout.zig");
 const style = @import("style.zig");
+const geometry = @import("geometry.zig");
 
 const Element = layout.Element;
 const Color = style.Color;
@@ -34,6 +35,7 @@ pub const Widget = union(enum) {
     box: Box,
     text: Text,
     button: Button,
+    icon: Icon,
     composite: Composite,
 };
 
@@ -112,6 +114,40 @@ fn buttonTextSize(sz: ButtonSize) f32 {
     };
 }
 
+/// Vector icon (host, #272). Lowers to an Element with a filled polygon path
+/// (reusing the path renderer, #120) sized to a `size`×`size` box. The starter
+/// set is normalized to a 0..1 unit square. Tint follows `role`/`disabled`.
+pub const IconName = enum { plus, check, play, chevron_right };
+
+pub const Icon = struct {
+    name: IconName,
+    size: f32 = 16,
+    role: Role = .normal,
+    disabled: bool = false,
+};
+
+/// Normalized (0..1, y-down) closed polygon for each icon in the starter set.
+fn iconPath(name: IconName) []const geometry.Point {
+    const P = geometry.Point;
+    return switch (name) {
+        .plus => &.{
+            .{ .x = 0.4, .y = 0 }, .{ .x = 0.6, .y = 0 }, .{ .x = 0.6, .y = 0.4 },
+            .{ .x = 1, .y = 0.4 }, .{ .x = 1, .y = 0.6 }, .{ .x = 0.6, .y = 0.6 },
+            .{ .x = 0.6, .y = 1 }, .{ .x = 0.4, .y = 1 }, .{ .x = 0.4, .y = 0.6 },
+            .{ .x = 0, .y = 0.6 }, .{ .x = 0, .y = 0.4 }, .{ .x = 0.4, .y = 0.4 },
+        },
+        .check => &.{
+            .{ .x = 0.4, .y = 0.78 }, .{ .x = 0.05, .y = 0.45 }, .{ .x = 0.18, .y = 0.32 },
+            .{ .x = 0.4, .y = 0.52 }, .{ .x = 0.82, .y = 0.12 }, .{ .x = 0.95, .y = 0.25 },
+        },
+        .play => &.{ P{ .x = 0.2, .y = 0.1 }, P{ .x = 0.85, .y = 0.5 }, P{ .x = 0.2, .y = 0.9 } },
+        .chevron_right => &.{
+            .{ .x = 0.3, .y = 0.12 },  .{ .x = 0.48, .y = 0.12 }, .{ .x = 0.82, .y = 0.5 },
+            .{ .x = 0.48, .y = 0.88 }, .{ .x = 0.3, .y = 0.88 },  .{ .x = 0.6, .y = 0.5 },
+        },
+    };
+}
+
 /// A composite widget: an arena-stored value + a generated expander that calls
 /// its `view(ui) !Widget`. Created via `Ui.widget`.
 pub const Composite = struct {
@@ -178,6 +214,11 @@ pub const Ui = struct {
             .column => .{ .box = .{ .height = 1, .background = divider_color } },
             .row => .{ .box = .{ .width = 1, .background = divider_color } },
         };
+    }
+
+    pub fn icon(self: *Ui, opts: Icon) Widget {
+        _ = self;
+        return .{ .icon = opts };
     }
 
     /// Format text into the arena (for dynamic labels) — caller-owned for the frame.
@@ -256,6 +297,18 @@ pub const Ui = struct {
                     },
                 };
             },
+            .icon => |ic| {
+                const px = ic.size * s;
+                const unit = iconPath(ic.name);
+                const pts = try self.arena.alloc(geometry.Point, unit.len);
+                for (unit, 0..) |p, i| pts[i] = .{ .x = p.x * px, .y = p.y * px };
+                el.* = .{
+                    .width = px,
+                    .height = px,
+                    .path = pts,
+                    .path_color = if (ic.disabled) Color.rgb(170, 170, 175) else iconTint(ic.role),
+                };
+            },
             .composite => |c| return self.lower(try c.expand(c.ctx, self)),
         }
         return el;
@@ -272,6 +325,14 @@ fn roleFill(role: Role) Color {
         .normal => Color.rgb(120, 120, 128),
         .primary => Color.rgb(60, 120, 240),
         .secondary => Color.rgb(120, 120, 128),
+        .danger => Color.rgb(220, 70, 70),
+    };
+}
+fn iconTint(role: Role) Color {
+    return switch (role) {
+        .normal => Color.rgb(220, 220, 225),
+        .primary => Color.rgb(60, 120, 240),
+        .secondary => Color.rgb(150, 150, 156),
         .danger => Color.rgb(220, 70, 70),
     };
 }
@@ -394,6 +455,25 @@ test "lower: button size scales padding/text; disabled drops click+cursor (#271)
     const off = try ui.lower(ui.button(.{ .label = "Nope", .disabled = true, .on_click = 3 }));
     try testing.expectEqual(@as(?u32, null), off.on_click);
     try testing.expectEqual(@as(?@import("cursor.zig").Cursor, null), off.cursor);
+}
+
+test "lower: icon → sized filled path; disabled dims the tint (#272)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ui = Ui.init(arena.allocator());
+
+    const el = try ui.lower(ui.icon(.{ .name = .plus, .size = 24 }));
+    try testing.expectEqual(@as(?f32, 24), el.width);
+    try testing.expectEqual(@as(?f32, 24), el.height);
+    try testing.expect(el.path != null);
+    try testing.expectEqual(@as(usize, 12), el.path.?.len); // plus = 12-point cross
+    // Points are scaled into the 24px box.
+    try testing.expectEqual(@as(f32, 24), el.path.?[3].x);
+
+    // Disabled tint differs from the enabled role tint.
+    const on = try ui.lower(ui.icon(.{ .name = .check, .role = .primary }));
+    const off = try ui.lower(ui.icon(.{ .name = .check, .role = .primary, .disabled = true }));
+    try testing.expect(!std.meta.eql(on.path_color, off.path_color));
 }
 
 test "fmt allocates a frame-owned label" {
