@@ -130,8 +130,11 @@ const Demo = struct {
     pub fn onMenuCommand(self: *Demo, id: u32) zooee.app.Command {
         switch (@as(MenuId, @enumFromInt(id))) {
             .copy => {
-                self.clip_out = items[self.selected]; // copy the selected row label
-                self.last_action = std.fmt.bufPrint(&self.action_buf, "copied: {s}", .{items[self.selected]}) catch "copied";
+                // No text selection yet (textboxes come later) — copy a fixed
+                // string so the clipboard write is verifiable: right-click Copy,
+                // then paste "zooee" into any app.
+                self.clip_out = "zooee";
+                self.last_action = "copied \"zooee\" to clipboard";
             },
             .paste => self.want_paste = true, // loop reads the clipboard → onPaste
             .inspect => {
