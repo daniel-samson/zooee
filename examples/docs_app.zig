@@ -21,8 +21,24 @@ const pages = [_]Page{
     .{ .name = "Text", .body = "Text and labels: titles, headings, body, captions — with the shaping pipeline (Latin, Arabic, BiDi). (#270)" },
     .{ .name = "List", .body = "A selectable list — the master/nav pattern. Each row dispatches on click; the selected row is highlighted. (The sidebar on the left is itself a List.) Virtualization (#29) and keyboard nav (#16) are follow-ups." },
     .{ .name = "Scroll", .body = "A scroll viewport: a fixed-size box that clips its content and pans it on wheel/trackpad. Offsets are clamped to the content extent. Scroll inside the box below." },
-    .{ .name = "Card", .body = "Surfaces/cards: background, border, corner radius, elevation — the detail content blocks. (#275)" },
+    .{ .name = "Card", .body = "Surfaces / panels: a background, rounded corners, an optional border, and an elevation shadow. The building block for content blocks." },
 };
+
+/// Live examples for the Card page (#275): elevation levels + a bordered card.
+fn cardExamples(u: *ui.Ui) !Widget {
+    return u.column(.{ .gap = 18 }, &.{
+        try example(u, "elevation (none / low / medium / high)", try u.row(.{ .gap = 18 }, &.{
+            try u.card(.{ .elevation = .none, .width = 120, .height = 70 }, &.{u.text("none", .{ .role = .secondary })}),
+            try u.card(.{ .elevation = .low, .width = 120, .height = 70 }, &.{u.text("low", .{ .role = .secondary })}),
+            try u.card(.{ .elevation = .medium, .width = 120, .height = 70 }, &.{u.text("medium", .{ .role = .secondary })}),
+            try u.card(.{ .elevation = .high, .width = 120, .height = 70 }, &.{u.text("high", .{ .role = .secondary })}),
+        })),
+        try example(u, "a bordered card with content", try u.card(.{ .border_width = 1, .elevation = .low, .width = 280, .gap = 8 }, &.{
+            u.text("Card title", .{ .variant = .heading }),
+            u.text("Cards group related content on a raised surface.", .{ .variant = .body }),
+        })),
+    });
+}
 
 /// A labelled example block: a caption above a bordered demo surface.
 fn example(u: *ui.Ui, caption: []const u8, demo: Widget) !Widget {
@@ -181,6 +197,8 @@ const Docs = struct {
             try blocks.append(u.arena, try listExamples(u, self.list_demo));
         } else if (std.mem.eql(u8, page.name, "Scroll")) {
             try blocks.append(u.arena, try scrollExamples(u, self.scroll_y));
+        } else if (std.mem.eql(u8, page.name, "Card")) {
+            try blocks.append(u.arena, try cardExamples(u));
         }
         const detail = try u.column(.{ .grow = 1, .padding = .all(28), .gap = 14 }, blocks.items);
 
