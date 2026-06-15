@@ -39,6 +39,7 @@ pub const Widget = union(enum) {
     list: List,
     scroll: ScrollView,
     card: Card,
+    split: Split,
     composite: Composite,
 };
 
@@ -234,6 +235,20 @@ fn elevationShadow(e: Elevation) ?style.BoxShadow {
     };
 }
 
+/// Two-pane split with a divider (host, #268). `.row` = side-by-side panes with
+/// a vertical divider (ew-resize); `.column` = stacked panes with a horizontal
+/// divider (ns-resize). The leading pane is `leading_size` along the split axis
+/// (bind it to model state); the trailing pane fills the rest. Dragging the
+/// divider is wired by the app from pointer events (the divider just carries the
+/// resize cursor); element-level drag handlers are a follow-up (#5).
+pub const Split = struct {
+    axis: layout.Direction = .row,
+    /// Size (logical px) of the leading pane along the split axis.
+    leading_size: f32 = 240,
+    divider: f32 = 1,
+    panes: []const Widget = &.{}, // exactly two: leading, trailing
+};
+
 /// A composite widget: an arena-stored value + a generated expander that calls
 /// its `view(ui) !Widget`. Created via `Ui.widget`.
 pub const Composite = struct {
@@ -392,6 +407,13 @@ pub const Ui = struct {
         return .{ .card = c };
     }
 
+    /// Two-pane split. `leading`/`trailing` are copied into the arena.
+    pub fn split(self: *Ui, opts: Split, leading: Widget, trailing: Widget) !Widget {
+        var sp = opts;
+        sp.panes = try self.arena.dupe(Widget, &.{ leading, trailing });
+        return .{ .split = sp };
+    }
+
     /// Format text into the arena (for dynamic labels) — caller-owned for the frame.
     pub fn fmt(self: *Ui, comptime f: []const u8, args: anytype) []const u8 {
         return std.fmt.allocPrint(self.arena, f, args) catch "";
@@ -547,6 +569,36 @@ pub const Ui = struct {
                         .shadow = shadow,
                     },
                 };
+            },
+            .split => |sp| {
+                const row_axis = sp.axis == .row;
+                // Lower the panes, then impose the split's sizing on each outer
+                // box (arena memory we own — safe to write through the const ptr).
+                const lead = @constCast(try self.lower(sp.panes[0]));
+                const trail = @constCast(try self.lower(sp.panes[1]));
+                if (row_axis) {
+                    lead.width = sp.leading_size * s;
+                    lead.grow = 0;
+                    trail.grow = 1;
+                    trail.width = null;
+                } else {
+                    lead.height = sp.leading_size * s;
+                    lead.grow = 0;
+                    trail.grow = 1;
+                    trail.height = null;
+                }
+                const div = try self.arena.create(Element);
+                div.* = .{
+                    .width = if (row_axis) sp.divider * s else null,
+                    .height = if (row_axis) null else sp.divider * s,
+                    .cursor = if (row_axis) .ew_resize else .ns_resize,
+                    .rect_style = .{ .background = divider_color },
+                };
+                const kids = try self.arena.alloc(*const Element, 3);
+                kids[0] = lead;
+                kids[1] = div;
+                kids[2] = trail;
+                el.* = .{ .direction = sp.axis, .children = kids };
             },
             .composite => |c| return self.lower(try c.expand(c.ctx, self)),
         }
@@ -798,6 +850,29 @@ test "lower: selection controls are clickable and reflect checked state (#277)" 
     // Radio: selected → ring has a dot child.
     const rb = try ui.lower(try ui.radio(.{ .checked = true, .on_change = 7 }));
     try testing.expect(rb.children[0].children.len == 1);
+}
+
+test "lower: split — fixed leading pane, resize-cursor divider, growing trailing (#268)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ui = Ui.init(arena.allocator());
+
+    const el = try ui.lower(try ui.split(
+        .{ .axis = .row, .leading_size = 200, .divider = 2 },
+        try ui.column(.{ .background = Color.rgb(28, 28, 32) }, &.{ui.text("nav", .{})}),
+        try ui.column(.{}, &.{ui.text("content", .{})}),
+    ));
+
+    try testing.expectEqual(layout.Direction.row, el.direction);
+    try testing.expectEqual(@as(usize, 3), el.children.len);
+    // Leading: fixed width, not growing; trailing: grows, no fixed width.
+    try testing.expectEqual(@as(?f32, 200), el.children[0].width);
+    try testing.expectEqual(@as(f32, 0), el.children[0].grow);
+    try testing.expectEqual(@as(f32, 1), el.children[2].grow);
+    try testing.expect(el.children[2].width == null);
+    // Divider: thin, carries the horizontal-resize cursor.
+    try testing.expectEqual(@as(?f32, 2), el.children[1].width);
+    try testing.expectEqual(@as(?@import("cursor.zig").Cursor, .ew_resize), el.children[1].cursor);
 }
 
 test "fmt allocates a frame-owned label" {
