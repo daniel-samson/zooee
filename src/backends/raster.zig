@@ -270,19 +270,31 @@ pub const RasterBackend = struct {
     /// Is pixel center (px, py) inside the rect with per-corner radii?
     fn insideRounded(r: Rect, radius: style.CornerRadius, px: f32, py: f32) bool {
         if (px < r.x or px >= r.x + r.width or py < r.y or py >= r.y + r.height) return false;
+        // Clamp each corner radius to half the smaller dimension BEFORE placing
+        // the corner centers (pill behaviour). Using the raw radius for the
+        // center pushes it past the midline when radius > half-height, so the
+        // quadrant test stops covering the real corner and it renders square.
         const max_rad = @min(r.width, r.height) / 2;
-        const corners = [4]struct { rad: f32, cx: f32, cy: f32 }{
-            .{ .rad = radius.top_left, .cx = r.x + radius.top_left, .cy = r.y + radius.top_left },
-            .{ .rad = radius.top_right, .cx = r.x + r.width - radius.top_right, .cy = r.y + radius.top_right },
-            .{ .rad = radius.bottom_right, .cx = r.x + r.width - radius.bottom_right, .cy = r.y + r.height - radius.bottom_right },
-            .{ .rad = radius.bottom_left, .cx = r.x + radius.bottom_left, .cy = r.y + r.height - radius.bottom_left },
+        const tl = @min(radius.top_left, max_rad);
+        const tr = @min(radius.top_right, max_rad);
+        const br = @min(radius.bottom_right, max_rad);
+        const bl = @min(radius.bottom_left, max_rad);
+        // Each corner carries its outward direction explicitly (left/top) rather
+        // than inferring it from the center vs the midline — for an exact pill
+        // (radius == half-height) every center sits on the midline, which would
+        // make that inference assign the bottom corners to the wrong half.
+        const corners = [4]struct { rad: f32, cx: f32, cy: f32, left: bool, top: bool }{
+            .{ .rad = tl, .cx = r.x + tl, .cy = r.y + tl, .left = true, .top = true },
+            .{ .rad = tr, .cx = r.x + r.width - tr, .cy = r.y + tr, .left = false, .top = true },
+            .{ .rad = br, .cx = r.x + r.width - br, .cy = r.y + r.height - br, .left = false, .top = false },
+            .{ .rad = bl, .cx = r.x + bl, .cy = r.y + r.height - bl, .left = true, .top = false },
         };
         for (corners) |c| {
-            const rad = @min(c.rad, max_rad);
+            const rad = c.rad;
             if (rad <= 0) continue;
-            // Only test points in this corner's square.
-            const in_x = if (c.cx <= r.x + r.width / 2) px < c.cx else px > c.cx;
-            const in_y = if (c.cy <= r.y + r.height / 2) py < c.cy else py > c.cy;
+            // Only test points in this corner's outer quadrant.
+            const in_x = if (c.left) px < c.cx else px > c.cx;
+            const in_y = if (c.top) py < c.cy else py > c.cy;
             if (in_x and in_y) {
                 const dx = px - c.cx;
                 const dy = py - c.cy;
@@ -894,6 +906,27 @@ test "rounded clip cuts the corner of clipped content" {
     try expectPixel(&raster, 8, 0, Color.rgb(255, 0, 0)); // top edge midpoint kept
     try expectPixel(&raster, 15, 15, Color.white); // opposite corner cut
     try testing.expectEqual(@as(usize, 0), raster.rounded_clips); // balanced pop
+}
+
+test "corner radius past half-height clamps to a pill, not square corners (#117)" {
+    var raster = RasterBackend.init(testing.allocator);
+    defer raster.deinit();
+    const b = raster.interface();
+
+    // A wide, short rect with a radius (20) far exceeding half its height (6).
+    // It must clamp to a capsule and CUT all four corners. The bug placed the
+    // corner center using the raw radius, pushing it past the midline so the
+    // corner stayed square (filled).
+    try b.beginFrame(.{ .width = 40, .height = 12 });
+    b.drawRect(.{ .x = 0, .y = 0, .width = 40, .height = 12 }, .{ .background = Color.black, .corner_radius = .all(20) });
+    try b.endFrame();
+
+    try expectPixel(&raster, 0, 0, Color.white); // top-left cut
+    try expectPixel(&raster, 0, 11, Color.white); // bottom-left cut
+    try expectPixel(&raster, 39, 0, Color.white); // top-right cut
+    try expectPixel(&raster, 39, 11, Color.white); // bottom-right cut
+    try expectPixel(&raster, 20, 6, Color.black); // center filled
+    try expectPixel(&raster, 3, 6, Color.black); // left capsule end filled at mid-height
 }
 
 test "box shadow paints a blurred halo behind the rect" {
