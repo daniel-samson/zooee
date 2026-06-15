@@ -249,6 +249,10 @@ pub const Split = struct {
     panes: []const Widget = &.{}, // exactly two: leading, trailing
 };
 
+/// Width (logical px) of the divider's invisible grab/cursor gutter. The visible
+/// separator is a hairline on the leading pane; this is just the hit zone.
+const split_grab: f32 = 8;
+
 /// A composite widget: an arena-stored value + a generated expander that calls
 /// its `view(ui) !Widget`. Created via `Ui.widget`.
 pub const Composite = struct {
@@ -576,23 +580,30 @@ pub const Ui = struct {
                 // box (arena memory we own — safe to write through the const ptr).
                 const lead = @constCast(try self.lower(sp.panes[0]));
                 const trail = @constCast(try self.lower(sp.panes[1]));
+                // The visible separator is a hairline drawn on the leading pane's
+                // trailing edge; the divider element itself is a wide *invisible*
+                // grab gutter that carries the resize cursor (a 1px element is
+                // unhittable). The gutter shows the backdrop, so it reads as a
+                // hairline + an easy grab zone — the macOS / JetBrains split feel.
+                const line: style.BorderSide = .{ .width = sp.divider * s, .color = divider_color };
                 if (row_axis) {
                     lead.width = sp.leading_size * s;
                     lead.grow = 0;
+                    lead.rect_style.border.right = line;
                     trail.grow = 1;
                     trail.width = null;
                 } else {
                     lead.height = sp.leading_size * s;
                     lead.grow = 0;
+                    lead.rect_style.border.bottom = line;
                     trail.grow = 1;
                     trail.height = null;
                 }
                 const div = try self.arena.create(Element);
                 div.* = .{
-                    .width = if (row_axis) sp.divider * s else null,
-                    .height = if (row_axis) null else sp.divider * s,
+                    .width = if (row_axis) split_grab * s else null,
+                    .height = if (row_axis) null else split_grab * s,
                     .cursor = if (row_axis) .ew_resize else .ns_resize,
-                    .rect_style = .{ .background = divider_color },
                 };
                 const kids = try self.arena.alloc(*const Element, 3);
                 kids[0] = lead;
@@ -870,8 +881,11 @@ test "lower: split — fixed leading pane, resize-cursor divider, growing traili
     try testing.expectEqual(@as(f32, 0), el.children[0].grow);
     try testing.expectEqual(@as(f32, 1), el.children[2].grow);
     try testing.expect(el.children[2].width == null);
-    // Divider: thin, carries the horizontal-resize cursor.
-    try testing.expectEqual(@as(?f32, 2), el.children[1].width);
+    // Visible separator is a hairline on the leading pane's trailing edge.
+    try testing.expectEqual(@as(f32, 2), el.children[0].rect_style.border.right.width);
+    // Divider element is a wide invisible grab gutter carrying the resize cursor.
+    try testing.expectEqual(@as(?f32, split_grab), el.children[1].width);
+    try testing.expect(el.children[1].rect_style.background == null);
     try testing.expectEqual(@as(?@import("cursor.zig").Cursor, .ew_resize), el.children[1].cursor);
 }
 

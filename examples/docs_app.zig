@@ -282,8 +282,9 @@ const Docs = struct {
             // Divider drag: grab near the sidebar's trailing edge, then track the
             // pointer. Pointer x is device px; sidebar_w is logical (÷ scale).
             .pointer_down => |p| {
+                // Grab band covers the hairline + the divider's grab gutter (~8px).
                 const edge = self.sidebar_w * self.scale;
-                if (@abs(p.position.x - edge) <= 6 * self.scale) {
+                if (@abs(p.position.x - edge) <= 10 * self.scale) {
                     self.dragging = true;
                     return .redraw;
                 }
