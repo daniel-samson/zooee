@@ -207,11 +207,20 @@ const Docs = struct {
         // List. Top padding clears the traffic lights under the integrated bar.
         const rows = try u.arena.alloc(ui.ListRow, pages.len);
         for (pages, 0..) |p, i| rows[i] = .{ .label = p.name, .on_click = @intCast(i) };
+        // The sidebar list lives in a rounded, shadowed card inset on the window
+        // backdrop. Top inset leaves the traffic lights floating above the card.
         const sidebar = try u.column(.{
-            .padding = .{ .top = 36, .left = 12, .right = 12, .bottom = 12 },
-            .background = Color.rgb(28, 28, 32),
+            .padding = .{ .top = 38, .left = 12, .right = 6, .bottom = 12 },
         }, &.{
-            try u.list(.{ .selected = self.selected }, rows),
+            try u.card(.{
+                .grow = 1,
+                .corner_radius = 12,
+                .elevation = .medium,
+                .padding = .all(8),
+                .background = Color.rgb(34, 34, 40),
+            }, &.{
+                try u.list(.{ .selected = self.selected }, rows),
+            }),
         });
 
         // Detail: the selected page — heading, description, then live examples.
@@ -238,8 +247,10 @@ const Docs = struct {
         }
         const detail = try u.column(.{ .grow = 1, .padding = .all(28), .gap = 14 }, blocks.items);
 
-        // Resizable split: drag the divider → sidebar_w changes → relayout next frame.
-        return u.split(.{ .leading_size = self.sidebar_w, .divider = 1 }, sidebar, detail);
+        // Resizable split: drag the divider → sidebar_w changes → relayout next
+        // frame. No visible hairline (divider=0) — the sidebar card's shadow
+        // separates the panes; the invisible grab gutter still resizes.
+        return u.split(.{ .leading_size = self.sidebar_w, .divider = 0 }, sidebar, detail);
     }
 
     pub fn update(self: *Docs, msg: Msg) zooee.app.Command {
