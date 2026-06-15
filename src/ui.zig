@@ -51,13 +51,37 @@ pub const Box = struct {
     children: []const Widget = &.{},
 };
 
+/// Semantic text role in the type scale (#270). Picks a default size + weight;
+/// `Text.size`/`Text.bold` override per instance. Concrete values are
+/// provisional until the theme system (#21).
+pub const TextVariant = enum { title, heading, body, caption };
+
 /// Text leaf (host).
 pub const Text = struct {
     text: []const u8 = "", // filled by the `text` builder from its `str` arg
     role: Role = .normal,
-    size: f32 = 15,
-    bold: bool = false,
+    variant: TextVariant = .body,
+    /// Override the variant's default size / weight. Null = use the variant.
+    size: ?f32 = null,
+    bold: ?bool = null,
+    /// Wrap to the content width instead of a single truncated line (#192).
+    wrap: bool = false,
 };
+
+fn variantSize(v: TextVariant) f32 {
+    return switch (v) {
+        .title => 28,
+        .heading => 20,
+        .body => 15,
+        .caption => 13,
+    };
+}
+fn variantBold(v: TextVariant) bool {
+    return switch (v) {
+        .title, .heading => true,
+        .body, .caption => false,
+    };
+}
 
 /// Button (host). `on_click` is an app message id (MVU). Look is provisional
 /// until the theme system (#21); interaction state (hover/press) arrives with #5.
@@ -185,7 +209,12 @@ pub const Ui = struct {
             },
             .text => |t| el.* = .{
                 .text = t.text,
-                .text_style = .{ .size = t.size * s, .bold = t.bold, .color = roleTextColor(t.role) },
+                .text_wrap = if (t.wrap) .wrap else .nowrap,
+                .text_style = .{
+                    .size = (t.size orelse variantSize(t.variant)) * s,
+                    .bold = t.bold orelse variantBold(t.variant),
+                    .color = roleTextColor(t.role),
+                },
             },
             .button => |bt| el.* = .{
                 .text = bt.label,
@@ -297,6 +326,27 @@ test "lower: spacer grows, divider is a 1px rule on the cross axis (#269)" {
     // Horizontal rule in a column: 1px tall.
     const hrule = try ui.lower(ui.divider(.column));
     try testing.expectEqual(@as(f32, 1), hrule.height.?);
+}
+
+test "lower: text variant picks size+weight; explicit fields override (#270)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ui = Ui.init(arena.allocator());
+
+    // Variant supplies defaults.
+    const title = try ui.lower(ui.text("T", .{ .variant = .title }));
+    try testing.expectEqual(@as(f32, 28), title.text_style.size);
+    try testing.expect(title.text_style.bold);
+
+    const caption = try ui.lower(ui.text("c", .{ .variant = .caption }));
+    try testing.expectEqual(@as(f32, 13), caption.text_style.size);
+    try testing.expect(!caption.text_style.bold);
+
+    // Explicit size/bold override the variant; wrap maps to text_wrap.
+    const custom = try ui.lower(ui.text("x", .{ .variant = .body, .size = 40, .bold = true, .wrap = true }));
+    try testing.expectEqual(@as(f32, 40), custom.text_style.size);
+    try testing.expect(custom.text_style.bold);
+    try testing.expect(custom.text_wrap != .nowrap);
 }
 
 test "fmt allocates a frame-owned label" {
