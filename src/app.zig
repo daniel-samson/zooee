@@ -415,6 +415,7 @@ fn runWindowGl(
 
     var glb = try gl_backend.GlBackend.initOnCurrent(gpa);
     glb.clear_color = theme.clearRgba(); // theme backdrop (theming)
+    glb.present_only = capture_path == null; // pipeline the present (#264)
     defer glb.deinit();
     if (system_font.loadFontSet(gpa, io)) |set| glb.setFontSet(set);
     const b = glb.interface();
@@ -547,6 +548,9 @@ fn runWindowMetal(
 
     var mb = try metal_backend.MetalBackend.initOn(gpa, ctx.device, ctx.queue);
     mb.clear_color = theme.clearRgba(); // theme backdrop (theming)
+    // Windowed present pipelines (no per-frame GPU stall); the capture path
+    // reads pixels back on the CPU, so it keeps the completion wait (#264).
+    mb.present_only = capture_path == null;
     defer mb.deinit();
     if (system_font.loadFontSet(gpa, io)) |set| mb.setFontSet(set);
     const b = mb.interface();

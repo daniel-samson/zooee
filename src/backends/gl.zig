@@ -1915,6 +1915,10 @@ pub const GlBackend = struct {
     /// Owned hidden window for the offscreen/golden path; null when the
     /// platform owns the window + context (the runWindow GPU-present path).
     win: ?GlWindow = null,
+    /// Windowed present mode (#264): skip the per-frame glFinish in endFrame
+    /// (glSwapBuffers syncs; nothing reads back). Left false for offscreen/
+    /// golden readback paths, which glReadPixels the framebuffer on the CPU.
+    present_only: bool = false,
     rect: RectRenderer,
     exact: ExactRectRenderer,
     image: ImageRenderer,
@@ -2106,7 +2110,10 @@ pub const GlBackend = struct {
         const self = self_(ptr);
         std.debug.assert(self.layers.items.len == 0); // balanced push/popLayer
         std.debug.assert(self.rounds.items.len == 0); // balanced rounded clips
-        glFinish();
+        // Windowed present (#264): glSwapBuffers syncs, nothing reads back, so
+        // skip the per-frame stall. Offscreen/golden readback keeps glFinish so
+        // glReadPixels sees a completed frame.
+        if (!self.present_only) glFinish();
     }
 
     fn col(c: style.Color) [4]f32 {
