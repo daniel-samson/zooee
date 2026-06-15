@@ -569,17 +569,19 @@ pub const Window = struct {
         _ = msg(void, struct { id }, self.ns_window, sel("setTitle:"), .{nsString(title)});
     }
 
-    /// Pop up `items` as a native NSMenu context menu at client-area point
-    /// (x, y) — y measured top-down to match the rest of zooee — and block
-    /// until the user chooses or dismisses (#129). Returns the chosen item id,
-    /// or null on dismiss.
-    pub fn popupMenu(self: *Window, items: []const menu_mod.Item, x: f64, y: f64) ?u32 {
+    /// Pop up `items` as a native NSMenu context menu at client-area pixel
+    /// point (x, y) — top-down pixels, matching zooee's event coordinates — and
+    /// block until the user chooses or dismisses (#129). Returns the chosen item
+    /// id, or null on dismiss.
+    pub fn popupMenu(self: *Window, items: []const menu_mod.Item, x: f32, y: f32) ?u32 {
         menu_selected_id = 0;
         const m = buildMenu(items);
         const view = msg(id, struct {}, self.ns_window, sel("contentView"), .{});
-        // AppKit view coords are bottom-up; flip y against the view height.
+        // Event coords are device pixels; AppKit view coords are points and
+        // bottom-up. Convert px→points (÷ backing scale) then flip y.
+        const scale = msg(f64, struct {}, self.ns_window, sel("backingScaleFactor"), .{});
         const bounds = msg(NSRect, struct {}, view, sel("bounds"), .{});
-        const loc: NSPoint = .{ .x = x, .y = bounds.h - y };
+        const loc: NSPoint = .{ .x = @as(f64, x) / scale, .y = bounds.h - @as(f64, y) / scale };
         _ = msg(bool, struct { id, NSPoint, id }, m, sel("popUpMenuPositioningItem:atLocation:inView:"), .{ null, loc, view });
         const r = menu_selected_id;
         menu_selected_id = 0; // clear so a later takeMenuCommand() isn't fooled

@@ -426,11 +426,13 @@ pub const Window = struct {
     /// block until the user chooses an item or dismisses (#129). Returns the
     /// chosen item's id, or null on dismiss / build failure. Items' enabled,
     /// checked, separator and submenu state are honored.
-    pub fn popupMenu(self: *Window, items: []const menu_mod.Item, x: i32, y: i32) ?u32 {
+    pub fn popupMenu(self: *Window, items: []const menu_mod.Item, x: f32, y: f32) ?u32 {
         const hmenu = buildPopupMenu(self.gpa, items) orelse return null;
         defer _ = DestroyMenu(hmenu);
 
-        var pt: POINT = .{ .x = x, .y = y };
+        // Event coords are client-area pixels — exactly what TrackPopupMenu
+        // wants after ClientToScreen.
+        var pt: POINT = .{ .x = @intFromFloat(x), .y = @intFromFloat(y) };
         _ = ClientToScreen(self.hwnd, &pt);
         // TrackPopupMenu needs the window foreground or it dismisses instantly.
         _ = SetForegroundWindow(self.hwnd);
