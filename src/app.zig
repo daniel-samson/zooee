@@ -26,6 +26,7 @@ const display = @import("display.zig");
 const theme_mod = @import("theme.zig");
 const style_mod = @import("style.zig");
 const cursor_mod = @import("cursor.zig");
+const dialog = @import("dialog.zig");
 const window_mod = @import("window.zig");
 pub const Theme = theme_mod.Theme;
 
@@ -345,6 +346,7 @@ pub fn runWindow(
 
     var fl = FrameLoop.init(platform.refreshHz(window));
     var last_cursor: cursor_mod.Cursor = .default; // #123: only re-set on change
+    setupMenuBar(Model, window, model); // #129: install the native menu bar
     loop: while (true) {
         const dt = fl.delta(io);
         for (window.pumpEvents()) |ev| {
@@ -358,6 +360,8 @@ pub fn runWindow(
             // routes the choice through the model's onMenuCommand.
             if (handleContextMenu(Model, window, model, ev) == .redraw) dirty = true;
         }
+        // Native menu-bar selections + file-open requests (#129).
+        if (frameOsHooks(Model, window, model, gpa) == .redraw) dirty = true;
         if (animate(Model, model, dt) == .redraw) dirty = true;
 
         if (dirty) {
@@ -446,6 +450,7 @@ fn runWindowGl(
 
     var fl = FrameLoop.init(platform.refreshHz(window));
     var last_cursor: cursor_mod.Cursor = .default; // #123: only re-set on change
+    setupMenuBar(Model, window, model); // #129: install the native menu bar
     loop: while (true) {
         const dt = fl.delta(io);
         for (window.pumpEvents()) |ev| {
@@ -459,6 +464,8 @@ fn runWindowGl(
             // routes the choice through the model's onMenuCommand.
             if (handleContextMenu(Model, window, model, ev) == .redraw) dirty = true;
         }
+        // Native menu-bar selections + file-open requests (#129).
+        if (frameOsHooks(Model, window, model, gpa) == .redraw) dirty = true;
         if (animate(Model, model, dt) == .redraw) dirty = true;
         if (modelBackground(Model, model)) |c| glb.clear_color = c.rgbaF(); // theming toggle
 
@@ -576,6 +583,7 @@ fn runWindowMetal(
 
     var fl = FrameLoop.init(platform.refreshHz(window));
     var last_cursor: cursor_mod.Cursor = .default; // #123: only re-set on change
+    setupMenuBar(Model, window, model); // #129: install the native menu bar
     loop: while (true) {
         const dt = fl.delta(io);
         for (window.pumpEvents()) |ev| {
@@ -589,6 +597,8 @@ fn runWindowMetal(
             // routes the choice through the model's onMenuCommand.
             if (handleContextMenu(Model, window, model, ev) == .redraw) dirty = true;
         }
+        // Native menu-bar selections + file-open requests (#129).
+        if (frameOsHooks(Model, window, model, gpa) == .redraw) dirty = true;
         if (animate(Model, model, dt) == .redraw) dirty = true;
 
         if (dirty) {
@@ -690,6 +700,7 @@ fn runWindowD3d(
 
     var fl = FrameLoop.init(platform.refreshHz(window));
     var last_cursor: cursor_mod.Cursor = .default; // #123: only re-set on change
+    setupMenuBar(Model, window, model); // #129: install the native menu bar
     loop: while (true) {
         const dt = fl.delta(io);
         for (window.pumpEvents()) |ev| {
@@ -703,6 +714,8 @@ fn runWindowD3d(
             // routes the choice through the model's onMenuCommand.
             if (handleContextMenu(Model, window, model, ev) == .redraw) dirty = true;
         }
+        // Native menu-bar selections + file-open requests (#129).
+        if (frameOsHooks(Model, window, model, gpa) == .redraw) dirty = true;
         if (animate(Model, model, dt) == .redraw) dirty = true;
         if (modelBackground(Model, model)) |c| db.clear_color = c.rgbaF(); // theming toggle
 
@@ -887,6 +900,36 @@ fn handleContextMenu(comptime Model: type, window: anytype, model: *Model, ev: e
     const chosen = window.popupMenu(items, p.position.x, p.position.y) orelse return .none;
     if (@hasDecl(Model, "onMenuCommand")) return model.onMenuCommand(chosen);
     return .none;
+}
+
+/// Install the model's native menu bar once at loop start, if it exposes
+/// `menuBar()`. No-op otherwise / on X11 (no native menu bar). (#129)
+fn setupMenuBar(comptime Model: type, window: anytype, model: *Model) void {
+    if (@hasDecl(Model, "menuBar")) window.setMenuBar(model.menuBar());
+}
+
+/// Per-frame OS hooks (#129): drain a menu-bar selection and, if the model
+/// requested it (via `takeOpenRequest`), show the native file-open dialog and
+/// hand the chosen path to `onFileChosen`. Returns `.redraw` if anything
+/// changed model state. No-ops without the corresponding hooks.
+fn frameOsHooks(comptime Model: type, window: anytype, model: *Model, gpa: std.mem.Allocator) Command {
+    var cmd: Command = .none;
+    if (@hasDecl(Model, "menuBar")) {
+        if (window.takeMenuCommand()) |id| {
+            if (model.onMenuCommand(id) == .redraw) cmd = .redraw;
+        }
+    }
+    if (@hasDecl(Model, "takeOpenRequest") and @hasDecl(Model, "onFileChosen")) {
+        if (model.takeOpenRequest()) {
+            if (dialog.openFile(gpa, .{ .title = "Open a file" })) |maybe| {
+                if (maybe) |path| {
+                    defer gpa.free(path);
+                    if (model.onFileChosen(path) == .redraw) cmd = .redraw;
+                }
+            } else |_| {}
+        }
+    }
+    return cmd;
 }
 
 /// On a pointer_move, resolve the cursor under the pointer and apply it to the
