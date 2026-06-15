@@ -582,7 +582,10 @@ const Demo = struct {
             scroll_rows[ri] = .{
                 .height = 22 * scale,
                 .margin = .{ .bottom = 4 * scale },
-                .rect_style = .{ .background = row_colors[ri], .corner_radius = .all(4 * scale) },
+                // Pill shape: a "max" corner radius. Renderers clamp the radius
+                // to half the smaller dimension, so any large value gives fully
+                // rounded (pill) ends — the native-looking capsule.
+                .rect_style = .{ .background = row_colors[ri], .corner_radius = .all(9999) },
             };
             scroll_row_ptrs[ri] = &scroll_rows[ri];
         }
