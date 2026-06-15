@@ -1494,6 +1494,10 @@ pub const MetalBackend = struct {
     rounds: std.ArrayList(RoundClip) = .empty,
     clip_ops: std.ArrayList(ClipOp) = .empty,
     fonts: ?fontset.FontSet = null,
+    /// Windowed present mode (#264): skip the per-frame GPU completion wait in
+    /// endFrame (nothing reads back on screen). Left false for offscreen/golden
+    /// readback paths, which getBytes the target on the CPU.
+    present_only: bool = false,
     /// (text, size, style) → measured Size (#264). Cleared when the font set
     /// changes; freed in deinit. Keys own their text bytes.
     measure_cache: std.HashMapUnmanaged(MeasureKey, geometry.Size, MeasureCtx, std.hash_map.default_max_load_percentage) = .empty,
@@ -1764,7 +1768,12 @@ pub const MetalBackend = struct {
         var it = self.glyphs.valueIterator();
         while (it.next()) |g| g.uploadIfDirty();
         _ = msg(void, struct {}, self.cmdbuf, sel("commit"), .{});
-        _ = msg(void, struct {}, self.cmdbuf, sel("waitUntilCompleted"), .{});
+        // Block until the GPU finishes only when the CPU reads the target back
+        // (offscreen goldens / capture). In the windowed present path nothing
+        // reads back: the queue is FIFO so presentTo (which samples the target)
+        // runs after this render, and the committed buffer retains its resources
+        // until completion — so the wait is pure latency there (#264).
+        if (!self.present_only) _ = msg(void, struct {}, self.cmdbuf, sel("waitUntilCompleted"), .{});
         for (self.pending_tex.items) |t| release(t);
         self.pending_tex.clearRetainingCapacity();
         self.enc = null;
