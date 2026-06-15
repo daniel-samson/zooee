@@ -20,6 +20,7 @@ const pages = [_]Page{
     .{ .name = "Icon", .body = "Vector icons drawn with the path renderer. They tint with the current role and dim when disabled. Starter set: plus, check, play, chevron." },
     .{ .name = "Text", .body = "Text and labels: titles, headings, body, captions — with the shaping pipeline (Latin, Arabic, BiDi). (#270)" },
     .{ .name = "List", .body = "A selectable list — the master/nav pattern. Each row dispatches on click; the selected row is highlighted. (The sidebar on the left is itself a List.) Virtualization (#29) and keyboard nav (#16) are follow-ups." },
+    .{ .name = "Scroll", .body = "A scroll viewport: a fixed-size box that clips its content and pans it on wheel/trackpad. Offsets are clamped to the content extent. Scroll inside the box below." },
     .{ .name = "Card", .body = "Surfaces/cards: background, border, corner radius, elevation — the detail content blocks. (#275)" },
 };
 
@@ -33,6 +34,20 @@ fn example(u: *ui.Ui, caption: []const u8, demo: Widget) !Widget {
             .corner_radius = 8,
         }, &.{demo}),
     });
+}
+
+/// Live example for the Scroll page (#274): a tall content column in a viewport.
+fn scrollExamples(u: *ui.Ui, offset: f32) !Widget {
+    const lines = try u.arena.alloc(Widget, 24);
+    for (0..24) |i| lines[i] = u.text(u.fmt("Line {d} — scroll to see more", .{i + 1}), .{});
+    return example(u, "wheel/trackpad scrolls the content within the box", try u.scroll(.{
+        .width = 320,
+        .height = 180,
+        .gap = 6,
+        .padding = .all(12),
+        .scroll_y = offset,
+        .background = Color.rgb(24, 24, 30),
+    }, lines));
 }
 
 /// Base message id for the List page's demo rows (kept clear of page indices).
@@ -135,6 +150,7 @@ const Msg = enum(u32) { _ };
 const Docs = struct {
     selected: usize = 0,
     list_demo: usize = 1, // selected row on the List page's demo
+    scroll_y: f32 = 0, // offset for the Scroll page's viewport
 
     pub fn viewUi(self: *Docs, u: *ui.Ui) !Widget {
         // Master: a selectable list of pages — dogfooding the List widget (#273).
@@ -163,6 +179,8 @@ const Docs = struct {
             try blocks.append(u.arena, try iconExamples(u));
         } else if (std.mem.eql(u8, page.name, "List")) {
             try blocks.append(u.arena, try listExamples(u, self.list_demo));
+        } else if (std.mem.eql(u8, page.name, "Scroll")) {
+            try blocks.append(u.arena, try scrollExamples(u, self.scroll_y));
         }
         const detail = try u.column(.{ .grow = 1, .padding = .all(28), .gap = 14 }, blocks.items);
 
@@ -185,9 +203,13 @@ const Docs = struct {
     }
 
     pub fn onEvent(self: *Docs, ev: zooee.event.Event) zooee.app.Command {
-        _ = self;
         switch (ev) {
             .text => |t| if (t.codepoint == 'q') return .quit,
+            // Drive the Scroll page's viewport (engine clamps to content extent).
+            .scroll => |s| {
+                self.scroll_y = @max(0, self.scroll_y + s.dy * 12);
+                return .redraw;
+            },
             else => {},
         }
         return .none;
