@@ -536,6 +536,9 @@ fn runWindowMetal(
     const gpa = init.arena.allocator();
     const io = init.io;
     const capture_path = init.environ_map.get("ZOOEE_CAPTURE");
+    // Opt-in latency readout (#268): prints pump→present time on drag frames so
+    // the input-to-photon budget can be measured, not guessed.
+    const latency_log = init.environ_map.contains("ZOOEE_LATENCY");
 
     var ctx = try metal_backend.MetalContext.create();
     defer ctx.destroy();
@@ -643,13 +646,25 @@ fn runWindowMetal(
                 try writePpm(gpa, io, path, pixels, mb.width, mb.height);
                 return;
             }
-            frame.draw();
+            if (latency_log and pointer_drag) {
+                const t0 = std.Io.Timestamp.now(io, .awake).nanoseconds;
+                frame.draw();
+                const us = @divTrunc(std.Io.Timestamp.now(io, .awake).nanoseconds - t0, 1000);
+                std.log.info("[latency] drag frame build+present: {d}us", .{us});
+            } else {
+                frame.draw();
+            }
             dirty = false;
         }
 
         // Re-pace if the window moved to a different-refresh monitor (#27).
         if (fl.shouldRetune()) fl.retune(platform.refreshHz(window));
-        try fl.pace(io);
+        // Skip the pacing sleep on frames driven by a pointer drag: the sync
+        // present already paces us, and sleeping would age the *next* input by
+        // up to a full refresh before we pump it (the residual divider lag).
+        // Holding still mid-drag emits no events → pointer_drag is false → we
+        // pace normally, so this never busy-spins.
+        if (!pointer_drag) try fl.pace(io);
     }
 }
 
