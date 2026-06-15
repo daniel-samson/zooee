@@ -25,12 +25,27 @@ const pages = [_]Page{
 /// A labelled example block: a caption above a bordered demo surface.
 fn example(u: *ui.Ui, caption: []const u8, demo: Widget) !Widget {
     return u.column(.{ .gap = 6 }, &.{
-        u.text(caption, .{ .size = 13, .role = .secondary }),
+        u.text(caption, .{ .variant = .caption, .role = .secondary }),
         try u.column(.{
             .padding = .all(16),
             .background = Color.rgb(32, 32, 38),
             .corner_radius = 8,
         }, &.{demo}),
+    });
+}
+
+/// Live examples for the Text page (#270): the semantic type scale + wrapping.
+fn textExamples(u: *ui.Ui) !Widget {
+    return u.column(.{ .gap = 18 }, &.{
+        try example(u, "the type scale (title / heading / body / caption)", try u.column(.{ .gap = 6 }, &.{
+            u.text("Title", .{ .variant = .title }),
+            u.text("Heading", .{ .variant = .heading }),
+            u.text("Body text — the default paragraph style.", .{ .variant = .body }),
+            u.text("Caption — secondary, smaller.", .{ .variant = .caption, .role = .secondary }),
+        })),
+        try example(u, "wrapping body text in a fixed-width column", try u.column(.{ .width = 360 }, &.{
+            u.text("This is a longer run of body text that wraps to the content width instead of overflowing on a single line, exercising the shaping + wrap pipeline.", .{ .wrap = true }),
+        })),
     });
 }
 
@@ -82,10 +97,12 @@ const Docs = struct {
         // Detail: the selected page — heading, description, then live examples.
         const page = pages[self.selected];
         var blocks: std.ArrayList(Widget) = .empty;
-        try blocks.append(u.arena, u.text(page.name, .{ .size = 28, .bold = true }));
-        try blocks.append(u.arena, u.text(page.body, .{ .size = 15 }));
+        try blocks.append(u.arena, u.text(page.name, .{ .variant = .title }));
+        try blocks.append(u.arena, u.text(page.body, .{ .variant = .body }));
         if (std.mem.eql(u8, page.name, "Layout")) {
             try blocks.append(u.arena, try layoutExamples(u));
+        } else if (std.mem.eql(u8, page.name, "Text")) {
+            try blocks.append(u.arena, try textExamples(u));
         }
         const detail = try u.column(.{ .grow = 1, .padding = .all(28), .gap = 14 }, blocks.items);
 
