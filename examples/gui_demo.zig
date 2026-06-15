@@ -569,21 +569,25 @@ const Demo = struct {
             .image_nine = .{ .l = 2, .t = 2, .r = 2, .b = 2 },
         };
         // Scroll viewport (#96): a tall column of rows clipped to a short box
-        // and panned down — content above the fold is clipped, the rest visible.
-        const row_count = 8;
-        const scroll_rows = try arena.alloc(L.Element, row_count);
-        const scroll_row_ptrs = try arena.alloc(*const L.Element, row_count);
+        // and panned by the wheel. Two groups: a corner-radius progression, then
+        // max-radius (pill) rows at growing heights to confirm the sides stay
+        // fully rounded as the height changes.
         const row_colors = [_]Color{
             Color.rgb(230, 120, 120), Color.rgb(230, 175, 110), Color.rgb(220, 215, 110),
             Color.rgb(130, 205, 130), Color.rgb(110, 185, 220), Color.rgb(140, 140, 225),
             Color.rgb(190, 130, 215), Color.rgb(225, 130, 180),
         };
-        for (0..row_count) |ri| {
+        const prog_count = 8;
+        // Max-radius pills at increasing heights — same color set, growing taller.
+        const pill_heights = [_]f32{ 14, 22, 34, 50, 68 };
+        const total_rows = prog_count + pill_heights.len;
+        const scroll_rows = try arena.alloc(L.Element, total_rows);
+        const scroll_row_ptrs = try arena.alloc(*const L.Element, total_rows);
+        for (0..prog_count) |ri| {
             // Corner-radius progression: 0 (square) growing past the pill
-            // threshold. Like CSS border-radius, the renderers clamp to half the
-            // smaller dimension, so once the value reaches half the row height
-            // the ends are fully rounded (pill/capsule) and stay there — the
-            // later rows are all pills. Row height is 22, so half = 11.
+            // threshold. The renderers clamp to half the smaller dimension, so
+            // once the value reaches half the row height the ends are fully
+            // rounded (pill) and stay there. Row height 22 → half = 11.
             const radius: f32 = @as(f32, @floatFromInt(ri)) * 3 * scale; // 0,3,6,9,12,15,18,21
             scroll_rows[ri] = .{
                 .height = 22 * scale,
@@ -591,6 +595,17 @@ const Demo = struct {
                 .rect_style = .{ .background = row_colors[ri], .corner_radius = .all(radius) },
             };
             scroll_row_ptrs[ri] = &scroll_rows[ri];
+        }
+        for (pill_heights, 0..) |h, pi| {
+            const idx = prog_count + pi;
+            scroll_rows[idx] = .{
+                .height = h * scale,
+                .margin = .{ .bottom = 5 * scale },
+                // Max radius at every height: the left/right ends must stay full
+                // semicircles regardless of how tall the box is.
+                .rect_style = .{ .background = row_colors[pi], .corner_radius = .all(9999) },
+            };
+            scroll_row_ptrs[idx] = &scroll_rows[idx];
         }
         const scroll_content = try arena.create(L.Element);
         scroll_content.* = .{
@@ -783,7 +798,7 @@ const Demo = struct {
                 // Page the showcase so every feature is reachable for QA even
                 // without a scroll wheel.
                 .page_down => {
-                    self.page_y = @min(700, self.page_y + 120);
+                    self.page_y = @min(320, self.page_y + 120); // layout clamps to content
                     return .redraw;
                 },
                 .page_up => {
@@ -807,7 +822,7 @@ const Demo = struct {
                 // Wheel/trackpad pans the inner pill list (#96/#126); Page
                 // Up/Down move the whole showcase. Positive dy = content up.
                 const step: f32 = if (s.unit == .pixel) s.dy else s.dy * 12;
-                self.scroll_y = @max(0, @min(150, self.scroll_y + step));
+                self.scroll_y = @max(0, @min(400, self.scroll_y + step)); // layout clamps to content
                 return .redraw;
             },
             // Pointer enter/leave drive the panel-border highlight (#127). Live
