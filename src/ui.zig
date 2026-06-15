@@ -36,6 +36,7 @@ pub const Widget = union(enum) {
     text: Text,
     button: Button,
     icon: Icon,
+    list: List,
     composite: Composite,
 };
 
@@ -148,6 +149,23 @@ fn iconPath(name: IconName) []const geometry.Point {
     };
 }
 
+/// Selectable list (host, #273): a vertical stack of clickable rows with a
+/// highlighted selection. Row click dispatches `on_click`. Virtualization (#29)
+/// and keyboard navigation (#16) are follow-ups; row styling is provisional (#21).
+pub const ListRow = struct {
+    label: []const u8,
+    on_click: ?u32 = null,
+};
+
+pub const List = struct {
+    rows: []const ListRow = &.{},
+    selected: ?usize = null,
+    width: ?f32 = null,
+};
+
+/// Provisional selected-row highlight (replaced by a theme token in #21).
+const list_selected_bg = Color.rgb(60, 120, 240);
+
 /// A composite widget: an arena-stored value + a generated expander that calls
 /// its `view(ui) !Widget`. Created via `Ui.widget`.
 pub const Composite = struct {
@@ -219,6 +237,14 @@ pub const Ui = struct {
     pub fn icon(self: *Ui, opts: Icon) Widget {
         _ = self;
         return .{ .icon = opts };
+    }
+
+    /// Selectable list. `rows` is copied into the arena (same dangling-slice
+    /// reason as the container builders).
+    pub fn list(self: *Ui, opts: List, rows: []const ListRow) !Widget {
+        var l = opts;
+        l.rows = try self.arena.dupe(ListRow, rows);
+        return .{ .list = l };
     }
 
     /// Format text into the arena (for dynamic labels) — caller-owned for the frame.
@@ -307,6 +333,31 @@ pub const Ui = struct {
                     .height = px,
                     .path = pts,
                     .path_color = if (ic.disabled) Color.rgb(170, 170, 175) else iconTint(ic.role),
+                };
+            },
+            .list => |l| {
+                const rows = try self.arena.alloc(*const Element, l.rows.len);
+                for (l.rows, 0..) |r, i| {
+                    const row_el = try self.arena.create(Element);
+                    const sel = l.selected != null and l.selected.? == i;
+                    row_el.* = .{
+                        .text = r.label,
+                        .on_click = r.on_click,
+                        .cursor = if (r.on_click != null) .pointer else null,
+                        .padding = .symmetric(10 * s, 7 * s),
+                        .text_style = .{ .size = 15 * s, .color = if (sel) Color.white else null },
+                        .rect_style = .{
+                            .background = if (sel) list_selected_bg else null,
+                            .corner_radius = .all(5 * s),
+                        },
+                    };
+                    rows[i] = row_el;
+                }
+                el.* = .{
+                    .direction = .column,
+                    .gap = 2 * s,
+                    .width = if (l.width) |lw| lw * s else null,
+                    .children = rows,
                 };
             },
             .composite => |c| return self.lower(try c.expand(c.ctx, self)),
@@ -474,6 +525,27 @@ test "lower: icon → sized filled path; disabled dims the tint (#272)" {
     const on = try ui.lower(ui.icon(.{ .name = .check, .role = .primary }));
     const off = try ui.lower(ui.icon(.{ .name = .check, .role = .primary, .disabled = true }));
     try testing.expect(!std.meta.eql(on.path_color, off.path_color));
+}
+
+test "lower: list rows are clickable; selected row is highlighted (#273)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ui = Ui.init(arena.allocator());
+
+    const el = try ui.lower(try ui.list(.{ .selected = 1 }, &.{
+        .{ .label = "Alpha", .on_click = 100 },
+        .{ .label = "Beta", .on_click = 101 },
+        .{ .label = "Gamma", .on_click = 102 },
+    }));
+
+    try testing.expectEqual(layout.Direction.column, el.direction);
+    try testing.expectEqual(@as(usize, 3), el.children.len);
+    try testing.expectEqualStrings("Alpha", el.children[0].text.?);
+    try testing.expectEqual(@as(?u32, 102), el.children[2].on_click);
+    try testing.expectEqual(cursorPointer(), el.children[0].cursor.?);
+    // Only the selected row paints a background.
+    try testing.expect(el.children[0].rect_style.background == null);
+    try testing.expect(el.children[1].rect_style.background != null);
 }
 
 test "fmt allocates a frame-owned label" {
