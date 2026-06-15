@@ -1,4 +1,4 @@
-# Gogeously Native, Eleganty Written
+# Gorgeously Native, Eleganty Written
 
 [![CI](https://github.com/daniel-samson/zooee/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/daniel-samson/zooee/actions/workflows/ci.yml)
 
