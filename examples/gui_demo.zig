@@ -38,8 +38,12 @@ const Demo = struct {
     /// frame-delta in `animate`, so motion is smooth and frame-rate-independent
     /// (same speed at 60 or 144 Hz).
     phase: f32 = 0,
-    /// Wheel-driven scroll offset for the showcase list viewport (#96/#126).
+    /// Fixed offset for the inner mini-scroller (#96) — left mid-scrolled to
+    /// show clipping/panning statically now that the wheel drives the page.
     scroll_y: f32 = 40,
+    /// Wheel-driven scroll offset for the whole showcase page, so every feature
+    /// is reachable for QA regardless of window height.
+    page_y: f32 = 0,
     /// Declarative transition (#125): the selection indicator eases to the
     /// selected row's position. `retarget(row)` on every selection change makes
     /// it slide — and re-base mid-flight if you move again before it settles.
@@ -69,7 +73,7 @@ const Demo = struct {
     committed_len: usize = 0,
     /// Native context menu (#129): the last action chosen from the right-click
     /// menu, shown in a status label so the menu is visibly wired end-to-end.
-    last_action: []const u8 = "right-click for a menu",
+    last_action: []const u8 = "right-click for a menu · Page↑/↓ to scroll the showcase",
     /// "Dev Inspect" toggles a debug frame on the live window.
     inspect: bool = false,
     /// Stable storage for the menu returned to the app loop (the popup borrows
@@ -246,6 +250,17 @@ const Demo = struct {
             .gap = 16 * scale,
             .children = try arena.dupe(*const L.Element, &.{ list, showcase }),
         };
+        // Page scroll viewport: the showcase is taller than the window, so wrap
+        // it in a fixed-height scroller (panned by the wheel via `page_y`) so
+        // every feature is reachable for QA by scrolling (#96). 640 logical
+        // fits under the header in the default 760px window and clips the rest.
+        const page = try arena.create(L.Element);
+        page.* = .{
+            .height = 640 * scale,
+            .scroll = true,
+            .scroll_y = self.page_y * scale,
+            .children = try arena.dupe(*const L.Element, &.{columns}),
+        };
 
         const root = try arena.create(L.Element);
         root.* = .{
@@ -257,7 +272,7 @@ const Demo = struct {
                 .{ .background = self.theme.background, .border = .all(2 * scale, Color.rgb(230, 40, 200)) }
             else
                 .{ .background = self.theme.background },
-            .children = try arena.dupe(*const L.Element, &.{ title, status, columns }),
+            .children = try arena.dupe(*const L.Element, &.{ title, status, page }),
         };
         return root;
     }
@@ -607,6 +622,31 @@ const Demo = struct {
             .text = "café · Ελληνικά · Привет · ½→∞ · «—»",
             .text_style = .{ .color = self.theme.text, .size = 16 * scale },
         };
+        // Complex-script shaping (#116/#202/#203): the OS font + shaping
+        // pipeline render these in display order. Arabic letters join
+        // contextually; Hebrew runs right-to-left (BiDi); the mixed line proves
+        // LTR+RTL BiDi in one string. (Indic reordering, #202, is unit-tested:
+        // the macOS system font has no Devanagari glyphs and there is no
+        // per-script font fallback yet, so it would render as tofu here.)
+        const shaping_header = try arena.create(L.Element);
+        shaping_header.* = .{
+            .text = "Complex-script shaping (Arabic join · BiDi):",
+            .text_style = .{ .color = self.theme.text_muted, .size = 12 * scale },
+            .margin = .{ .top = 8 * scale, .bottom = 4 * scale },
+        };
+        const arabic_line = try arena.create(L.Element);
+        arabic_line.* = .{ .text = "العربية · السلام عليكم", .text_style = .{ .color = self.theme.text, .size = 18 * scale }, .margin = .{ .bottom = 2 * scale } };
+        const hebrew_line = try arena.create(L.Element);
+        hebrew_line.* = .{ .text = "עברית · שלום עולם", .text_style = .{ .color = self.theme.text, .size = 18 * scale }, .margin = .{ .bottom = 2 * scale } };
+        const mixed_line = try arena.create(L.Element);
+        mixed_line.* = .{ .text = "mixed: hello שלום 123 world", .text_style = .{ .color = self.theme.text, .size = 15 * scale } };
+        const shaping = try arena.create(L.Element);
+        shaping.* = .{
+            .direction = .column,
+            .margin = .{ .bottom = 10 * scale },
+            .children = try arena.dupe(*const L.Element, &.{ shaping_header, arabic_line, hebrew_line, mixed_line }),
+        };
+
         // Text decorations (#191): underline + strikethrough as TextStyle flags.
         const underlined = try arena.create(L.Element);
         underlined.* = .{ .text = "underline", .text_style = .{ .color = self.theme.accent, .size = 15 * scale, .underline = true } };
@@ -625,7 +665,7 @@ const Demo = struct {
                 .border = .all(2 * scale, if (self.pointer_inside) self.theme.accent else self.theme.border),
                 .corner_radius = .all(10 * scale),
             },
-            .children = try arena.dupe(*const L.Element, &.{ grad_bar, track, swatches, layers, card_wrap, icons, button, scroller, paragraph, drop_zone, ime_label, uni, deco }),
+            .children = try arena.dupe(*const L.Element, &.{ grad_bar, track, swatches, layers, card_wrap, icons, button, scroller, paragraph, drop_zone, ime_label, uni, shaping, deco }),
         };
         return panel;
     }
@@ -682,6 +722,16 @@ const Demo = struct {
                     self.checked[self.selected] = !self.checked[self.selected];
                     return .redraw;
                 },
+                // Page the showcase so every feature is reachable for QA even
+                // without a scroll wheel.
+                .page_down => {
+                    self.page_y = @min(700, self.page_y + 120);
+                    return .redraw;
+                },
+                .page_up => {
+                    self.page_y = @max(0, self.page_y - 120);
+                    return .redraw;
+                },
                 .escape => return .quit,
                 else => {},
             },
@@ -696,10 +746,10 @@ const Demo = struct {
                 else => {},
             },
             .scroll => |s| {
-                // Wheel/trackpad scrolls the showcase list viewport (#126).
-                // Content is ~8 rows × 26px ≈ 200px tall in a 70px box.
+                // Wheel/trackpad scrolls the whole showcase page so every
+                // feature is reachable (#96/#126). Positive dy = content up.
                 const step: f32 = if (s.unit == .pixel) s.dy else s.dy * 12;
-                self.scroll_y = @max(0, @min(140, self.scroll_y + step));
+                self.page_y = @max(0, @min(700, self.page_y + step));
                 return .redraw;
             },
             // Pointer enter/leave drive the panel-border highlight (#127). Live
