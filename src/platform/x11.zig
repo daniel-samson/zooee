@@ -13,6 +13,7 @@ const core_event = @import("../event.zig");
 const geometry = @import("../geometry.zig");
 const cursor_mod = @import("../cursor.zig");
 const window_mod = @import("../window.zig");
+const menu_mod = @import("../menu.zig");
 const clipboard_mod = @import("../clipboard.zig");
 
 comptime {
@@ -732,6 +733,31 @@ pub const Window = struct {
     /// macOS performClose (the app decides whether to destroy).
     pub fn close(self: *Window) void {
         self.queue.append(self.gpa, .{ .close_requested = core_event.main_window }) catch {};
+    }
+
+    /// Native context menu (#129): X11 has no toolkit-agnostic native menu, so
+    /// there's nothing to pop. Returns null; apps fall back to an in-window
+    /// overlay menu (#17). Present so the app loop's context-menu dispatch
+    /// compiles uniformly across platforms.
+    pub fn popupMenu(self: *Window, items: []const menu_mod.Item, x: f32, y: f32) ?u32 {
+        _ = self;
+        _ = items;
+        _ = x;
+        _ = y;
+        return null;
+    }
+
+    /// Native menu bar (#129): no native X11 menu bar; no-op (apps draw their
+    /// own, #17). Present for cross-platform uniformity.
+    pub fn setMenuBar(self: *Window, items: []const menu_mod.Item) void {
+        _ = self;
+        _ = items;
+    }
+
+    /// No native menu bar on X11, so never a menu-bar command. (#129)
+    pub fn takeMenuCommand(self: *Window) ?u32 {
+        _ = self;
+        return null;
     }
 
     pub fn isMinimised(self: *Window) bool {
