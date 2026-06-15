@@ -53,6 +53,8 @@ pub const Box = struct {
     height: ?f32 = null,
     background: ?Color = null,
     corner_radius: f32 = 0,
+    /// Make the whole box clickable (dispatches this message id, shows a pointer).
+    on_click: ?u32 = null,
     children: []const Widget = &.{},
 };
 
@@ -101,6 +103,19 @@ pub const Button = struct {
     disabled: bool = false,
     on_click: ?u32 = null,
 };
+
+/// Shared options for the selection controls (checkbox / toggle / radio, #277).
+/// `checked` is prop-driven (the app owns the state); clicking dispatches
+/// `on_change`. Look is provisional until the theme system (#21).
+pub const Selection = struct {
+    checked: bool = false,
+    label: []const u8 = "",
+    disabled: bool = false,
+    on_change: ?u32 = null,
+};
+
+/// Provisional unchecked-track / ring color (replaced by a theme token in #21).
+const control_track_off = Color.rgb(80, 80, 88);
 
 fn buttonPad(sz: ButtonSize) struct { x: f32, y: f32 } {
     return switch (sz) {
@@ -269,6 +284,69 @@ pub const Ui = struct {
         return .{ .button = opts };
     }
 
+    /// Checkbox (#277): a checkable box + label. `checked`/`disabled` come from
+    /// props; clicking dispatches `on_change`. Composed from box + check icon.
+    pub fn checkbox(self: *Ui, opts: Selection) !Widget {
+        const dim = opts.disabled;
+        const fill: ?Color = if (opts.checked) (if (dim) Color.rgb(70, 70, 76) else roleFill(.primary)) else null;
+        const mark = try self.column(.{
+            .width = 18,
+            .height = 18,
+            .corner_radius = 4,
+            .padding = .all(2),
+            .background = fill orelse control_track_off,
+        }, if (opts.checked) &.{self.icon(.{ .name = .check, .size = 14, .role = .normal, .disabled = dim })} else &.{});
+        return self.controlRow(opts, mark);
+    }
+
+    /// Toggle / switch (#277): a pill track with a knob that sits left (off) or
+    /// right (on). macOS-switch flavour; the WinUI variant is a theme tweak (#21).
+    pub fn toggle(self: *Ui, opts: Selection) !Widget {
+        const knob = try self.column(.{ .width = 18, .height = 18, .corner_radius = 9, .background = Color.white }, &.{});
+        const track_children: []const Widget = if (opts.checked)
+            &.{ self.spacer(), knob }
+        else
+            &.{ knob, self.spacer() };
+        const track = try self.row(.{
+            .width = 42,
+            .height = 22,
+            .corner_radius = 11,
+            .padding = .all(2),
+            .background = if (opts.checked) (if (opts.disabled) Color.rgb(70, 70, 76) else roleFill(.primary)) else control_track_off,
+        }, track_children);
+        return self.controlRow(opts, track);
+    }
+
+    /// Radio button (#277): a ring with a filled dot when selected. Group by
+    /// giving each option a distinct `on_change` message.
+    pub fn radio(self: *Ui, opts: Selection) !Widget {
+        const dot: []const Widget = if (opts.checked)
+            &.{try self.column(.{ .width = 10, .height = 10, .corner_radius = 5, .background = if (opts.disabled) Color.rgb(120, 120, 128) else roleFill(.primary) }, &.{})}
+        else
+            &.{};
+        const ring = try self.column(.{
+            .width = 18,
+            .height = 18,
+            .corner_radius = 9,
+            .padding = .all(4),
+            .background = control_track_off,
+        }, dot);
+        return self.controlRow(opts, ring);
+    }
+
+    /// Shared layout for a selection control: the indicator + an optional label,
+    /// the whole row clickable (unless disabled).
+    fn controlRow(self: *Ui, opts: Selection, indicator: Widget) !Widget {
+        const children: []const Widget = if (opts.label.len > 0)
+            &.{ indicator, self.text(opts.label, .{ .role = if (opts.disabled) .secondary else .normal }) }
+        else
+            &.{indicator};
+        return self.row(.{
+            .gap = 8,
+            .on_click = if (opts.disabled) null else opts.on_change,
+        }, children);
+    }
+
     /// Flexible empty space that pushes siblings apart (grow=1, no paint).
     pub fn spacer(self: *Ui) Widget {
         _ = self;
@@ -355,6 +433,8 @@ pub const Ui = struct {
                     .grow = b.grow,
                     .width = if (b.width) |x| x * s else null,
                     .height = if (b.height) |x| x * s else null,
+                    .on_click = b.on_click,
+                    .cursor = if (b.on_click != null) .pointer else null,
                     .children = kids,
                     .rect_style = .{
                         .background = b.background,
@@ -691,6 +771,33 @@ test "lower: card has surface fill, rounded corners, border + elevation shadow (
     // elevation .none → no shadow.
     const flat = try ui.lower(try ui.card(.{ .elevation = .none }, &.{}));
     try testing.expect(flat.rect_style.shadow == null);
+}
+
+test "lower: selection controls are clickable and reflect checked state (#277)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ui = Ui.init(arena.allocator());
+
+    // Checkbox: row is clickable; checked → indicator has a check-icon child.
+    const cb_on = try ui.lower(try ui.checkbox(.{ .checked = true, .label = "Agree", .on_change = 5 }));
+    try testing.expectEqual(@as(?u32, 5), cb_on.on_click);
+    try testing.expect(cb_on.children[0].children.len == 1); // the check icon
+    const cb_off = try ui.lower(try ui.checkbox(.{ .checked = false, .on_change = 5 }));
+    try testing.expect(cb_off.children[0].children.len == 0);
+
+    // Disabled control does not dispatch.
+    const cb_dis = try ui.lower(try ui.checkbox(.{ .checked = false, .disabled = true, .on_change = 5 }));
+    try testing.expectEqual(@as(?u32, null), cb_dis.on_click);
+
+    // Toggle: inside the track, knob order flips with state (on → spacer first).
+    const tg_on = try ui.lower(try ui.toggle(.{ .checked = true, .on_change = 6 }));
+    try testing.expect(tg_on.children[0].children[0].grow == 1); // leading spacer when on
+    const tg_off = try ui.lower(try ui.toggle(.{ .checked = false, .on_change = 6 }));
+    try testing.expect(tg_off.children[0].children[0].grow == 0); // knob leads when off
+
+    // Radio: selected → ring has a dot child.
+    const rb = try ui.lower(try ui.radio(.{ .checked = true, .on_change = 7 }));
+    try testing.expect(rb.children[0].children.len == 1);
 }
 
 test "fmt allocates a frame-owned label" {

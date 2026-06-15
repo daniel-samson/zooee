@@ -462,6 +462,34 @@ test "viewUi scroll view: wheel updates the bound offset (#274/#130)" {
     try testing.expect(m.offset > 0);
 }
 
+// A checkbox-backed model (#277): clicking the control toggles the bound bool.
+const CheckApp = struct {
+    on: bool = false,
+    pub const Msg = enum(u32) { toggle, _ };
+    pub fn viewUi(self: *CheckApp, u: *ui_mod.Ui) !ui_mod.Widget {
+        return u.checkbox(.{ .checked = self.on, .label = "Enable", .on_change = @intFromEnum(Msg.toggle) });
+    }
+    pub fn update(self: *CheckApp, msg: Msg) Command {
+        if (msg == .toggle) self.on = !self.on;
+        return .redraw;
+    }
+    pub fn onEvent(self: *CheckApp, ev: event_mod.Event) Command {
+        _ = self;
+        _ = ev;
+        return .none;
+    }
+};
+
+test "viewUi checkbox click toggles through the real path (#277/#130)" {
+    var m: CheckApp = .{};
+    var d = try Driver(CheckApp, CheckApp.Msg).init(testing.allocator, &m, .{ .width = 160, .height = 40 });
+    defer d.deinit();
+    _ = try d.render();
+    try testing.expect(!m.on);
+    _ = try d.click(8, 9); // on the indicator box (top-left of the row)
+    try testing.expect(m.on);
+}
+
 test "click outside the element does not dispatch" {
     var model: Toggle = .{};
     var d = try Driver(Toggle, Toggle.Msg).init(testing.allocator, &model, .{ .width = 100, .height = 60 });
