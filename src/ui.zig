@@ -25,6 +25,9 @@ const Color = style.Color;
 /// concrete styling per platform. Provisional palette here until #21.
 pub const Role = enum { normal, primary, secondary, danger };
 
+/// Provisional separator color (replaced by a theme token in #21).
+const divider_color = Color.rgb(60, 60, 66);
+
 /// A semantic widget. Host variants lower directly to `Element`; `composite`
 /// expands to more widgets first.
 pub const Widget = union(enum) {
@@ -112,6 +115,24 @@ pub const Ui = struct {
     pub fn button(self: *Ui, opts: Button) Widget {
         _ = self;
         return .{ .button = opts };
+    }
+
+    /// Flexible empty space that pushes siblings apart (grow=1, no paint).
+    pub fn spacer(self: *Ui) Widget {
+        _ = self;
+        return .{ .box = .{ .grow = 1 } };
+    }
+
+    /// A 1px separator line. Lays out across the parent's cross axis: full width
+    /// in a column, full height in a row. Color is provisional until the theme (#21).
+    pub fn divider(self: *Ui, direction: layout.Direction) Widget {
+        _ = self;
+        // A column stacks vertically → the divider is a horizontal rule (tall=1);
+        // a row lays out horizontally → a vertical rule (wide=1).
+        return switch (direction) {
+            .column => .{ .box = .{ .height = 1, .background = divider_color } },
+            .row => .{ .box = .{ .width = 1, .background = divider_color } },
+        };
     }
 
     /// Format text into the arena (for dynamic labels) — caller-owned for the frame.
@@ -252,6 +273,30 @@ test "lower: composite expands via its view()" {
     try testing.expectEqual(layout.Direction.row, el.direction);
     try testing.expectEqual(@as(usize, 3), el.children.len);
     try testing.expectEqualStrings("7", el.children[1].text.?);
+}
+
+test "lower: spacer grows, divider is a 1px rule on the cross axis (#269)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ui = Ui.init(arena.allocator());
+
+    const tree = try ui.row(.{}, &.{
+        ui.text("left", .{}),
+        ui.spacer(),
+        ui.divider(.row),
+        ui.text("right", .{}),
+    });
+    const el = try ui.lower(tree);
+
+    // Spacer fills available space.
+    try testing.expectEqual(@as(f32, 1), el.children[1].grow);
+    // Vertical rule in a row: 1px wide, painted.
+    try testing.expectEqual(@as(f32, 1), el.children[2].width.?);
+    try testing.expect(el.children[2].rect_style.background != null);
+
+    // Horizontal rule in a column: 1px tall.
+    const hrule = try ui.lower(ui.divider(.column));
+    try testing.expectEqual(@as(f32, 1), hrule.height.?);
 }
 
 test "fmt allocates a frame-owned label" {
