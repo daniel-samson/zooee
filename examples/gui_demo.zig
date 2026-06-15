@@ -75,15 +75,33 @@ const Demo = struct {
     /// Stable storage for the menu returned to the app loop (the popup borrows
     /// it across the call).
     menu_buf: [context_menu.len]zooee.menu.Item = context_menu,
+    /// Set when the user picks File → Open…; drained by the loop, which then
+    /// shows the native file dialog (#129).
+    want_open: bool = false,
+    /// Buffer backing `last_action` when it must hold a formatted string (the
+    /// opened file path); literals are used otherwise.
+    action_buf: [256]u8 = undefined,
 
-    /// Native right-click menu items (#129). Returned to the app loop, which
-    /// pops the OS-native menu and reports the chosen id via `onMenuCommand`.
-    const MenuId = enum(u32) { copy = 1, paste = 2, inspect = 3 };
+    /// Menu item ids (#129). Shared by the right-click menu and the menu bar.
+    const MenuId = enum(u32) { copy = 1, paste = 2, inspect = 3, open = 10, quit = 11, theme = 12 };
     const context_menu = [_]zooee.menu.Item{
         .{ .label = "Copy", .id = @intFromEnum(MenuId.copy), .accelerator = "Cmd+C" },
         .{ .label = "Paste", .id = @intFromEnum(MenuId.paste), .accelerator = "Cmd+V" },
         zooee.menu.separator,
         .{ .label = "Dev Inspect", .id = @intFromEnum(MenuId.inspect) },
+    };
+    /// Native app menu bar (#129): File / View, each a submenu. Installed once
+    /// by the app loop; selections route through `onMenuCommand`.
+    const menu_bar = [_]zooee.menu.Item{
+        .{ .label = "File", .submenu = &.{
+            .{ .label = "Open…", .id = @intFromEnum(MenuId.open), .accelerator = "Cmd+O" },
+            zooee.menu.separator,
+            .{ .label = "Quit", .id = @intFromEnum(MenuId.quit), .accelerator = "Cmd+Q" },
+        } },
+        .{ .label = "View", .submenu = &.{
+            .{ .label = "Toggle Dev Inspect", .id = @intFromEnum(MenuId.inspect) },
+            .{ .label = "Toggle Theme", .id = @intFromEnum(MenuId.theme) },
+        } },
     };
 
     /// App-loop hook (#129): supply the native context menu for a right-click.
@@ -94,7 +112,13 @@ const Demo = struct {
         return &self.menu_buf;
     }
 
-    /// App-loop hook (#129): handle a chosen context-menu item id.
+    /// App-loop hook (#129): supply the native menu bar.
+    pub fn menuBar(self: *Demo) []const zooee.menu.Item {
+        _ = self;
+        return &menu_bar;
+    }
+
+    /// App-loop hook (#129): handle a chosen menu item id (context or menu bar).
     pub fn onMenuCommand(self: *Demo, id: u32) zooee.app.Command {
         switch (@as(MenuId, @enumFromInt(id))) {
             .copy => self.last_action = "copied selection",
@@ -103,7 +127,32 @@ const Demo = struct {
                 self.inspect = !self.inspect;
                 self.last_action = if (self.inspect) "dev inspect ON" else "dev inspect OFF";
             },
+            .theme => {
+                self.theme = if (self.theme.background.r > 128) zooee.Theme.dark else zooee.Theme.light;
+                self.last_action = "toggled theme";
+            },
+            .open => {
+                self.want_open = true; // loop shows the native dialog next frame
+                self.last_action = "opening file…";
+            },
+            .quit => return .quit,
         }
+        return .redraw;
+    }
+
+    /// App-loop hook (#129): drain a pending File → Open… request so the loop
+    /// pops the native file dialog.
+    pub fn takeOpenRequest(self: *Demo) bool {
+        const r = self.want_open;
+        self.want_open = false;
+        return r;
+    }
+
+    /// App-loop hook (#129): the user picked a file in the native dialog (or it
+    /// was cancelled, in which case this isn't called).
+    pub fn onFileChosen(self: *Demo, path: []const u8) zooee.app.Command {
+        const base = std.fs.path.basename(path);
+        self.last_action = std.fmt.bufPrint(&self.action_buf, "opened: {s}", .{base}) catch "opened a file";
         return .redraw;
     }
 
@@ -713,7 +762,15 @@ const Demo = struct {
 pub fn main(init: std.process.Init) !void {
     var demo: Demo = .{};
     const title: [:0]const u8 = if (force_software) "zooee - raster" else "zooee - GPU";
+    // Title-bar mode (#64) selectable at launch so each can be QA'd, e.g.
+    // `ZOOEE_TITLEBAR=headless zig build run-gui` (native | integrated | headless).
+    const titlebar: zooee.window.TitlebarMode = blk: {
+        const v = init.environ_map.get("ZOOEE_TITLEBAR") orelse break :blk .native;
+        if (std.mem.eql(u8, v, "integrated")) break :blk .integrated;
+        if (std.mem.eql(u8, v, "headless")) break :blk .headless;
+        break :blk .native;
+    };
     // Pass the same theme the UI is built from, so the backend clear color
     // (window backdrop + resize-exposed regions) matches the content.
-    try zooee.app.runWindow(Demo, Msg, &demo, init, .{ .title = title, .width = 760, .height = 760, .force_software = force_software, .theme = demo.theme });
+    try zooee.app.runWindow(Demo, Msg, &demo, init, .{ .title = title, .width = 760, .height = 760, .force_software = force_software, .theme = demo.theme, .titlebar = titlebar });
 }
