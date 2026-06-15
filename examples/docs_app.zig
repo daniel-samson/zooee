@@ -19,7 +19,7 @@ const pages = [_]Page{
     .{ .name = "Button", .body = "Buttons trigger actions. Variants: primary, secondary, danger. (Live examples land as the Button component is built, #271.)" },
     .{ .name = "Icon", .body = "Vector icons drawn with the path renderer. They tint with the current role and dim when disabled. Starter set: plus, check, play, chevron." },
     .{ .name = "Text", .body = "Text and labels: titles, headings, body, captions — with the shaping pipeline (Latin, Arabic, BiDi). (#270)" },
-    .{ .name = "List", .body = "A virtualized list: the master/nav pattern, only visible rows built. (#273)" },
+    .{ .name = "List", .body = "A selectable list — the master/nav pattern. Each row dispatches on click; the selected row is highlighted. (The sidebar on the left is itself a List.) Virtualization (#29) and keyboard nav (#16) are follow-ups." },
     .{ .name = "Card", .body = "Surfaces/cards: background, border, corner radius, elevation — the detail content blocks. (#275)" },
 };
 
@@ -33,6 +33,19 @@ fn example(u: *ui.Ui, caption: []const u8, demo: Widget) !Widget {
             .corner_radius = 8,
         }, &.{demo}),
     });
+}
+
+/// Base message id for the List page's demo rows (kept clear of page indices).
+const list_demo_base: u32 = 1000;
+
+/// Live examples for the List page (#273): a selectable list with live selection.
+fn listExamples(u: *ui.Ui, selected: usize) !Widget {
+    const fruit = [_][]const u8{ "Apple", "Banana", "Cherry", "Date", "Elderberry" };
+    const rows = try u.arena.alloc(ui.ListRow, fruit.len);
+    for (fruit, 0..) |name, i| rows[i] = .{ .label = name, .on_click = list_demo_base + @as(u32, @intCast(i)) };
+    return example(u, "click a row to select it", try u.column(.{ .width = 240 }, &.{
+        try u.list(.{ .selected = selected, .width = 240 }, rows),
+    }));
 }
 
 /// Live examples for the Icon page (#272): the starter set, tints, sizes.
@@ -121,23 +134,19 @@ const Msg = enum(u32) { _ };
 
 const Docs = struct {
     selected: usize = 0,
+    list_demo: usize = 1, // selected row on the List page's demo
 
     pub fn viewUi(self: *Docs, u: *ui.Ui) !Widget {
-        // Master: a sidebar of nav buttons (the selected one highlighted).
-        const items = try u.arena.alloc(Widget, pages.len);
-        for (pages, 0..) |p, i| {
-            items[i] = u.button(.{
-                .label = p.name,
-                .role = if (i == self.selected) .primary else .secondary,
-                .on_click = @intCast(i),
-            });
-        }
+        // Master: a selectable list of pages — dogfooding the List widget (#273).
+        const rows = try u.arena.alloc(ui.ListRow, pages.len);
+        for (pages, 0..) |p, i| rows[i] = .{ .label = p.name, .on_click = @intCast(i) };
         const sidebar = try u.column(.{
             .width = 210,
             .padding = .all(12),
-            .gap = 6,
             .background = Color.rgb(28, 28, 32),
-        }, items);
+        }, &.{
+            try u.list(.{ .selected = self.selected, .width = 186 }, rows),
+        });
 
         // Detail: the selected page — heading, description, then live examples.
         const page = pages[self.selected];
@@ -152,6 +161,8 @@ const Docs = struct {
             try blocks.append(u.arena, try buttonExamples(u));
         } else if (std.mem.eql(u8, page.name, "Icon")) {
             try blocks.append(u.arena, try iconExamples(u));
+        } else if (std.mem.eql(u8, page.name, "List")) {
+            try blocks.append(u.arena, try listExamples(u, self.list_demo));
         }
         const detail = try u.column(.{ .grow = 1, .padding = .all(28), .gap = 14 }, blocks.items);
 
@@ -159,7 +170,13 @@ const Docs = struct {
     }
 
     pub fn update(self: *Docs, msg: Msg) zooee.app.Command {
-        const i: usize = @intFromEnum(msg);
+        const raw: u32 = @intFromEnum(msg);
+        // List-page demo rows (base 1000) vs sidebar page selection.
+        if (raw >= list_demo_base) {
+            self.list_demo = raw - list_demo_base;
+            return .redraw;
+        }
+        const i: usize = raw;
         if (i < pages.len and i != self.selected) {
             self.selected = i;
             return .redraw;
