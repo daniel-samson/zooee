@@ -38,9 +38,6 @@ const Demo = struct {
     /// frame-delta in `animate`, so motion is smooth and frame-rate-independent
     /// (same speed at 60 or 144 Hz).
     phase: f32 = 0,
-    /// Fixed offset for the inner mini-scroller (#96) — left mid-scrolled to
-    /// show clipping/panning statically now that the wheel drives the page.
-    scroll_y: f32 = 40,
     /// Wheel-driven scroll offset for the whole showcase page, so every feature
     /// is reachable for QA regardless of window height.
     page_y: f32 = 0,
@@ -579,13 +576,16 @@ const Demo = struct {
             Color.rgb(190, 130, 215), Color.rgb(225, 130, 180),
         };
         for (0..row_count) |ri| {
+            // Corner-radius progression: 0 (square) growing past the pill
+            // threshold. Like CSS border-radius, the renderers clamp to half the
+            // smaller dimension, so once the value reaches half the row height
+            // the ends are fully rounded (pill/capsule) and stay there — the
+            // later rows are all pills. Row height is 22, so half = 11.
+            const radius: f32 = @as(f32, @floatFromInt(ri)) * 3 * scale; // 0,3,6,9,12,15,18,21
             scroll_rows[ri] = .{
                 .height = 22 * scale,
-                .margin = .{ .bottom = 4 * scale },
-                // Pill shape: a "max" corner radius. Renderers clamp the radius
-                // to half the smaller dimension, so any large value gives fully
-                // rounded (pill) ends — the native-looking capsule.
-                .rect_style = .{ .background = row_colors[ri], .corner_radius = .all(9999) },
+                .margin = .{ .bottom = 5 * scale },
+                .rect_style = .{ .background = row_colors[ri], .corner_radius = .all(radius) },
             };
             scroll_row_ptrs[ri] = &scroll_rows[ri];
         }
@@ -596,12 +596,15 @@ const Demo = struct {
         };
         const scroller = try arena.create(L.Element);
         scroller.* = .{
-            .height = 70 * scale,
+            // Tall enough to show the whole square→pill radius progression at
+            // once (it still clips the last row or two, demonstrating the
+            // viewport). Shows from the top so the square first row is visible.
+            .height = 170 * scale,
             .padding = .all(4 * scale),
             .margin = .{ .bottom = 12 * scale },
             .rect_style = .{ .background = self.theme.surface_variant, .border = .all(1 * scale, self.theme.border), .corner_radius = .all(6 * scale) },
             .scroll = true,
-            .scroll_y = self.scroll_y * scale,
+            .scroll_y = 0,
             .children = try arena.dupe(*const L.Element, &.{scroll_content}),
         };
         // Text layout (#115): a wrapped, centered paragraph in a fixed-width box.
