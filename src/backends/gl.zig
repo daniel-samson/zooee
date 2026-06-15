@@ -1351,27 +1351,26 @@ const exact_frag: [*:0]const u8 =
     \\uniform vec4 cr;
     \\uniform vec4 cb;
     \\uniform vec4 cl;
-    \\bool cornerOut(vec2 p, float orad, float trad, float cx, float cy, vec2 r0, vec2 rsz) {
+    \\bool cornerOut(vec2 p, float trad, float cx, float cy, bool left, bool top) {
     \\  // p is outside the shape if it lies past this corner's quarter-circle.
     \\  if (trad <= 0.0) return false;
-    \\  bool in_x = (cx <= r0.x + rsz.x*0.5) ? (p.x < cx) : (p.x > cx);
-    \\  bool in_y = (cy <= r0.y + rsz.y*0.5) ? (p.y < cy) : (p.y > cy);
+    \\  bool in_x = left ? (p.x < cx) : (p.x > cx);
+    \\  bool in_y = top  ? (p.y < cy) : (p.y > cy);
     \\  if (in_x && in_y) { float dx = p.x-cx; float dy = p.y-cy; return dx*dx+dy*dy > trad*trad; }
     \\  return false;
     \\}
     \\bool insideRounded(vec4 r, vec4 rd, vec2 p) {
     \\  if (p.x < r.x || p.x >= r.x + r.z || p.y < r.y || p.y >= r.y + r.w) return false;
     \\  float mx = min(r.z, r.w) * 0.5;
-    \\  vec2 r0 = r.xy; vec2 rsz = r.zw;
-    \\  // Clamp each corner radius BEFORE placing its center (pill clamp): a raw
-    \\  // radius past half-height pushes the center over the midline and the
-    \\  // corner renders square.
+    \\  // Clamp each corner radius BEFORE placing its center, and pass each
+    \\  // corner's outward direction explicitly — inferring it from
+    \\  // center-vs-midline fails for an exact pill (all centers on the midline).
     \\  float tl = min(rd.x, mx); float tr = min(rd.y, mx);
     \\  float br = min(rd.z, mx); float bl = min(rd.w, mx);
-    \\  if (cornerOut(p, tl, tl, r.x + tl,        r.y + tl,        r0, rsz)) return false; // tl
-    \\  if (cornerOut(p, tr, tr, r.x + r.z - tr,  r.y + tr,        r0, rsz)) return false; // tr
-    \\  if (cornerOut(p, br, br, r.x + r.z - br,  r.y + r.w - br,  r0, rsz)) return false; // br
-    \\  if (cornerOut(p, bl, bl, r.x + bl,        r.y + r.w - bl,  r0, rsz)) return false; // bl
+    \\  if (cornerOut(p, tl, r.x + tl,        r.y + tl,        true,  true )) return false; // tl
+    \\  if (cornerOut(p, tr, r.x + r.z - tr,  r.y + tr,        false, true )) return false; // tr
+    \\  if (cornerOut(p, br, r.x + r.z - br,  r.y + r.w - br,  false, false)) return false; // br
+    \\  if (cornerOut(p, bl, r.x + bl,        r.y + r.w - bl,  true,  false)) return false; // bl
     \\  return true;
     \\}
     \\vec4 borderColorAt(vec2 p) {

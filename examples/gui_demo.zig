@@ -38,8 +38,11 @@ const Demo = struct {
     /// frame-delta in `animate`, so motion is smooth and frame-rate-independent
     /// (same speed at 60 or 144 Hz).
     phase: f32 = 0,
-    /// Wheel-driven scroll offset for the whole showcase page, so every feature
-    /// is reachable for QA regardless of window height.
+    /// Wheel-driven scroll offset for the inner pill list (#96): the box clips a
+    /// few rows and the wheel pans through all of them.
+    scroll_y: f32 = 0,
+    /// Page scroll offset (Page Up/Down) so the taller showcase stays reachable
+    /// for QA regardless of window height.
     page_y: f32 = 0,
     /// Declarative transition (#125): the selection indicator eases to the
     /// selected row's position. `retarget(row)` on every selection change makes
@@ -596,15 +599,15 @@ const Demo = struct {
         };
         const scroller = try arena.create(L.Element);
         scroller.* = .{
-            // Tall enough to show the whole square→pill radius progression at
-            // once (it still clips the last row or two, demonstrating the
-            // viewport). Shows from the top so the square first row is visible.
-            .height = 170 * scale,
+            // Clips a few rows; the wheel pans through all 8 (#96). Scrolling
+            // also reveals the corner-radius progression from square (top) to
+            // pill (bottom).
+            .height = 92 * scale,
             .padding = .all(4 * scale),
             .margin = .{ .bottom = 12 * scale },
             .rect_style = .{ .background = self.theme.surface_variant, .border = .all(1 * scale, self.theme.border), .corner_radius = .all(6 * scale) },
             .scroll = true,
-            .scroll_y = 0,
+            .scroll_y = self.scroll_y * scale,
             .children = try arena.dupe(*const L.Element, &.{scroll_content}),
         };
         // Text layout (#115): a wrapped, centered paragraph in a fixed-width box.
@@ -783,10 +786,10 @@ const Demo = struct {
                 else => {},
             },
             .scroll => |s| {
-                // Wheel/trackpad scrolls the whole showcase page so every
-                // feature is reachable (#96/#126). Positive dy = content up.
+                // Wheel/trackpad pans the inner pill list (#96/#126); Page
+                // Up/Down move the whole showcase. Positive dy = content up.
                 const step: f32 = if (s.unit == .pixel) s.dy else s.dy * 12;
-                self.page_y = @max(0, @min(700, self.page_y + step));
+                self.scroll_y = @max(0, @min(150, self.scroll_y + step));
                 return .redraw;
             },
             // Pointer enter/leave drive the panel-border highlight (#127). Live
