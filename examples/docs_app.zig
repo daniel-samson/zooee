@@ -72,7 +72,7 @@ fn example(u: *ui.Ui, caption: []const u8, demo: Widget) !Widget {
         u.text(caption, .{ .variant = .caption, .role = .secondary }),
         try u.column(.{
             .padding = .all(16),
-            .background = Color.rgb(32, 32, 38),
+            .background = u.theme.surface,
             .corner_radius = 8,
         }, &.{demo}),
     });
@@ -88,7 +88,7 @@ fn scrollExamples(u: *ui.Ui, offset: f32) !Widget {
         .gap = 6,
         .padding = .all(12),
         .scroll_y = offset,
-        .background = Color.rgb(24, 24, 30),
+        .background = u.theme.background,
     }, lines));
 }
 
@@ -218,7 +218,7 @@ const Docs = struct {
         for (pages, 0..) |p, i| rows[i] = .{ .label = p.name, .on_click = @intCast(i) };
         const sidebar = try u.column(.{
             .padding = .{ .top = 36, .left = 12, .right = 12, .bottom = 12 },
-            .background = Color.rgb(28, 28, 32),
+            .background = u.theme.background,
         }, &.{
             try u.list(.{ .selected = self.selected }, rows),
         });
@@ -317,9 +317,14 @@ const Docs = struct {
         return .none;
     }
 
-    pub fn background(self: *Docs) Color {
+    /// The active theme (#21): widgets + the backdrop resolve from it.
+    pub fn theme(self: *Docs) ui.Theme {
         _ = self;
-        return Color.rgb(20, 20, 24); // provisional dark backdrop
+        return ui.Theme.dark;
+    }
+
+    pub fn background(self: *Docs) Color {
+        return self.theme().background; // backdrop matches the theme
     }
 
     /// Lock the resize cursor for the whole divider drag (#123): without this the

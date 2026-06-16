@@ -18,16 +18,15 @@ const std = @import("std");
 const layout = @import("layout.zig");
 const style = @import("style.zig");
 const geometry = @import("geometry.zig");
+const theme_mod = @import("theme.zig");
 
 const Element = layout.Element;
 const Color = style.Color;
+pub const Theme = theme_mod.Theme;
 
 /// Semantic style intent (#265): widgets carry a role, the theme resolves it to
 /// concrete styling per platform. Provisional palette here until #21.
 pub const Role = enum { normal, primary, secondary, danger };
-
-/// Provisional separator color (replaced by a theme token in #21).
-const divider_color = Color.rgb(60, 60, 66);
 
 /// A semantic widget. Host variants lower directly to `Element`; `composite`
 /// expands to more widgets first.
@@ -118,9 +117,6 @@ pub const Selection = struct {
     on_change: ?u32 = null,
 };
 
-/// Provisional unchecked-track / ring color (replaced by a theme token in #21).
-const control_track_off = Color.rgb(80, 80, 88);
-
 fn buttonPad(sz: ButtonSize) struct { x: f32, y: f32 } {
     return switch (sz) {
         .small => .{ .x = 8, .y = 4 },
@@ -184,9 +180,6 @@ pub const List = struct {
     width: ?f32 = null,
 };
 
-/// Provisional selected-row highlight (replaced by a theme token in #21).
-const list_selected_bg = Color.rgb(60, 120, 240);
-
 /// Scroll viewport (host, #274): a fixed-size box that clips its content and
 /// pans it by `(scroll_x, scroll_y)` — the offsets are content-clamped by the
 /// layout engine (#96). Bind the offsets to model state and update them from
@@ -215,16 +208,13 @@ pub const Card = struct {
     padding: layout.EdgeInsets = layout.EdgeInsets.all(16),
     width: ?f32 = null,
     height: ?f32 = null,
-    background: ?Color = card_surface,
+    /// null = the theme surface color (#21).
+    background: ?Color = null,
     corner_radius: f32 = 10,
     border_width: f32 = 0,
-    border_color: Color = card_border,
     elevation: Elevation = .low,
     children: []const Widget = &.{},
 };
-
-const card_surface = Color.rgb(38, 38, 44);
-const card_border = Color.rgb(70, 70, 78);
 
 /// Elevation → drop shadow (#119). Higher = larger offset + blur. The shadow's
 /// corner radius is set from the card's at lowering time.
@@ -270,6 +260,9 @@ pub const Ui = struct {
     /// Device-pixel scale (DPI). Widgets author in logical units; the value is
     /// available for sizing decisions. (Auto-scaling lowering is a follow-up.)
     scale: f32 = 1,
+    /// Active theme (#21): widget lowering resolves roles/surfaces from this, and
+    /// apps can read it to build matching surfaces. Defaults to dark.
+    theme: Theme = Theme.dark,
 
     pub fn init(arena: std.mem.Allocator) Ui {
         return .{ .arena = arena };
@@ -310,13 +303,13 @@ pub const Ui = struct {
     /// props; clicking dispatches `on_change`. Composed from box + check icon.
     pub fn checkbox(self: *Ui, opts: Selection) !Widget {
         const dim = opts.disabled;
-        const fill: ?Color = if (opts.checked) (if (dim) Color.rgb(70, 70, 76) else roleFill(.primary)) else null;
+        const fill: ?Color = if (opts.checked) (if (dim) self.theme.surface_variant else self.theme.accent) else null;
         const mark = try self.column(.{
             .width = 18,
             .height = 18,
             .corner_radius = 4,
             .padding = .all(2),
-            .background = fill orelse control_track_off,
+            .background = fill orelse self.theme.surface_variant,
         }, if (opts.checked) &.{self.icon(.{ .name = .check, .size = 14, .role = .normal, .disabled = dim })} else &.{});
         return self.controlRow(opts, mark);
     }
@@ -334,7 +327,7 @@ pub const Ui = struct {
             .height = 22,
             .corner_radius = 11,
             .padding = .all(2),
-            .background = if (opts.checked) (if (opts.disabled) Color.rgb(70, 70, 76) else roleFill(.primary)) else control_track_off,
+            .background = if (opts.checked) (if (opts.disabled) self.theme.surface_variant else self.theme.accent) else self.theme.surface_variant,
         }, track_children);
         return self.controlRow(opts, track);
     }
@@ -343,7 +336,7 @@ pub const Ui = struct {
     /// giving each option a distinct `on_change` message.
     pub fn radio(self: *Ui, opts: Selection) !Widget {
         const dot: []const Widget = if (opts.checked)
-            &.{try self.column(.{ .width = 10, .height = 10, .corner_radius = 5, .background = if (opts.disabled) Color.rgb(120, 120, 128) else roleFill(.primary) }, &.{})}
+            &.{try self.column(.{ .width = 10, .height = 10, .corner_radius = 5, .background = if (opts.disabled) self.theme.text_muted else self.theme.accent }, &.{})}
         else
             &.{};
         const ring = try self.column(.{
@@ -351,7 +344,7 @@ pub const Ui = struct {
             .height = 18,
             .corner_radius = 9,
             .padding = .all(4),
-            .background = control_track_off,
+            .background = self.theme.surface_variant,
         }, dot);
         return self.controlRow(opts, ring);
     }
@@ -378,12 +371,11 @@ pub const Ui = struct {
     /// A 1px separator line. Lays out across the parent's cross axis: full width
     /// in a column, full height in a row. Color is provisional until the theme (#21).
     pub fn divider(self: *Ui, direction: layout.Direction) Widget {
-        _ = self;
         // A column stacks vertically → the divider is a horizontal rule (tall=1);
         // a row lays out horizontally → a vertical rule (wide=1).
         return switch (direction) {
-            .column => .{ .box = .{ .height = 1, .background = divider_color } },
-            .row => .{ .box = .{ .width = 1, .background = divider_color } },
+            .column => .{ .box = .{ .height = 1, .background = self.theme.border } },
+            .row => .{ .box = .{ .width = 1, .background = self.theme.border } },
         };
     }
 
@@ -479,7 +471,7 @@ pub const Ui = struct {
                 .text_style = .{
                     .size = (t.size orelse variantSize(t.variant)) * s,
                     .bold = t.bold orelse variantBold(t.variant),
-                    .color = roleTextColor(t.role),
+                    .color = roleTextColor(self.theme, t.role),
                 },
             },
             .button => |bt| {
@@ -492,11 +484,10 @@ pub const Ui = struct {
                     .padding = .symmetric(pad.x * s, pad.y * s),
                     .text_style = .{
                         .size = buttonTextSize(bt.size) * s,
-                        .color = if (bt.disabled) Color.rgb(170, 170, 175) else Color.white,
+                        .color = if (bt.disabled) self.theme.text_muted else onRoleFill(self.theme, bt.role),
                     },
-                    // Provisional fill — replaced by the per-OS theme (#21).
                     .rect_style = .{
-                        .background = if (bt.disabled) Color.rgb(70, 70, 76) else roleFill(bt.role),
+                        .background = if (bt.disabled) self.theme.surface_variant else roleFill(self.theme, bt.role),
                         .corner_radius = .all(6 * s),
                     },
                 };
@@ -510,7 +501,7 @@ pub const Ui = struct {
                     .width = px,
                     .height = px,
                     .path = pts,
-                    .path_color = if (ic.disabled) Color.rgb(170, 170, 175) else iconTint(ic.role),
+                    .path_color = if (ic.disabled) self.theme.text_muted else iconTint(self.theme, ic.role),
                 };
             },
             .list => |l| {
@@ -523,9 +514,9 @@ pub const Ui = struct {
                         .on_click = r.on_click,
                         .cursor = if (r.on_click != null) .pointer else null,
                         .padding = .symmetric(10 * s, 7 * s),
-                        .text_style = .{ .size = 15 * s, .color = if (sel) Color.white else null },
+                        .text_style = .{ .size = 15 * s, .color = if (sel) self.theme.on_accent else self.theme.text },
                         .rect_style = .{
-                            .background = if (sel) list_selected_bg else null,
+                            .background = if (sel) self.theme.accent else null,
                             .corner_radius = .all(5 * s),
                         },
                     };
@@ -572,9 +563,9 @@ pub const Ui = struct {
                     .height = if (cd.height) |x| x * s else null,
                     .children = kids,
                     .rect_style = .{
-                        .background = cd.background,
+                        .background = cd.background orelse self.theme.surface,
                         .corner_radius = .all(cd.corner_radius * s),
-                        .border = if (cd.border_width > 0) .all(cd.border_width * s, cd.border_color) else .none,
+                        .border = if (cd.border_width > 0) .all(cd.border_width * s, self.theme.border) else .none,
                         .shadow = shadow,
                     },
                 };
@@ -590,7 +581,7 @@ pub const Ui = struct {
                 // grab gutter that carries the resize cursor (a 1px element is
                 // unhittable). The gutter shows the backdrop, so it reads as a
                 // hairline + an easy grab zone — the macOS / JetBrains split feel.
-                const line: style.BorderSide = .{ .width = sp.divider * s, .color = divider_color };
+                const line: style.BorderSide = .{ .width = sp.divider * s, .color = self.theme.border };
                 if (row_axis) {
                     lead.width = sp.leading_size * s;
                     lead.grow = 0;
@@ -626,27 +617,35 @@ fn scaleInsets(e: layout.EdgeInsets, s: f32) layout.EdgeInsets {
     return .{ .top = e.top * s, .right = e.right * s, .bottom = e.bottom * s, .left = e.left * s };
 }
 
-// Provisional role palette (replaced by the theme system, #21).
-fn roleFill(role: Role) Color {
+// Role → concrete colors, resolved from the active theme (#21).
+fn roleFill(t: Theme, role: Role) Color {
     return switch (role) {
-        .normal => Color.rgb(120, 120, 128),
-        .primary => Color.rgb(60, 120, 240),
-        .secondary => Color.rgb(120, 120, 128),
-        .danger => Color.rgb(220, 70, 70),
+        .normal, .secondary => t.surface_variant,
+        .primary => t.accent,
+        .danger => t.danger,
     };
 }
-fn iconTint(role: Role) Color {
+/// Text/icon color drawn on a `roleFill` background.
+fn onRoleFill(t: Theme, role: Role) Color {
     return switch (role) {
-        .normal => Color.rgb(220, 220, 225),
-        .primary => Color.rgb(60, 120, 240),
-        .secondary => Color.rgb(150, 150, 156),
-        .danger => Color.rgb(220, 70, 70),
+        .normal, .secondary => t.text, // grey fill → primary text
+        .primary, .danger => t.on_accent, // accent/red fill → on-accent
     };
 }
-fn roleTextColor(role: Role) ?Color {
+fn iconTint(t: Theme, role: Role) Color {
     return switch (role) {
-        .normal => null, // backend default
-        else => null,
+        .normal => t.text,
+        .primary => t.accent,
+        .secondary => t.text_muted,
+        .danger => t.danger,
+    };
+}
+fn roleTextColor(t: Theme, role: Role) ?Color {
+    return switch (role) {
+        .normal => t.text,
+        .secondary => t.text_muted,
+        .primary => t.accent,
+        .danger => t.danger,
     };
 }
 
