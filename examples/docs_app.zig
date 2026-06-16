@@ -12,17 +12,17 @@ const Color = zooee.Color;
 
 const force_software = @import("build_options").force_software;
 
-const Page = struct { name: []const u8, body: []const u8 };
+const Page = struct { name: []const u8, body: []const u8, icon: ui.IconName };
 const pages = [_]Page{
-    .{ .name = "Welcome", .body = "Welcome to zooee — a native, cross-platform UI in Zig.\n\nThis app is the component gallery: pick an item on the left to see it, with variants and examples. The look adapts per OS (macOS / WinUI / Linux) and is still being tuned." },
-    .{ .name = "Layout", .body = "Flex containers (row / column) with gap, padding, grow, and CSS-style justify-content / align-items. `spacer()` fills free space; `divider()` draws a 1px rule across the cross axis." },
-    .{ .name = "Button", .body = "Buttons trigger actions. Variants: primary, secondary, danger. (Live examples land as the Button component is built, #271.)" },
-    .{ .name = "Icon", .body = "Vector icons drawn with the path renderer. They tint with the current role and dim when disabled. Starter set: plus, check, play, chevron." },
-    .{ .name = "Text", .body = "Text and labels: titles, headings, body, captions — with the shaping pipeline (Latin, Arabic, BiDi). (#270)" },
-    .{ .name = "List", .body = "A selectable list — the master/nav pattern. Each row dispatches on click; the selected row is highlighted. (The sidebar on the left is itself a List.) Virtualization (#29) and keyboard nav (#16) are follow-ups." },
-    .{ .name = "Scroll", .body = "A scroll viewport: a fixed-size box that clips its content and pans it on wheel/trackpad. Offsets are clamped to the content extent. Scroll inside the box below." },
-    .{ .name = "Card", .body = "Surfaces / panels: a background, rounded corners, an optional border, and an elevation shadow. The building block for content blocks." },
-    .{ .name = "Selection", .body = "Checkbox, toggle/switch, and radio group — boolean and single-choice selection. Click any control to change it. Checked state is prop-driven; clicks dispatch on_change." },
+    .{ .name = "Welcome", .icon = .star, .body = "Welcome to zooee — a native, cross-platform UI in Zig.\n\nThis app is the component gallery: pick an item on the left to see it, with variants and examples. The look adapts per OS (macOS / WinUI / Linux) and is still being tuned." },
+    .{ .name = "Layout", .icon = .square, .body = "Flex containers (row / column) with gap, padding, grow, and CSS-style justify-content / align-items. `spacer()` fills free space; `divider()` draws a 1px rule across the cross axis." },
+    .{ .name = "Button", .icon = .circle, .body = "Buttons trigger actions. Variants: primary, secondary, danger. (Live examples land as the Button component is built, #271.)" },
+    .{ .name = "Icon", .icon = .star, .body = "Vector icons drawn with the path renderer. They tint with the current role and dim when disabled. Starter set: plus, check, play, chevron." },
+    .{ .name = "Text", .icon = .doc, .body = "Text and labels: titles, headings, body, captions — with the shaping pipeline (Latin, Arabic, BiDi). (#270)" },
+    .{ .name = "List", .icon = .square, .body = "A selectable list — the master/nav pattern. Each row dispatches on click; the selected row is highlighted. (The sidebar on the left is itself a List.) Virtualization (#29) and keyboard nav (#16) are follow-ups." },
+    .{ .name = "Scroll", .icon = .circle, .body = "A scroll viewport: a fixed-size box that clips its content and pans it on wheel/trackpad. Offsets are clamped to the content extent. Scroll inside the box below." },
+    .{ .name = "Card", .icon = .doc, .body = "Surfaces / panels: a background, rounded corners, an optional border, and an elevation shadow. The building block for content blocks." },
+    .{ .name = "Selection", .icon = .check, .body = "Checkbox, toggle/switch, and radio group — boolean and single-choice selection. Click any control to change it. Checked state is prop-driven; clicks dispatch on_change." },
 };
 
 /// Message ids for the Selection page's interactive controls.
@@ -212,15 +212,30 @@ const Docs = struct {
 
     pub fn viewUi(self: *Docs, u: *ui.Ui) !Widget {
         self.scale = u.scale; // for the divider-drag math in onEvent
-        // Master: the sidebar — a box (div) spanning the pane, holding the nav
-        // List. Top padding clears the traffic lights under the integrated bar.
-        const rows = try u.arena.alloc(ui.ListRow, pages.len);
-        for (pages, 0..) |p, i| rows[i] = .{ .label = p.name, .on_click = @intCast(i) };
+        // Master: a macOS source-list — Welcome up top, then a "Components"
+        // section of icon+label rows; the selected row is an accent pill. Top
+        // padding clears the traffic lights under the integrated title bar.
+        var rowlist: std.ArrayList(ui.ListRow) = .empty;
+        var sel_row: ?usize = null;
+        if (self.selected == 0) sel_row = rowlist.items.len;
+        try rowlist.append(u.arena, .{ .label = pages[0].name, .icon = pages[0].icon, .on_click = 0 });
+        try rowlist.append(u.arena, .{ .label = "Components", .header = true });
+        for (pages[1..], 1..) |p, pi| {
+            if (self.selected == pi) sel_row = rowlist.items.len;
+            try rowlist.append(u.arena, .{ .label = p.name, .icon = p.icon, .on_click = @intCast(pi) });
+        }
         const sidebar = try u.column(.{
-            .padding = .{ .top = 36, .left = 12, .right = 12, .bottom = 12 },
+            .grow = 1,
+            .padding = .{ .top = 36, .left = 10, .right = 10, .bottom = 10 },
             .background = u.theme.background,
         }, &.{
-            try u.list(.{ .selected = self.selected }, rows),
+            try u.list(.{ .selected = sel_row }, rowlist.items),
+            u.spacer(), // pin the footer to the bottom
+            u.divider(.column),
+            try u.row(.{ .align_items = .center, .gap = 8, .padding = .all(6) }, &.{
+                u.icon(.{ .name = .circle, .size = 16, .role = .secondary }),
+                u.text("zooee", .{ .variant = .caption, .role = .secondary }),
+            }),
         });
 
         // Detail: the selected page — heading, description, then live examples.
