@@ -48,6 +48,13 @@ pub fn buildTree(comptime Model: type, model: *Model, arena: std.mem.Allocator, 
 const window_mod = @import("window.zig");
 pub const Theme = theme_mod.Theme;
 
+/// The key window's native ID for a window-only screenshot (`screencapture
+/// -l<id>` on macOS). Null where unsupported. Debug aid for tooling (#306).
+pub fn keyWindowId() ?i64 {
+    if (@hasDecl(WindowPlatform, "keyWindowNumber")) return WindowPlatform.keyWindowNumber();
+    return null;
+}
+
 /// The Model's current backend clear color, if it exposes an optional
 /// `background() Color` hook (theming) — lets a runtime theme change track the
 /// window/backdrop color. Null when the model has no such hook.

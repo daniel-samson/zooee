@@ -914,6 +914,15 @@ pub fn blit(window: *Window, rgba: []const u8, width: usize, height: usize) void
 }
 
 /// Content size in pixels (points × backing scale) for rendering.
+/// The key window's CGWindowID (`NSWindow.windowNumber`), for `screencapture
+/// -l<id>` — a window-only screenshot. Null if no key window. Debug aid (#306).
+pub fn keyWindowNumber() ?i64 {
+    const nsapp = msg(id, struct {}, cls("NSApplication"), sel("sharedApplication"), .{});
+    const kw = msg(id, struct {}, nsapp, sel("keyWindow"), .{});
+    if (kw == null) return null;
+    return msg(i64, struct {}, kw, sel("windowNumber"), .{});
+}
+
 pub fn contentPixelSize(window: *Window) struct { width: usize, height: usize, scale: f64 } {
     const content = msg(NSRect, struct {}, window.ns_window, sel("contentLayoutRect"), .{});
     const scale = msg(f64, struct {}, window.ns_window, sel("backingScaleFactor"), .{});

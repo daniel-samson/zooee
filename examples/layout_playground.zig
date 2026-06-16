@@ -145,8 +145,8 @@ const Play = struct {
     /// The current control values as one line.
     fn configLine(self: *Play, buf: []u8) []const u8 {
         return std.fmt.bufPrint(buf, "direction={s} justify={s} align={s} wrap={} gap={d:.0} padding={d:.0} boxes={d}", .{
-            @tagName(self.dir),    @tagName(self.justify), @tagName(self.align_items),
-            self.wrap,             self.gap,               self.pad,
+            @tagName(self.dir), @tagName(self.justify), @tagName(self.align_items),
+            self.wrap,          self.gap,               self.pad,
             self.count,
         }) catch "(config too long)";
     }
@@ -171,10 +171,16 @@ const Play = struct {
         const data = std.fmt.bufPrint(&dbuf, "{s}\n", .{cfg}) catch cfg;
         std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = state_path, .data = data }) catch {};
         std.debug.print("[playground] snapshot {d}: {s}\n", .{ self.seq, cfg });
-        // screenshot (full-screen PNG; needs Screen Recording permission)
+        // Window-only PNG via `screencapture -l<windowID>` (-o omits the drop
+        // shadow). Falls back to full-screen if the key window id is unavailable.
+        // Needs Screen Recording permission.
         const shot_path = std.fmt.bufPrint(&pbuf, "zooee-debug/shot-{d}.png", .{self.seq}) catch return;
-        const argv = [_][]const u8{ "screencapture", "-x", shot_path };
-        if (std.process.run(self.gpa, self.io, .{ .argv = &argv })) |r| {
+        var idbuf: [24]u8 = undefined;
+        const result = if (zooee.app.keyWindowId()) |wid|
+            std.process.run(self.gpa, self.io, .{ .argv = &.{ "screencapture", "-o", "-x", "-l", std.fmt.bufPrint(&idbuf, "{d}", .{wid}) catch return, shot_path } })
+        else
+            std.process.run(self.gpa, self.io, .{ .argv = &.{ "screencapture", "-x", shot_path } });
+        if (result) |r| {
             self.gpa.free(r.stdout);
             self.gpa.free(r.stderr);
         } else |_| {}
