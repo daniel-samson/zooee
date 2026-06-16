@@ -84,6 +84,12 @@ pub const AlignItems = enum { stretch, start, center, end };
 /// break into lines, advancing on the cross axis.
 pub const FlexWrap = enum { nowrap, wrap };
 
+/// How content larger than the box is handled per axis (CSS `overflow`, #309).
+/// `visible` (default) spills; `hidden` clips with no pan; `scroll`/`auto` clip
+/// and pan by the scroll offset (clamped to content). `auto` vs `scroll` differ
+/// only in scrollbar visibility, which is a separate rendering follow-up.
+pub const Overflow = enum { visible, hidden, scroll, auto };
+
 /// A layout element. This is the layout engine's input tree; the widget
 /// API (#4) will build these. Lifetime: caller-owned, layout never
 /// mutates the element tree.
@@ -111,6 +117,9 @@ pub const Element = struct {
     /// Flex wrapping (#308). Default `.nowrap` (single line) — the historical
     /// behavior. `.wrap` flows items onto new lines along the cross axis.
     wrap: FlexWrap = .nowrap,
+    /// Per-axis overflow handling (#309). Default `.visible` (content spills).
+    overflow_x: Overflow = .visible,
+    overflow_y: Overflow = .visible,
     children: []const *const Element = &.{},
     text: ?[]const u8 = null,
     text_style: style.TextStyle = .{},
@@ -258,19 +267,24 @@ fn renderNode(b: Backend, placements: []const Placement, i: *usize) void {
         }
     }
 
-    // Scroll viewport (#96): clip children to the content box and pan them by
-    // the scroll offset. The element's own frame above is drawn unscrolled.
-    const scrolling = el.scroll or el.scroll_x != 0 or el.scroll_y != 0;
-    if (scrolling) {
+    // Overflow (#96/#309): clip children to the content box; pan only on axes
+    // whose overflow scrolls. `scroll`/`auto` pan by the offset (clamped to
+    // content); `hidden` clips with no pan; `visible` doesn't clip. `el.scroll`
+    // is the legacy scroll-viewport flag (≡ scroll on both axes).
+    const pan_x = el.scroll or el.overflow_x == .scroll or el.overflow_x == .auto;
+    const pan_y = el.scroll or el.overflow_y == .scroll or el.overflow_y == .auto;
+    const clips = el.scroll or el.overflow_x != .visible or el.overflow_y != .visible or el.scroll_x != 0 or el.scroll_y != 0;
+    if (clips) {
         const cbox = contentBox(el, p.rect);
         // Clamp the scroll offset to the content extent so the viewport can't
         // pan past its content into empty space (#96).
         const ext = contentExtent(b, el, if (el.direction == .column) cbox.width else null);
-        const sx = std.math.clamp(el.scroll_x, 0, @max(0, ext.width - cbox.width));
-        const sy = std.math.clamp(el.scroll_y, 0, @max(0, ext.height - cbox.height));
+        const sx = if (pan_x) std.math.clamp(el.scroll_x, 0, @max(0, ext.width - cbox.width)) else 0;
+        const sy = if (pan_y) std.math.clamp(el.scroll_y, 0, @max(0, ext.height - cbox.height)) else 0;
         b.pushClip(cbox);
         b.pushTranslate(-sx, -sy);
     }
+    const scrolling = clips;
     for (el.children) |_| renderNode(b, placements, i);
     if (scrolling) {
         b.popTranslate();
@@ -671,6 +685,27 @@ test "scroll viewport clamps the offset to content, never panning into empty spa
 
     // Clamped: the box shows the third (blue) row, not empty white.
     try testing.expectEqual(style.Color.rgb(0, 0, 255), rb.pixelAt(5, 5));
+}
+
+test "overflow: hidden clips but does not pan; scroll/auto do pan (#309)" {
+    var rb = raster.RasterBackend.init(testing.allocator);
+    defer rb.deinit();
+    const b = rb.interface();
+
+    const r0: Element = .{ .height = 10, .rect_style = .{ .background = style.Color.rgb(255, 0, 0) } };
+    const r1: Element = .{ .height = 10, .rect_style = .{ .background = style.Color.rgb(0, 255, 0) } };
+    const r2: Element = .{ .height = 10, .rect_style = .{ .background = style.Color.rgb(0, 0, 255) } };
+    const content: Element = .{ .direction = .column, .children = &.{ &r0, &r1, &r2 } };
+    // overflow_y=hidden: clips to the 10px box but ignores the offset → the FIRST
+    // (red) row stays at the top, no panning.
+    const box: Element = .{ .width = 10, .height = 10, .overflow_y = .hidden, .scroll_y = 1000, .children = &.{&content} };
+
+    try b.beginFrame(.{ .width = 10, .height = 10 });
+    var result = try layout(testing.allocator, b, &box, .{ .width = 10, .height = 10 });
+    defer result.deinit(testing.allocator);
+    render(b, result);
+    try b.endFrame();
+    try testing.expectEqual(style.Color.rgb(255, 0, 0), rb.pixelAt(5, 5)); // red (not panned)
 }
 
 test "fixed-size children stack in a column with gap" {

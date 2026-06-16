@@ -27,6 +27,8 @@ pub const Theme = theme_mod.Theme;
 pub const Direction = layout.Direction;
 pub const Justify = layout.Justify;
 pub const AlignItems = layout.AlignItems;
+pub const FlexWrap = layout.FlexWrap;
+pub const Overflow = layout.Overflow;
 
 /// Semantic style intent (#265): widgets carry a role, the theme resolves it to
 /// concrete styling per platform. Provisional palette here until #21.
@@ -55,6 +57,13 @@ pub const Box = struct {
     align_items: layout.AlignItems = .stretch,
     /// Flow children onto new lines when they overflow the main axis (#308).
     wrap: layout.FlexWrap = .nowrap,
+    /// Per-axis overflow handling (#309): visible spills, hidden clips,
+    /// scroll/auto clip + pan to scroll_x/scroll_y.
+    overflow_x: layout.Overflow = .visible,
+    overflow_y: layout.Overflow = .visible,
+    /// Scroll offset applied when an axis clips (scroll/auto); clamped to content.
+    scroll_x: f32 = 0,
+    scroll_y: f32 = 0,
     padding: layout.EdgeInsets = .{},
     margin: layout.EdgeInsets = .{},
     grow: f32 = 0,
@@ -490,6 +499,10 @@ pub const Ui = struct {
                     .justify = b.justify,
                     .align_items = b.align_items,
                     .wrap = b.wrap,
+                    .overflow_x = b.overflow_x,
+                    .overflow_y = b.overflow_y,
+                    .scroll_x = b.scroll_x * s,
+                    .scroll_y = b.scroll_y * s,
                     .padding = scaleInsets(b.padding, s),
                     .margin = scaleInsets(b.margin, s),
                     .grow = b.grow,

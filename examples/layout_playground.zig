@@ -27,6 +27,7 @@ const Msg = enum(u32) {
     dump = 11,
     snapshot = 12,
     boxwrap_toggle = 13,
+    overflow_cycle = 14,
     _,
 };
 
@@ -42,6 +43,8 @@ const Play = struct {
     align_items: ui.AlignItems = .stretch,
     wrap: bool = false,
     box_wrap: bool = false,
+    overflow: ui.Overflow = .visible,
+    scroll_y: f32 = 0,
     gap: f32 = 8,
     pad: f32 = 12,
     count: usize = 3,
@@ -65,6 +68,7 @@ const Play = struct {
             try cycleRow(u, "direction", @tagName(self.dir), @intFromEnum(Msg.dir_toggle)),
             try cycleRow(u, "justify", @tagName(self.justify), @intFromEnum(Msg.justify_cycle)),
             try cycleRow(u, "align", @tagName(self.align_items), @intFromEnum(Msg.align_cycle)),
+            try cycleRow(u, "overflow-y", @tagName(self.overflow), @intFromEnum(Msg.overflow_cycle)),
             try stepRow(u, "gap", u.fmt("{d:.0}", .{self.gap}), @intFromEnum(Msg.gap_dec), @intFromEnum(Msg.gap_inc)),
             try stepRow(u, "padding", u.fmt("{d:.0}", .{self.pad}), @intFromEnum(Msg.pad_dec), @intFromEnum(Msg.pad_inc)),
             try stepRow(u, "boxes", u.fmt("{d}", .{self.count}), @intFromEnum(Msg.count_dec), @intFromEnum(Msg.count_inc)),
@@ -114,10 +118,36 @@ const Play = struct {
             u.text("This paragraph wraps to the box width when wrap is on; otherwise it stays a single line and overflows. Toggle it on the left.", .{ .wrap = self.wrap }),
         });
 
+        // Overflow demo: a fixed 120px-tall viewport holding 8 tall rows
+        // (≈ 8×44 = 352px content). Cycle overflow-y on the left and scroll
+        // with the mouse wheel to see clip/pan vs. spill.
+        const rows = try u.arena.alloc(Widget, 8);
+        for (0..8) |i| {
+            rows[i] = try u.column(.{
+                .height = 40,
+                .corner_radius = 4,
+                .justify = .center,
+                .padding = .{ .left = 10, .right = 10 },
+                .background = palette[i % palette.len],
+            }, &.{u.text(u.fmt("row {d}", .{i + 1}), .{ .bold = true })});
+        }
+        const overflow_demo = try u.column(.{
+            .width = 240,
+            .height = 120,
+            .gap = 4,
+            .padding = .all(8),
+            .background = u.theme.surface,
+            .corner_radius = 8,
+            .overflow_y = self.overflow,
+            .scroll_y = self.scroll_y,
+        }, rows);
+
         const preview = try u.column(.{ .grow = 1, .padding = .all(16), .gap = 16 }, &.{
             u.text("preview", .{ .variant = .caption, .role = .secondary }),
             configured,
             wrap_demo,
+            u.text("overflow-y demo (scroll with the wheel)", .{ .variant = .caption, .role = .secondary }),
+            overflow_demo,
         });
 
         return u.row(.{ .grow = 1 }, &.{ controls, preview });
@@ -130,6 +160,7 @@ const Play = struct {
             .align_cycle => self.align_items = nextAlign(self.align_items),
             .wrap_toggle => self.wrap = !self.wrap,
             .boxwrap_toggle => self.box_wrap = !self.box_wrap,
+            .overflow_cycle => self.overflow = nextOverflow(self.overflow),
             .gap_dec => self.gap = @max(0, self.gap - 4),
             .gap_inc => self.gap = @min(64, self.gap + 4),
             .pad_dec => self.pad = @max(0, self.pad - 4),
@@ -151,10 +182,10 @@ const Play = struct {
 
     /// The current control values as one line.
     fn configLine(self: *Play, buf: []u8) []const u8 {
-        return std.fmt.bufPrint(buf, "direction={s} justify={s} align={s} wrap={} gap={d:.0} padding={d:.0} boxes={d}", .{
-            @tagName(self.dir), @tagName(self.justify), @tagName(self.align_items),
-            self.wrap,          self.gap,               self.pad,
-            self.count,
+        return std.fmt.bufPrint(buf, "direction={s} justify={s} align={s} wrap={} overflow-y={s} scroll-y={d:.0} gap={d:.0} padding={d:.0} boxes={d}", .{
+            @tagName(self.dir),      @tagName(self.justify), @tagName(self.align_items),
+            self.wrap,               @tagName(self.overflow), self.scroll_y,
+            self.gap,                self.pad,               self.count,
         }) catch "(config too long)";
     }
 
@@ -195,9 +226,14 @@ const Play = struct {
     }
 
     pub fn onEvent(self: *Play, ev: zooee.event.Event) zooee.app.Command {
-        _ = self;
         switch (ev) {
             .text => |t| if (t.codepoint == 'q') return .quit,
+            .scroll => |s| {
+                // Wheel pans the overflow demo. Lines → ~20px each; pixels 1:1.
+                const step: f32 = if (s.unit == .line) 20 else 1;
+                self.scroll_y = std.math.clamp(self.scroll_y + s.dy * step, 0, 260);
+                return .redraw;
+            },
             else => {},
         }
         return .none;
@@ -210,6 +246,14 @@ fn nextJustify(j: ui.Justify) ui.Justify {
         .center => .end,
         .end => .space_between,
         .space_between => .start,
+    };
+}
+fn nextOverflow(o: ui.Overflow) ui.Overflow {
+    return switch (o) {
+        .visible => .hidden,
+        .hidden => .scroll,
+        .scroll => .auto,
+        .auto => .visible,
     };
 }
 fn nextAlign(a: ui.AlignItems) ui.AlignItems {
