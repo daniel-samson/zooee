@@ -24,6 +24,8 @@ const Msg = enum(u32) {
     pad_inc = 8,
     count_dec = 9,
     count_inc = 10,
+    dump = 11,
+    snapshot = 12,
     _,
 };
 
@@ -41,6 +43,10 @@ const Play = struct {
     gap: f32 = 8,
     pad: f32 = 12,
     count: usize = 3,
+    // Debug-export plumbing (set in main): write paired screenshot + config to
+    // ./zooee-debug/ so issues can be handed back as data, not a live window.
+    gpa: std.mem.Allocator = undefined,
+    io: std.Io = undefined,
 
     pub fn theme(self: *Play) ui.Theme {
         _ = self;
@@ -63,6 +69,13 @@ const Play = struct {
             try u.row(.{ .align_items = .center, .gap = 8 }, &.{
                 try u.toggle(.{ .checked = self.wrap, .on_change = @intFromEnum(Msg.wrap_toggle) }),
                 u.text("wrap text", .{}),
+            }),
+            u.spacer(),
+            u.divider(.column),
+            u.text("debug export → ./zooee-debug/", .{ .variant = .caption, .role = .secondary }),
+            try u.row(.{ .gap = 8 }, &.{
+                u.button(.{ .label = "Dump", .role = .secondary, .size = .small, .on_click = @intFromEnum(Msg.dump) }),
+                u.button(.{ .label = "Screenshot", .role = .primary, .size = .small, .on_click = @intFromEnum(Msg.snapshot) }),
             }),
         });
 
@@ -115,9 +128,62 @@ const Play = struct {
             .pad_inc => self.pad = @min(64, self.pad + 4),
             .count_dec => self.count = if (self.count > 1) self.count - 1 else 1,
             .count_inc => self.count = @min(palette.len, self.count + 1),
+            .dump => {
+                self.printConfig();
+                return .none;
+            },
+            .snapshot => {
+                self.exportSnapshot();
+                return .none;
+            },
             _ => return .none,
         }
         return .redraw;
+    }
+
+    /// The current control values as one line.
+    fn configLine(self: *Play, buf: []u8) []const u8 {
+        return std.fmt.bufPrint(buf, "direction={s} justify={s} align={s} wrap={} gap={d:.0} padding={d:.0} boxes={d}", .{
+            @tagName(self.dir), @tagName(self.justify), @tagName(self.align_items),
+            self.wrap,          self.gap,               self.pad,
+            self.count,
+        }) catch "(config too long)";
+    }
+
+    fn printConfig(self: *Play) void {
+        var buf: [256]u8 = undefined;
+        std.debug.print("[playground] {s}\n", .{self.configLine(&buf)});
+    }
+
+    /// Write a paired screenshot (shot-N.png via `screencapture`) + the config
+    /// that produced it (state-N.txt) into ./zooee-debug/ for hand-back.
+    fn exportSnapshot(self: *Play) void {
+        std.Io.Dir.cwd().createDirPath(self.io, "zooee-debug") catch {};
+        // Monotonic ns stamp: strictly increasing → unique across runs (no
+        // overwrite) and sorts by recency; shot + state share it so they pair.
+        const stamp = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
+        var nbuf: [64]u8 = undefined;
+        var pbuf: [64]u8 = undefined;
+        var cbuf: [256]u8 = undefined;
+        var dbuf: [300]u8 = undefined;
+        const cfg = self.configLine(&cbuf);
+        const state_path = std.fmt.bufPrint(&nbuf, "zooee-debug/state-{d}.txt", .{stamp}) catch return;
+        const data = std.fmt.bufPrint(&dbuf, "{s}\n", .{cfg}) catch cfg;
+        std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = state_path, .data = data }) catch {};
+        std.debug.print("[playground] snapshot {d}: {s}\n", .{ stamp, cfg });
+        // Window-only PNG via `screencapture -l<windowID>` (-o omits the drop
+        // shadow). Falls back to full-screen if the key window id is unavailable.
+        // Needs Screen Recording permission.
+        const shot_path = std.fmt.bufPrint(&pbuf, "zooee-debug/shot-{d}.png", .{stamp}) catch return;
+        var idbuf: [24]u8 = undefined;
+        const result = if (zooee.app.keyWindowId()) |wid|
+            std.process.run(self.gpa, self.io, .{ .argv = &.{ "screencapture", "-o", "-x", "-l", std.fmt.bufPrint(&idbuf, "{d}", .{wid}) catch return, shot_path } })
+        else
+            std.process.run(self.gpa, self.io, .{ .argv = &.{ "screencapture", "-x", shot_path } });
+        if (result) |r| {
+            self.gpa.free(r.stdout);
+            self.gpa.free(r.stderr);
+        } else |_| {}
     }
 
     pub fn onEvent(self: *Play, ev: zooee.event.Event) zooee.app.Command {
@@ -166,7 +232,7 @@ fn stepRow(u: *ui.Ui, label: []const u8, value: []const u8, dec: u32, inc: u32) 
 }
 
 pub fn main(init: std.process.Init) !void {
-    var play: Play = .{};
+    var play: Play = .{ .gpa = init.arena.allocator(), .io = init.io };
     try zooee.app.runWindow(Play, Msg, &play, init, .{
         .title = "Zooee Layout Playground",
         .width = 960,
