@@ -207,6 +207,8 @@ fn makeTexture(device: id, width: u32, height: u32, pixel_format: u64) Error!id 
 // --- window layer (on-screen present) ---------------------------------------
 
 const CGSize = extern struct { width: f64, height: f64 };
+const CGPoint = extern struct { x: f64, y: f64 };
+const CGRect = extern struct { origin: CGPoint, size: CGSize };
 
 /// A CAMetalLayer attached to an NSView for on-screen present (BGRA8). Borrows
 /// a device (must be the same one the MetalBackend renders on, so its RT can
@@ -219,7 +221,7 @@ pub const MetalLayer = struct {
     /// Attach a CAMetalLayer (on `device`) to `view` (an NSView id), sized
     /// `width`x`height` device pixels. `framebufferOnly=false` so the drawable
     /// can be a render target.
-    pub fn createOnView(device: id, view: id, width: u32, height: u32) Error!MetalLayer {
+    pub fn createOnView(device: id, view: id, width: u32, height: u32, vibrant: bool) Error!MetalLayer {
         const layer = msg(id, struct {}, cls("CAMetalLayer"), sel("layer"), .{});
         if (layer == null) return error.NoDrawable;
         _ = msg(void, struct { id }, layer, sel("setDevice:"), .{device});
@@ -230,8 +232,33 @@ pub const MetalLayer = struct {
         // live-resize drag so the drawable lands in the resize's CATransaction
         // (no squash/stretch flash). See #170/#181 and [[live-resize-pattern]].
         _ = msg(void, struct { CGSize }, layer, sel("setDrawableSize:"), .{.{ .width = @floatFromInt(width), .height = @floatFromInt(height) }});
-        _ = msg(void, struct { bool }, view, sel("setWantsLayer:"), .{true});
-        _ = msg(void, struct { id }, view, sel("setLayer:"), .{layer});
+        if (vibrant) {
+            // Vibrancy (#268): a translucent NSVisualEffectView sits *behind* a
+            // transparent Metal layer, so wherever the frame is cleared/painted
+            // with alpha < 1 the window material (blurred desktop) shows through.
+            // The Metal layer can't be a view's own backing AND have something
+            // behind it, so we restructure: the content view becomes a container
+            // with the effect view (back) + a layer-host subview (front). Input
+            // still routes to the content view via the responder chain (the plain
+            // subviews don't implement mouse/key handlers, so events bubble up).
+            _ = msg(void, struct { bool }, layer, sel("setOpaque:"), .{false});
+            const bounds = msg(CGRect, struct {}, view, sel("bounds"), .{});
+            const autoresize: u64 = 18; // width(2) | height(16): track the window
+            const ev = msg(id, struct { CGRect }, msg(id, struct {}, cls("NSVisualEffectView"), sel("alloc"), .{}), sel("initWithFrame:"), .{bounds});
+            _ = msg(void, struct { i64 }, ev, sel("setMaterial:"), .{7}); // .sidebar
+            _ = msg(void, struct { i64 }, ev, sel("setBlendingMode:"), .{0}); // .behindWindow
+            _ = msg(void, struct { i64 }, ev, sel("setState:"), .{1}); // .active
+            _ = msg(void, struct { u64 }, ev, sel("setAutoresizingMask:"), .{autoresize});
+            _ = msg(void, struct { id }, view, sel("addSubview:"), .{ev});
+            const host = msg(id, struct { CGRect }, msg(id, struct {}, cls("NSView"), sel("alloc"), .{}), sel("initWithFrame:"), .{bounds});
+            _ = msg(void, struct { u64 }, host, sel("setAutoresizingMask:"), .{autoresize});
+            _ = msg(void, struct { bool }, host, sel("setWantsLayer:"), .{true});
+            _ = msg(void, struct { id }, host, sel("setLayer:"), .{layer});
+            _ = msg(void, struct { id }, view, sel("addSubview:"), .{host});
+        } else {
+            _ = msg(void, struct { bool }, view, sel("setWantsLayer:"), .{true});
+            _ = msg(void, struct { id }, view, sel("setLayer:"), .{layer});
+        }
         return .{ .layer = layer, .width = width, .height = height };
     }
 
@@ -1498,6 +1525,9 @@ pub const MetalBackend = struct {
     /// endFrame (nothing reads back on screen). Left false for offscreen/golden
     /// readback paths, which getBytes the target on the CPU.
     present_only: bool = false,
+    /// Vibrancy (#268): the layer is transparent over an NSVisualEffectView, so
+    /// the frame is cleared with alpha 0 (material shows through unpainted areas).
+    vibrant: bool = false,
     /// (text, size, style) → measured Size (#264). Cleared when the font set
     /// changes; freed in deinit. Keys own their text bytes.
     measure_cache: std.HashMapUnmanaged(MeasureKey, geometry.Size, MeasureCtx, std.hash_map.default_max_load_percentage) = .empty,

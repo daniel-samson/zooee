@@ -66,8 +66,9 @@ fn cardExamples(u: *ui.Ui) !Widget {
     });
 }
 
-/// Sidebar panel tone — just above the window backdrop (until vibrancy, #268).
-const sidebar_bg = Color.rgb(40, 40, 43);
+/// Sidebar panel tone — translucent so the window vibrancy material shows
+/// through (#268); over an opaque backdrop it just reads as a lighter panel.
+const sidebar_bg = Color{ .r = 76, .g = 76, .b = 82, .a = 130 };
 
 /// One half of the back/forward segmented control: a chevron centered in a cell.
 fn navCell(u: *ui.Ui, name: ui.IconName, dim: bool) !Widget {
@@ -303,7 +304,9 @@ const Docs = struct {
             try blocks.append(u.arena, try selectionExamples(u, self.sel_check, self.sel_toggle, self.sel_radio));
         }
         const detail = try u.column(.{ .grow = 1, .padding = .{ .top = 4, .left = 28, .right = 28, .bottom = 28 }, .gap = 14 }, blocks.items);
-        const content = try u.column(.{ .grow = 1 }, &.{ toolbar, detail });
+        // Content is opaque (theme backdrop) so the window material only shows
+        // through the translucent sidebar, not here (#268 vibrancy).
+        const content = try u.column(.{ .grow = 1, .background = u.theme.background }, &.{ toolbar, detail });
 
         // Resizable split (no visible hairline — the rounded panel separates the
         // panes); drag the gutter → sidebar_w changes → relayout next frame.

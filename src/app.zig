@@ -284,7 +284,7 @@ pub fn runWindow(
     // If Metal is unavailable, fall through to the CPU raster path below.
     if (comptime builtin.os.tag == .macos) {
         if (want_gpu) {
-            if (runWindowMetal(Model, Msg, model, window, init, opts.theme)) {
+            if (runWindowMetal(Model, Msg, model, window, init, opts.theme, opts.titlebar == .integrated)) {
                 return;
             } else |_| {}
         }
@@ -535,6 +535,7 @@ fn runWindowMetal(
     window: anytype,
     init: std.process.Init,
     theme: Theme,
+    vibrant: bool,
 ) !void {
     const platform = WindowPlatform;
     const gpa = init.arena.allocator();
@@ -547,10 +548,13 @@ fn runWindowMetal(
     var ctx = try metal_backend.MetalContext.create();
     defer ctx.destroy();
     const px0 = platform.contentPixelSize(window);
-    var layer = try metal_backend.MetalLayer.createOnView(ctx.device, window.contentView(), @intCast(px0.width), @intCast(px0.height));
+    // Vibrancy (#268): a translucent sidebar material behind a transparent Metal
+    // layer; the caller enables it for the integrated title bar.
+    var layer = try metal_backend.MetalLayer.createOnView(ctx.device, window.contentView(), @intCast(px0.width), @intCast(px0.height), vibrant);
 
     var mb = try metal_backend.MetalBackend.initOn(gpa, ctx.device, ctx.queue);
     mb.clear_color = theme.clearRgba(); // theme backdrop (theming)
+    mb.vibrant = vibrant; // clear with alpha 0 so the material shows through (#268)
     // Windowed present pipelines (no per-frame GPU stall); the capture path
     // reads pixels back on the CPU, so it keeps the completion wait (#264).
     mb.present_only = capture_path == null;
@@ -598,6 +602,7 @@ fn runWindowMetal(
             }.f;
             // Runtime theme changes track the clear color (theming toggle).
             if (modelBackground(Model, self.model)) |c| self.mb.clear_color = c.rgbaF();
+            if (self.mb.vibrant) self.mb.clear_color[3] = 0; // transparent → material shows (#268)
             _ = self.arena.reset(.retain_capacity);
             const a = self.arena.allocator();
             const px = platform.contentPixelSize(self.win);
