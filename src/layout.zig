@@ -281,7 +281,7 @@ fn renderNode(b: Backend, placements: []const Placement, i: *usize) void {
         const cbox = contentBox(el, p.rect);
         // Clamp the scroll offset to the content extent so the viewport can't
         // pan past its content into empty space (#96).
-        const ext = contentExtent(b, el, if (el.direction == .column) cbox.width else null);
+        const ext = contentExtent(b, el, cbox);
         const over_x = ext.width > cbox.width + 0.5;
         const over_y = ext.height > cbox.height + 0.5;
         const clip_x = el.scroll or el.overflow_x == .hidden or el.overflow_x == .scroll or (el.overflow_x == .auto and over_x);
@@ -453,17 +453,53 @@ fn measure(b: Backend, el: *const Element, avail_w: ?f32) Size {
 /// Natural size of an element's children laid out in its direction, ignoring
 /// the element's own fixed width/height. Used to clamp scroll offsets to the
 /// content extent (#96), so a scroll viewport can't pan past its content into
-/// empty space.
-fn contentExtent(b: Backend, el: *const Element, avail_w: ?f32) Size {
+/// empty space. `cbox` is the container's content box, needed to break lines
+/// when the element flex-wraps.
+fn contentExtent(b: Backend, el: *const Element, cbox: Rect) Size {
+    const dir = el.direction;
+    const avail_w: ?f32 = if (dir == .column) cbox.width else null;
+
+    // flex-wrap (#308/#309): items flow onto lines within the main extent, so
+    // the main extent stays bounded by the container and the cross extent grows
+    // by the stacked line sizes. Mirror placeWrapped's line-breaking so the
+    // scroll clamp matches where content is actually placed (a non-wrapped sum
+    // would invent a huge main-axis range and pan everything off-screen).
+    if (el.wrap == .wrap) {
+        const avail_main = mainOf(dir, cbox.size());
+        var max_line_main: f32 = 0;
+        var total_cross: f32 = 0;
+        var i: usize = 0;
+        var first_line = true;
+        while (i < el.children.len) {
+            var line_main: f32 = 0;
+            var line_cross: f32 = 0;
+            var j = i;
+            while (j < el.children.len) : (j += 1) {
+                const cs = measure(b, el.children[j], avail_w);
+                const cm = mainOf(dir, cs) + marginMain(dir, el.children[j].margin);
+                const add = cm + (if (j > i) el.gap else 0);
+                if (j > i and line_main + add > avail_main) break;
+                line_main += add;
+                line_cross = @max(line_cross, crossOf(dir, cs) + marginCross(dir, el.children[j].margin));
+            }
+            max_line_main = @max(max_line_main, line_main);
+            if (!first_line) total_cross += el.gap;
+            total_cross += line_cross;
+            first_line = false;
+            i = j;
+        }
+        return sizeFrom(dir, max_line_main, total_cross);
+    }
+
     var main: f32 = 0;
     var cross: f32 = 0;
     for (el.children, 0..) |child, i| {
         const cs = measure(b, child, avail_w);
-        main += mainOf(el.direction, cs) + marginMain(el.direction, child.margin);
+        main += mainOf(dir, cs) + marginMain(dir, child.margin);
         if (i != 0) main += el.gap;
-        cross = @max(cross, crossOf(el.direction, cs) + marginCross(el.direction, child.margin));
+        cross = @max(cross, crossOf(dir, cs) + marginCross(dir, child.margin));
     }
-    return sizeFrom(el.direction, main, cross);
+    return sizeFrom(dir, main, cross);
 }
 
 /// Place pass: position `el`'s border-box inside `slot` (already
@@ -856,6 +892,38 @@ test "overflow: auto clips+pans only when content overflows that axis (#309)" {
         try b.endFrame();
         try testing.expectEqual(blu, rb.pixelAt(10, 5)); // panned (overflows)
     }
+}
+
+test "overflow: flex-wrap bounds the main-axis scroll (content can't pan off) (#309)" {
+    var rb = raster.RasterBackend.init(testing.allocator);
+    defer rb.deinit();
+    const b = rb.interface();
+
+    // A 100px-wide wrapping row of five 40px cells: they wrap (2 per line), so
+    // the main (x) extent is one line (~80px) < 100 — there's no horizontal
+    // overflow. A huge scroll_x must clamp to 0, leaving the first (red) cell at
+    // the top-left, NOT panned off into empty space.
+    const red = style.Color.rgb(255, 0, 0);
+    const c0: Element = .{ .width = 40, .height = 20, .rect_style = .{ .background = red } };
+    const c: Element = .{ .width = 40, .height = 20, .rect_style = .{ .background = style.Color.rgb(0, 0, 255) } };
+    const box: Element = .{
+        .width = 100,
+        .height = 80,
+        .direction = .row,
+        .wrap = .wrap,
+        .overflow_x = .scroll,
+        .overflow_y = .scroll,
+        .scroll_x = 999,
+        .children = &.{ &c0, &c, &c, &c, &c },
+    };
+
+    try b.beginFrame(.{ .width = 100, .height = 80 });
+    var result = try layout(testing.allocator, b, &box, .{ .width = 100, .height = 80 });
+    defer result.deinit(testing.allocator);
+    render(b, result);
+    try b.endFrame();
+
+    try testing.expectEqual(red, rb.pixelAt(5, 5)); // first cell still at top-left
 }
 
 test "overflow: a scroll container clips to its padding box, not content box (#309)" {
