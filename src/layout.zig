@@ -79,6 +79,11 @@ pub const Justify = enum { start, center, end, space_between };
 /// and place it at the start/center/end.
 pub const AlignItems = enum { stretch, start, center, end };
 
+/// Whether items flow onto new lines when they overflow the main axis (CSS
+/// `flex-wrap`, #308). `nowrap` (default) = single line (may overflow); `wrap` =
+/// break into lines, advancing on the cross axis.
+pub const FlexWrap = enum { nowrap, wrap };
+
 /// A layout element. This is the layout engine's input tree; the widget
 /// API (#4) will build these. Lifetime: caller-owned, layout never
 /// mutates the element tree.
@@ -103,6 +108,9 @@ pub const Element = struct {
     /// Cross-axis child placement (#268). Default `.stretch` — the historical
     /// behavior (children fill the cross extent unless they set an explicit size).
     align_items: AlignItems = .stretch,
+    /// Flex wrapping (#308). Default `.nowrap` (single line) — the historical
+    /// behavior. `.wrap` flows items onto new lines along the cross axis.
+    wrap: FlexWrap = .nowrap,
     children: []const *const Element = &.{},
     text: ?[]const u8 = null,
     text_style: style.TextStyle = .{},
@@ -432,6 +440,12 @@ fn place(
     // (#304); a row divides width per flex, so no measure-time wrap constraint.
     const child_avail: ?f32 = if (dir == .column) inner.width else null;
 
+    // flex-wrap (#308): items flow onto new lines along the cross axis.
+    if (el.wrap == .wrap) {
+        try placeWrapped(gpa, b, el, inner, child_avail, out);
+        return;
+    }
+
     // How much main-axis space do fixed children + gaps need; sum grows.
     var fixed_main: f32 = 0;
     var grow_sum: f32 = 0;
@@ -507,6 +521,72 @@ fn place(
         try place(gpa, b, child, child_slot, out);
 
         cursor += child_main + marginMainEnd(dir, child.margin);
+    }
+}
+
+/// flex-wrap (#308): break children into lines along the main axis (each line
+/// fits within the container's main extent), advancing on the cross axis by each
+/// line's tallest item. `justify`/`align_items` apply per line. v1: grow is
+/// ignored under wrap (items keep their measured main size).
+fn placeWrapped(
+    gpa: std.mem.Allocator,
+    b: Backend,
+    el: *const Element,
+    inner: Rect,
+    child_avail: ?f32,
+    out: *std.ArrayList(Placement),
+) std.mem.Allocator.Error!void {
+    const dir = el.direction;
+    const avail_main = mainOf(dir, inner.size());
+    var cross_cursor = crossStart(dir, inner);
+    var i: usize = 0;
+    while (i < el.children.len) {
+        // Gather the children that fit on this line ([i, j)).
+        var line_main: f32 = 0;
+        var line_cross: f32 = 0;
+        var j = i;
+        while (j < el.children.len) : (j += 1) {
+            const cs = measure(b, el.children[j], child_avail);
+            const cm = mainOf(dir, cs) + marginMain(dir, el.children[j].margin);
+            const add = cm + (if (j > i) el.gap else 0);
+            if (j > i and line_main + add > avail_main) break; // overflow → next line
+            line_main += add;
+            line_cross = @max(line_cross, crossOf(dir, cs) + marginCross(dir, el.children[j].margin));
+        }
+        // Distribute the line's free main space per justify-content.
+        const n = j - i;
+        const free = @max(0, avail_main - line_main);
+        var lead: f32 = 0;
+        var between: f32 = 0;
+        switch (el.justify) {
+            .start => {},
+            .center => lead = free / 2,
+            .end => lead = free,
+            .space_between => if (n > 1) {
+                between = free / @as(f32, @floatFromInt(n - 1));
+            },
+        }
+        // Place the line's children.
+        var cursor = mainStart(dir, inner) + lead;
+        var k = i;
+        while (k < j) : (k += 1) {
+            const child = el.children[k];
+            if (k != i) cursor += el.gap + between;
+            cursor += marginMainStart(dir, child.margin);
+            const cs = measure(b, child, child_avail);
+            const cmain = mainOf(dir, cs);
+            const ccross = crossOf(dir, cs);
+            const cross_start = cross_cursor + marginCrossStart(dir, child.margin);
+            const align_off: f32 = switch (el.align_items) {
+                .start, .stretch => 0,
+                .center => (line_cross - ccross) / 2,
+                .end => line_cross - ccross,
+            };
+            try place(gpa, b, child, rectFrom(dir, cursor, cross_start + align_off, cmain, ccross), out);
+            cursor += cmain + marginMainEnd(dir, child.margin);
+        }
+        cross_cursor += line_cross + el.gap;
+        i = j;
     }
 }
 
@@ -692,6 +772,23 @@ test "text wraps to the available width; the block grows to fit (#304)" {
     var res2 = try layoutWith(&rec, &root2, 80, 400);
     defer res2.deinit(testing.allocator);
     try testing.expectEqual(line_h, res2.placements[2].rect.height);
+}
+
+test "flex-wrap flows items onto new lines when they overflow (#308)" {
+    var rec = record.RecordBackend.init(testing.allocator);
+    defer rec.deinit();
+    // 5 boxes of 70×40 in a 200-wide wrapping row, gap 0 → 2 per line (140 fits,
+    // 210 doesn't), so lines are [0,1] [2,3] [4].
+    const a: Element = .{ .width = 70, .height = 40 };
+    const root: Element = .{ .direction = .row, .wrap = .wrap, .children = &.{ &a, &a, &a, &a, &a } };
+    var res = try layoutWith(&rec, &root, 200, 200);
+    defer res.deinit(testing.allocator);
+    // [0]=root, [1..6]=boxes
+    try testing.expectEqual(@as(f32, 0), res.placements[1].rect.y); // box0 line 1
+    try testing.expectEqual(@as(f32, 70), res.placements[2].rect.x); // box1 beside it
+    try testing.expectEqual(@as(f32, 0), res.placements[3].rect.x); // box2 wraps to line 2
+    try testing.expectEqual(@as(f32, 40), res.placements[3].rect.y);
+    try testing.expectEqual(@as(f32, 80), res.placements[5].rect.y); // box4 on line 3
 }
 
 test "grow children tile the parent exactly (no rounding seams)" {

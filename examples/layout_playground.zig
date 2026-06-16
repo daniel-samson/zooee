@@ -26,6 +26,7 @@ const Msg = enum(u32) {
     count_inc = 10,
     dump = 11,
     snapshot = 12,
+    boxwrap_toggle = 13,
     _,
 };
 
@@ -40,6 +41,7 @@ const Play = struct {
     justify: ui.Justify = .start,
     align_items: ui.AlignItems = .stretch,
     wrap: bool = false,
+    box_wrap: bool = false,
     gap: f32 = 8,
     pad: f32 = 12,
     count: usize = 3,
@@ -66,6 +68,10 @@ const Play = struct {
             try stepRow(u, "gap", u.fmt("{d:.0}", .{self.gap}), @intFromEnum(Msg.gap_dec), @intFromEnum(Msg.gap_inc)),
             try stepRow(u, "padding", u.fmt("{d:.0}", .{self.pad}), @intFromEnum(Msg.pad_dec), @intFromEnum(Msg.pad_inc)),
             try stepRow(u, "boxes", u.fmt("{d}", .{self.count}), @intFromEnum(Msg.count_dec), @intFromEnum(Msg.count_inc)),
+            try u.row(.{ .align_items = .center, .gap = 8 }, &.{
+                try u.toggle(.{ .checked = self.box_wrap, .on_change = @intFromEnum(Msg.boxwrap_toggle) }),
+                u.text("wrap boxes (flex-wrap)", .{}),
+            }),
             try u.row(.{ .align_items = .center, .gap = 8 }, &.{
                 try u.toggle(.{ .checked = self.wrap, .on_change = @intFromEnum(Msg.wrap_toggle) }),
                 u.text("wrap text", .{}),
@@ -98,6 +104,7 @@ const Play = struct {
             .padding = .all(self.pad),
             .justify = self.justify,
             .align_items = self.align_items,
+            .wrap = if (self.box_wrap) .wrap else .nowrap,
             .background = u.theme.surface_variant,
             .corner_radius = 8,
         };
@@ -122,6 +129,7 @@ const Play = struct {
             .justify_cycle => self.justify = nextJustify(self.justify),
             .align_cycle => self.align_items = nextAlign(self.align_items),
             .wrap_toggle => self.wrap = !self.wrap,
+            .boxwrap_toggle => self.box_wrap = !self.box_wrap,
             .gap_dec => self.gap = @max(0, self.gap - 4),
             .gap_inc => self.gap = @min(64, self.gap + 4),
             .pad_dec => self.pad = @max(0, self.pad - 4),

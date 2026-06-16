@@ -53,6 +53,8 @@ pub const Box = struct {
     /// Main-axis distribution (#268) and cross-axis placement of children.
     justify: layout.Justify = .start,
     align_items: layout.AlignItems = .stretch,
+    /// Flow children onto new lines when they overflow the main axis (#308).
+    wrap: layout.FlexWrap = .nowrap,
     padding: layout.EdgeInsets = .{},
     margin: layout.EdgeInsets = .{},
     grow: f32 = 0,
@@ -487,6 +489,7 @@ pub const Ui = struct {
                     .gap = b.gap * s,
                     .justify = b.justify,
                     .align_items = b.align_items,
+                    .wrap = b.wrap,
                     .padding = scaleInsets(b.padding, s),
                     .margin = scaleInsets(b.margin, s),
                     .grow = b.grow,
