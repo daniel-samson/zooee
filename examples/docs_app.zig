@@ -66,6 +66,21 @@ fn cardExamples(u: *ui.Ui) !Widget {
     });
 }
 
+/// Sidebar panel tone — just above the window backdrop (until vibrancy, #268).
+const sidebar_bg = Color.rgb(40, 40, 43);
+
+/// A toolbar back/forward chevron button: a small rounded square with a chevron.
+fn navButton(u: *ui.Ui, name: ui.IconName) !Widget {
+    return u.column(.{
+        .width = 30,
+        .height = 24,
+        .corner_radius = 6,
+        .background = Color.rgb(50, 50, 53),
+        .align_items = .center,
+        .justify = .center,
+    }, &.{u.icon(.{ .name = name, .size = 11, .role = .secondary })});
+}
+
 /// A labelled example block: a caption above a bordered demo surface.
 fn example(u: *ui.Ui, caption: []const u8, demo: Widget) !Widget {
     return u.column(.{ .gap = 6 }, &.{
@@ -224,10 +239,14 @@ const Docs = struct {
             if (self.selected == pi) sel_row = rowlist.items.len;
             try rowlist.append(u.arena, .{ .label = p.name, .icon = p.icon, .on_click = @intCast(pi) });
         }
-        const sidebar = try u.column(.{
+        // The rounded source-list panel; the outer pane padding insets it on the
+        // backdrop (traffic lights float over the top inset). Sidebar tone sits
+        // just above the window backdrop until vibrancy lands.
+        const sidebar_inner = try u.column(.{
             .grow = 1,
-            .padding = .{ .top = 36, .left = 10, .right = 10, .bottom = 10 },
-            .background = u.theme.background,
+            .corner_radius = 10,
+            .background = sidebar_bg,
+            .padding = .{ .top = 34, .left = 10, .right = 10, .bottom = 10 },
         }, &.{
             try u.list(.{ .selected = sel_row }, rowlist.items),
             u.spacer(), // pin the footer to the bottom
@@ -237,11 +256,23 @@ const Docs = struct {
                 u.text("zooee", .{ .variant = .caption, .role = .secondary }),
             }),
         });
+        const sidebar = try u.column(.{ .grow = 1, .padding = .{ .top = 8, .left = 8, .right = 4, .bottom = 8 } }, &.{sidebar_inner});
 
-        // Detail: the selected page — heading, description, then live examples.
         const page = pages[self.selected];
+        // Content toolbar: back/forward nav buttons + the page title, aligned with
+        // the traffic-light row.
+        const toolbar = try u.row(.{
+            .align_items = .center,
+            .gap = 8,
+            .padding = .{ .top = 12, .bottom = 8, .left = 16, .right = 16 },
+        }, &.{
+            try navButton(u, .chevron_left),
+            try navButton(u, .chevron_right),
+            u.text(page.name, .{ .size = 22, .bold = true }),
+        });
+
+        // Detail: description + live examples (the title lives in the toolbar now).
         var blocks: std.ArrayList(Widget) = .empty;
-        try blocks.append(u.arena, u.text(page.name, .{ .variant = .title }));
         try blocks.append(u.arena, u.text(page.body, .{ .variant = .body }));
         if (std.mem.eql(u8, page.name, "Layout")) {
             try blocks.append(u.arena, try layoutExamples(u));
@@ -260,10 +291,12 @@ const Docs = struct {
         } else if (std.mem.eql(u8, page.name, "Selection")) {
             try blocks.append(u.arena, try selectionExamples(u, self.sel_check, self.sel_toggle, self.sel_radio));
         }
-        const detail = try u.column(.{ .grow = 1, .padding = .all(28), .gap = 14 }, blocks.items);
+        const detail = try u.column(.{ .grow = 1, .padding = .{ .top = 4, .left = 28, .right = 28, .bottom = 28 }, .gap = 14 }, blocks.items);
+        const content = try u.column(.{ .grow = 1 }, &.{ toolbar, detail });
 
-        // Resizable split: drag the divider → sidebar_w changes → relayout next frame.
-        return u.split(.{ .leading_size = self.sidebar_w, .divider = 1 }, sidebar, detail);
+        // Resizable split (no visible hairline — the rounded panel separates the
+        // panes); drag the gutter → sidebar_w changes → relayout next frame.
+        return u.split(.{ .leading_size = self.sidebar_w, .divider = 0 }, sidebar, content);
     }
 
     pub fn update(self: *Docs, msg: Msg) zooee.app.Command {
