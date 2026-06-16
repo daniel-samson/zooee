@@ -708,6 +708,36 @@ test "overflow: hidden clips but does not pan; scroll/auto do pan (#309)" {
     try testing.expectEqual(style.Color.rgb(255, 0, 0), rb.pixelAt(5, 5)); // red (not panned)
 }
 
+test "overflow: scroll/hidden clip content below the box; visible spills (#309)" {
+    var rb = raster.RasterBackend.init(testing.allocator);
+    defer rb.deinit();
+    const b = rb.interface();
+
+    // 3 rows of 20px in a 20px-tall box on a 60px canvas: 40px of content lies
+    // below the box. With scroll/hidden it must be clipped (canvas stays white
+    // below y=20); with visible it spills.
+    const r0: Element = .{ .height = 20, .rect_style = .{ .background = style.Color.rgb(255, 0, 0) } };
+    const r1: Element = .{ .height = 20, .rect_style = .{ .background = style.Color.rgb(0, 255, 0) } };
+    const r2: Element = .{ .height = 20, .rect_style = .{ .background = style.Color.rgb(0, 0, 255) } };
+
+    // Nest the box (like the playground) so it keeps its 20px height instead of
+    // being stretched as the root; a tall spacer follows it on the canvas.
+    inline for (.{ Overflow.scroll, Overflow.hidden, Overflow.visible }) |ov| {
+        const content: Element = .{ .direction = .column, .children = &.{ &r0, &r1, &r2 } };
+        const boxel: Element = .{ .width = 20, .height = 20, .overflow_y = ov, .children = &.{&content} };
+        const spacer: Element = .{ .grow = 1 };
+        const root: Element = .{ .direction = .column, .children = &.{ &boxel, &spacer } };
+        try b.beginFrame(.{ .width = 20, .height = 60 });
+        var result = try layout(testing.allocator, b, &root, .{ .width = 20, .height = 60 });
+        defer result.deinit(testing.allocator);
+        render(b, result);
+        try b.endFrame();
+        // y=40 is below the 20px box: scroll/hidden clip it (white); visible spills (blue).
+        const expect = if (ov == .visible) style.Color.rgb(0, 0, 255) else style.Color.rgb(255, 255, 255);
+        try testing.expectEqual(expect, rb.pixelAt(10, 40));
+    }
+}
+
 test "fixed-size children stack in a column with gap" {
     var rec = record.RecordBackend.init(testing.allocator);
     defer rec.deinit();

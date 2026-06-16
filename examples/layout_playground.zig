@@ -43,7 +43,9 @@ const Play = struct {
     align_items: ui.AlignItems = .stretch,
     wrap: bool = false,
     box_wrap: bool = false,
-    overflow: ui.Overflow = .visible,
+    // Default to scroll so the viewport visibly clips + pans on open; cycle the
+    // overflow-y control to visible to see content spill (CSS default).
+    overflow: ui.Overflow = .scroll,
     scroll_y: f32 = 0,
     gap: f32 = 8,
     pad: f32 = 12,
