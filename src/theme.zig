@@ -30,30 +30,33 @@ pub const Theme = struct {
     on_accent: Color,
     /// Hairlines and container outlines.
     border: Color,
+    /// Destructive / error accent.
+    danger: Color,
 
-    /// The default light theme — matches the historical demo palette so it's a
-    /// drop-in for the previously hard-coded literals.
+    /// The default light theme. Apple-ish system palette (systemBlue / labels).
     pub const light: Theme = .{
-        .background = Color.rgb(238, 240, 245),
+        .background = Color.rgb(242, 242, 247),
         .surface = Color.rgb(255, 255, 255),
-        .surface_variant = Color.rgb(235, 237, 242),
-        .text = Color.rgb(30, 30, 40),
-        .text_muted = Color.rgb(110, 110, 130),
-        .accent = Color.rgb(0, 120, 255),
+        .surface_variant = Color.rgb(229, 229, 234),
+        .text = Color.rgb(0, 0, 0),
+        .text_muted = Color.rgb(110, 110, 118),
+        .accent = Color.rgb(0, 122, 255),
         .on_accent = Color.rgb(255, 255, 255),
-        .border = Color.rgb(120, 120, 130),
+        .border = Color.rgb(198, 198, 200),
+        .danger = Color.rgb(255, 59, 48),
     };
 
-    /// A dark counterpart with matched roles.
+    /// The dark theme — tuned to the macOS dark system palette (the reference).
     pub const dark: Theme = .{
-        .background = Color.rgb(24, 26, 32),
-        .surface = Color.rgb(36, 38, 46),
-        .surface_variant = Color.rgb(44, 47, 56),
-        .text = Color.rgb(232, 234, 240),
-        .text_muted = Color.rgb(150, 154, 168),
-        .accent = Color.rgb(70, 150, 250),
+        .background = Color.rgb(28, 28, 30), // windowBackground
+        .surface = Color.rgb(44, 44, 46), // secondarySystemBackground (cards)
+        .surface_variant = Color.rgb(58, 58, 60), // tertiary fill (tracks/wells)
+        .text = Color.rgb(255, 255, 255), // label
+        .text_muted = Color.rgb(152, 152, 157), // secondaryLabel
+        .accent = Color.rgb(10, 132, 255), // systemBlue (dark)
         .on_accent = Color.rgb(255, 255, 255),
-        .border = Color.rgb(70, 74, 86),
+        .border = Color.rgb(64, 64, 67), // separator
+        .danger = Color.rgb(255, 69, 58), // systemRed (dark)
     };
 
     /// The background as a premultiplied-free RGBA float quad — the form the GPU
@@ -88,7 +91,7 @@ test "light and dark are distinct across every role" {
 
 test "clearRgba mirrors the background token" {
     const c = Theme.light.clearRgba();
-    try testing.expectApproxEqAbs(@as(f32, 238.0 / 255.0), c[0], 1e-4);
-    try testing.expectApproxEqAbs(@as(f32, 245.0 / 255.0), c[2], 1e-4);
+    try testing.expectApproxEqAbs(@as(f32, @as(f32, @floatFromInt(Theme.light.background.r)) / 255.0), c[0], 1e-4);
+    try testing.expectApproxEqAbs(@as(f32, @as(f32, @floatFromInt(Theme.light.background.b)) / 255.0), c[2], 1e-4);
     try testing.expectApproxEqAbs(@as(f32, 1), c[3], 1e-4);
 }

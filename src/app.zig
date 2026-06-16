@@ -37,6 +37,9 @@ pub fn buildTree(comptime Model: type, model: *Model, arena: std.mem.Allocator, 
     if (@hasDecl(Model, "viewUi")) {
         var u = ui_mod.Ui.init(arena);
         u.scale = scale;
+        // Widgets resolve colors from the theme (#21): the model's `theme()` hook,
+        // else the dark default. (Pairs with `background()` for the clear color.)
+        if (@hasDecl(Model, "theme")) u.theme = model.theme();
         return u.lower(try model.viewUi(&u));
     }
     return model.view(arena, scale);
