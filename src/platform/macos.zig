@@ -925,7 +925,14 @@ pub fn blit(window: *Window, rgba: []const u8, width: usize, height: usize) void
 
 /// Content size in pixels (points × backing scale) for rendering.
 pub fn contentPixelSize(window: *Window) struct { width: usize, height: usize, scale: f64 } {
-    const content = msg(NSRect, struct {}, window.ns_window, sel("contentLayoutRect"), .{});
+    // Size the drawable from the actual render target — the content view's
+    // bounds — NOT `contentLayoutRect` (the area below the title bar/toolbar).
+    // With `.fullSizeContentView` (#64) we render the whole window and draw our
+    // own title strip; a taller (unified-toolbar, #268) title bar would shrink
+    // contentLayoutRect and stretch the frame. The content view's bounds match
+    // the layer host in both native and integrated modes.
+    const cv = msg(id, struct {}, window.ns_window, sel("contentView"), .{});
+    const content = msg(NSRect, struct {}, cv, sel("bounds"), .{});
     const scale = msg(f64, struct {}, window.ns_window, sel("backingScaleFactor"), .{});
     return .{
         .width = @intFromFloat(@max(1, content.w * scale)),
