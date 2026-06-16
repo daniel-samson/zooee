@@ -289,16 +289,20 @@ fn renderNode(b: Backend, placements: []const Placement, i: *usize) void {
         const pan_x = el.scroll or el.overflow_x == .scroll or (el.overflow_x == .auto and over_x);
         const pan_y = el.scroll or el.overflow_y == .scroll or (el.overflow_y == .auto and over_y);
         if (clip_x or clip_y) {
+            // Offsets clamp against the content box (CSS: max scroll = content
+            // size − content-box size), but the scrollport is the padding box,
+            // so scrolled content fills the padding band up to the border.
             const sx = if (pan_x) std.math.clamp(el.scroll_x, 0, @max(0, ext.width - cbox.width)) else 0;
             const sy = if (pan_y) std.math.clamp(el.scroll_y, 0, @max(0, ext.height - cbox.height)) else 0;
+            const pbox = paddingBox(el, p.rect);
             // Unclipped axes get a huge bound so the scissor only constrains the
             // axis that actually clips (parent clips still intersect normally).
             const big: f32 = 1 << 24;
             const clip_rect: geometry.Rect = .{
-                .x = if (clip_x) cbox.x else cbox.x - big,
-                .y = if (clip_y) cbox.y else cbox.y - big,
-                .width = if (clip_x) cbox.width else big * 2,
-                .height = if (clip_y) cbox.height else big * 2,
+                .x = if (clip_x) pbox.x else pbox.x - big,
+                .y = if (clip_y) pbox.y else pbox.y - big,
+                .width = if (clip_x) pbox.width else big * 2,
+                .height = if (clip_y) pbox.height else big * 2,
             };
             b.pushClip(clip_rect);
             b.pushTranslate(-sx, -sy);
@@ -376,6 +380,19 @@ fn drawWrappedText(b: Backend, el: *const Element, t: []const u8, inner: Rect) v
         const vis = shapeForDisplay(ln.slice(t), &abuf, &vbuf);
         b.drawText(.{ .x = inner.x + ln.x, .y = inner.y + ln.y }, vis, el.text_style);
     }
+}
+
+/// The padding box: border-box minus border widths only (padding included).
+/// A scroll container's scrollport is its padding box — when scrolled, content
+/// fills the padding band up to the border, matching CSS overflow.
+fn paddingBox(el: *const Element, border_box: Rect) Rect {
+    const bw = el.rect_style.border;
+    return .{
+        .x = border_box.x + bw.left.width,
+        .y = border_box.y + bw.top.width,
+        .width = @max(0, border_box.width - bw.left.width - bw.right.width),
+        .height = @max(0, border_box.height - bw.top.width - bw.bottom.width),
+    };
 }
 
 /// The content box: border-box minus border widths and padding.
@@ -839,6 +856,39 @@ test "overflow: auto clips+pans only when content overflows that axis (#309)" {
         try b.endFrame();
         try testing.expectEqual(blu, rb.pixelAt(10, 5)); // panned (overflows)
     }
+}
+
+test "overflow: a scroll container clips to its padding box, not content box (#309)" {
+    var rb = raster.RasterBackend.init(testing.allocator);
+    defer rb.deinit();
+    const b = rb.interface();
+
+    // 40x40 box, padding 10 (content box 20 wide at x 10..30, padding box 0..40),
+    // holding a row of two 20px cells (red, green). Scrolled to the end, the red
+    // cell must fill the leading padding band (x<10) up to the border — matching
+    // a browser's padding-box scrollport — instead of being cut at x=10.
+    const red = style.Color.rgb(255, 0, 0);
+    const grn = style.Color.rgb(0, 255, 0);
+    const c0: Element = .{ .width = 20, .rect_style = .{ .background = red } };
+    const c1: Element = .{ .width = 20, .rect_style = .{ .background = grn } };
+    const box: Element = .{
+        .width = 40,
+        .height = 40,
+        .direction = .row,
+        .padding = .{ .left = 10, .right = 10, .top = 10, .bottom = 10 },
+        .overflow_x = .scroll,
+        .scroll_x = 20, // max (content 40 − content-box 20)
+        .children = &.{ &c0, &c1 },
+    };
+
+    try b.beginFrame(.{ .width = 40, .height = 40 });
+    var result = try layout(testing.allocator, b, &box, .{ .width = 40, .height = 40 });
+    defer result.deinit(testing.allocator);
+    render(b, result);
+    try b.endFrame();
+
+    try testing.expectEqual(red, rb.pixelAt(5, 20)); // content fills the leading padding band
+    try testing.expectEqual(grn, rb.pixelAt(25, 20)); // 2nd cell occupies the rest
 }
 
 test "overflow: a visible axis spills while the other axis clips (#309)" {
