@@ -69,16 +69,28 @@ fn cardExamples(u: *ui.Ui) !Widget {
 /// Sidebar panel tone — just above the window backdrop (until vibrancy, #268).
 const sidebar_bg = Color.rgb(40, 40, 43);
 
-/// A toolbar back/forward chevron button: a small rounded square with a chevron.
-fn navButton(u: *ui.Ui, name: ui.IconName) !Widget {
+/// One half of the back/forward segmented control: a chevron centered in a cell.
+fn navCell(u: *ui.Ui, name: ui.IconName, dim: bool) !Widget {
     return u.column(.{
-        .width = 30,
-        .height = 24,
-        .corner_radius = 6,
-        .background = Color.rgb(50, 50, 53),
+        .width = 32,
+        .height = 26,
         .align_items = .center,
         .justify = .center,
-    }, &.{u.icon(.{ .name = name, .size = 11, .role = .secondary })});
+    }, &.{u.icon(.{ .name = name, .size = 11, .role = .secondary, .disabled = dim })});
+}
+
+/// macOS-style back/forward segmented control: two joined cells, rounded outer
+/// corners, a hairline divider between. Forward is dimmed (no history).
+fn navSegment(u: *ui.Ui) !Widget {
+    return u.row(.{
+        .corner_radius = 7,
+        .background = Color.rgb(50, 50, 53),
+        .align_items = .center,
+    }, &.{
+        try navCell(u, .chevron_left, false),
+        u.divider(.row),
+        try navCell(u, .chevron_right, true),
+    });
 }
 
 /// A labelled example block: a caption above a bordered demo surface.
@@ -220,7 +232,7 @@ const Docs = struct {
     sel_check: bool = false, // Selection page: checkbox
     sel_toggle: bool = true, // Selection page: toggle
     sel_radio: usize = 1, // Selection page: radio choice
-    sidebar_w: f32 = 210, // resizable sidebar width (logical px)
+    sidebar_w: f32 = 240, // resizable sidebar width (logical px)
     dragging: bool = false, // divider drag in progress
     drag_offset: f32 = 0, // pointer-to-divider gap at grab (device px), so the line tracks exactly
     scale: f32 = 1, // captured each frame so onEvent can map device px → logical
@@ -266,8 +278,7 @@ const Docs = struct {
             .gap = 8,
             .padding = .{ .top = 12, .bottom = 8, .left = 16, .right = 16 },
         }, &.{
-            try navButton(u, .chevron_left),
-            try navButton(u, .chevron_right),
+            try navSegment(u),
             u.text(page.name, .{ .size = 22, .bold = true }),
         });
 
