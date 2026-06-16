@@ -23,6 +23,10 @@ const theme_mod = @import("theme.zig");
 const Element = layout.Element;
 const Color = style.Color;
 pub const Theme = theme_mod.Theme;
+// Layout enums re-exported so apps can name them on Box/model fields (#303).
+pub const Direction = layout.Direction;
+pub const Justify = layout.Justify;
+pub const AlignItems = layout.AlignItems;
 
 /// Semantic style intent (#265): widgets carry a role, the theme resolves it to
 /// concrete styling per platform. Provisional palette here until #21.

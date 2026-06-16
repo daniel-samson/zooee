@@ -103,6 +103,8 @@ pub fn build(b: *std.Build) void {
             installMacApp(b, demos_step, guiDemo(b, mod, target, optimize, "zooee-gui-demo", "examples/gui_demo.zig", false), "Zooee", "zooee-gui-demo");
             // Component gallery / docs app (#266/#268) — the widget-layer master→detail demo.
             installMacApp(b, demos_step, guiDemo(b, mod, target, optimize, "zooee-docs-demo", "examples/docs_app.zig", false), "Zooee Docs", "zooee-docs-demo");
+            // Interactive layout playground (#306).
+            installMacApp(b, demos_step, guiDemo(b, mod, target, optimize, "zooee-playground-demo", "examples/layout_playground.zig", false), "Zooee Playground", "zooee-playground-demo");
         },
         .windows => {
             const gui = guiDemo(b, mod, target, optimize, "zooee-gui-demo", "examples/gui_demo.zig", false);
@@ -111,12 +113,17 @@ pub fn build(b: *std.Build) void {
             const docs = guiDemo(b, mod, target, optimize, "zooee-docs-demo", "examples/docs_app.zig", false);
             docs.subsystem = .Windows;
             demos_step.dependOn(&b.addInstallArtifact(docs, .{}).step);
+            const play = guiDemo(b, mod, target, optimize, "zooee-playground-demo", "examples/layout_playground.zig", false);
+            play.subsystem = .Windows;
+            demos_step.dependOn(&b.addInstallArtifact(play, .{}).step);
         },
         .linux => {
             const gui = guiDemo(b, mod, target, optimize, "zooee-gui-demo", "examples/gui_demo.zig", false);
             demos_step.dependOn(&b.addInstallArtifact(gui, .{}).step);
             const docs = guiDemo(b, mod, target, optimize, "zooee-docs-demo", "examples/docs_app.zig", false);
             demos_step.dependOn(&b.addInstallArtifact(docs, .{}).step);
+            const play = guiDemo(b, mod, target, optimize, "zooee-playground-demo", "examples/layout_playground.zig", false);
+            demos_step.dependOn(&b.addInstallArtifact(play, .{}).step);
         },
         else => {},
     }
@@ -130,6 +137,8 @@ pub fn build(b: *std.Build) void {
             .dependOn(&b.addRunArtifact(guiDemo(b, mod, target, optimize, "zooee-gui-run", "examples/gui_demo.zig", false)).step);
         b.step("run-docs", "Run the component gallery / docs app")
             .dependOn(&b.addRunArtifact(guiDemo(b, mod, target, optimize, "zooee-docs-run", "examples/docs_app.zig", false)).step);
+        b.step("run-playground", "Run the interactive layout playground")
+            .dependOn(&b.addRunArtifact(guiDemo(b, mod, target, optimize, "zooee-playground-run", "examples/layout_playground.zig", false)).step);
     }
 }
 
