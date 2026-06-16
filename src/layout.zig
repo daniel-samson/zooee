@@ -257,7 +257,7 @@ fn renderNode(b: Backend, placements: []const Placement, i: *usize) void {
         const cbox = contentBox(el, p.rect);
         // Clamp the scroll offset to the content extent so the viewport can't
         // pan past its content into empty space (#96).
-        const ext = contentExtent(b, el);
+        const ext = contentExtent(b, el, if (el.direction == .column) cbox.width else null);
         const sx = std.math.clamp(el.scroll_x, 0, @max(0, ext.width - cbox.width));
         const sy = std.math.clamp(el.scroll_y, 0, @max(0, ext.height - cbox.height));
         b.pushClip(cbox);
@@ -348,26 +348,34 @@ fn contentBox(el: *const Element, border_box: Rect) Rect {
 }
 
 /// Measure pass: the element's preferred border-box size (margin excluded).
-fn measure(b: Backend, el: *const Element) Size {
+/// `avail_w` is the content width an ancestor with a definite width imposes
+/// (browser block behavior, #304): text wraps to it and the block grows in
+/// height to fit, even without an explicit `width` on the text element.
+fn measure(b: Backend, el: *const Element, avail_w: ?f32) Size {
     const bw = el.rect_style.border;
     const chrome_w = bw.left.width + bw.right.width + el.padding.horizontalSum();
     const chrome_h = bw.top.width + bw.bottom.width + el.padding.verticalSum();
 
     var content: Size = .{};
     if (el.text) |t| {
-        if ((el.text_wrap != .nowrap and el.width != null) or hasNewline(t)) {
-            // Wrapped/multiline text reserves the full block height so siblings
-            // flow below it (#115).
-            const wrap_w: ?f32 = if (el.text_wrap != .nowrap and el.width != null) el.width.? - chrome_w else null;
+        // Wrap to the element's own width, else the width an ancestor gives it.
+        const wrap_avail: ?f32 = el.width orelse avail_w;
+        const do_wrap = el.text_wrap != .nowrap and wrap_avail != null;
+        if (do_wrap or hasNewline(t)) {
+            const wrap_w: ?f32 = if (do_wrap) wrap_avail.? - chrome_w else null;
             content = measureWrapped(b, el, t, wrap_w);
         } else {
             content = b.measureText(t, el.text_style);
         }
     } else if (el.children.len > 0) {
+        // A column shares its (definite or inherited) content width with each
+        // child; a row divides width per flex, so don't wrap-constrain at measure.
+        const own_w: ?f32 = el.width orelse avail_w;
+        const child_avail: ?f32 = if (el.direction == .column and own_w != null) own_w.? - chrome_w else null;
         var main: f32 = 0;
         var cross: f32 = 0;
         for (el.children, 0..) |child, i| {
-            const cs = measure(b, child);
+            const cs = measure(b, child, child_avail);
             const child_main = mainOf(el.direction, cs) + marginMain(el.direction, child.margin);
             const child_cross = crossOf(el.direction, cs) + marginCross(el.direction, child.margin);
             main += child_main;
@@ -387,11 +395,11 @@ fn measure(b: Backend, el: *const Element) Size {
 /// the element's own fixed width/height. Used to clamp scroll offsets to the
 /// content extent (#96), so a scroll viewport can't pan past its content into
 /// empty space.
-fn contentExtent(b: Backend, el: *const Element) Size {
+fn contentExtent(b: Backend, el: *const Element, avail_w: ?f32) Size {
     var main: f32 = 0;
     var cross: f32 = 0;
     for (el.children, 0..) |child, i| {
-        const cs = measure(b, child);
+        const cs = measure(b, child, avail_w);
         main += mainOf(el.direction, cs) + marginMain(el.direction, child.margin);
         if (i != 0) main += el.gap;
         cross = @max(cross, crossOf(el.direction, cs) + marginCross(el.direction, child.margin));
@@ -420,6 +428,9 @@ fn place(
 
     const inner = contentBox(el, box);
     const dir = el.direction;
+    // Content width a column shares with each child, for browser-style text wrap
+    // (#304); a row divides width per flex, so no measure-time wrap constraint.
+    const child_avail: ?f32 = if (dir == .column) inner.width else null;
 
     // How much main-axis space do fixed children + gaps need; sum grows.
     var fixed_main: f32 = 0;
@@ -430,7 +441,7 @@ fn place(
         if (child.grow > 0) {
             grow_sum += child.grow;
         } else {
-            fixed_main += mainOf(dir, measure(b, child));
+            fixed_main += mainOf(dir, measure(b, child, child_avail));
         }
     }
     const free_main = @max(0, mainOf(dir, inner.size()) - fixed_main);
@@ -461,7 +472,7 @@ fn place(
         if (i != 0) cursor += el.gap + between_extra;
         cursor += marginMainStart(dir, child.margin);
 
-        const child_size = measure(b, child);
+        const child_size = measure(b, child, child_avail);
         var child_main = mainOf(dir, child_size);
         if (child.grow > 0) {
             child_main = free_main * (child.grow / grow_sum);
@@ -473,7 +484,7 @@ fn place(
                     trailing += el.gap;
                     _ = j;
                     trailing += marginMain(dir, after.margin);
-                    if (after.grow == 0) trailing += mainOf(dir, measure(b, after));
+                    if (after.grow == 0) trailing += mainOf(dir, measure(b, after, child_avail));
                 }
                 child_main = (mainStart(dir, inner) + mainOf(dir, inner.size())) - trailing - cursor - marginMainEnd(dir, child.margin);
             }
@@ -653,6 +664,34 @@ test "align-items places children on the cross axis (#268)" {
         try testing.expectEqual(@as(f32, 0), res.placements[1].rect.y);
         try testing.expectEqual(@as(f32, 20), res.placements[1].rect.height);
     }
+}
+
+test "text wraps to the available width; the block grows to fit (#304)" {
+    var rec = record.RecordBackend.init(testing.allocator);
+    defer rec.deinit();
+    const b = rec.interface();
+    const line_h = b.measureText("Ag", .{}).height;
+
+    const para = "one two three four five six seven eight nine ten eleven twelve";
+    // A content-sized card (no explicit size) inside a narrow column. The card's
+    // text has no width of its own — it must wrap to the column's width, and the
+    // card's height must grow to contain the wrapped lines.
+    const wrapped: Element = .{ .text = para, .text_wrap = .wrap };
+    const card: Element = .{ .direction = .column, .children = &.{&wrapped} };
+    const root: Element = .{ .direction = .column, .children = &.{&card} };
+    var res = try layoutWith(&rec, &root, 80, 400); // 80-wide viewport → narrow column
+    defer res.deinit(testing.allocator);
+    // [0]=root, [1]=card, [2]=text
+    try testing.expect(res.placements[2].rect.height > line_h * 1.5); // wrapped to ≥2 lines
+    try testing.expectEqual(res.placements[2].rect.height, res.placements[1].rect.height); // card grew to fit
+
+    // Control: nowrap stays a single line (and overflows horizontally).
+    const flat: Element = .{ .text = para, .text_wrap = .nowrap };
+    const card2: Element = .{ .direction = .column, .children = &.{&flat} };
+    const root2: Element = .{ .direction = .column, .children = &.{&card2} };
+    var res2 = try layoutWith(&rec, &root2, 80, 400);
+    defer res2.deinit(testing.allocator);
+    try testing.expectEqual(line_h, res2.placements[2].rect.height);
 }
 
 test "grow children tile the parent exactly (no rounding seams)" {
