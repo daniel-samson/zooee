@@ -512,6 +512,16 @@ pub const Window = struct {
             _ = msg(void, struct { bool }, window, sel("setTitlebarAppearsTransparent:"), .{true});
             _ = msg(void, struct { i64 }, window, sel("setTitleVisibility:"), .{1});
         }
+        if (opts.titlebar == .integrated) {
+            // An empty unified toolbar gives the taller title bar with the traffic
+            // lights vertically centered (the macOS source-list look, #268). It's
+            // transparent + item-less; the app draws the real toolbar contents
+            // underneath via its full-size content view.
+            const tb = msg(id, struct {}, msg(id, struct {}, cls("NSToolbar"), sel("alloc"), .{}), sel("init"), .{});
+            _ = msg(void, struct { bool }, tb, sel("setShowsBaselineSeparator:"), .{false});
+            _ = msg(void, struct { id }, window, sel("setToolbar:"), .{tb});
+            _ = msg(void, struct { i64 }, window, sel("setToolbarStyle:"), .{1}); // .unified
+        }
         _ = msg(void, struct { bool }, window, sel("setReleasedWhenClosed:"), .{false});
         _ = msg(void, struct { bool }, window, sel("setAcceptsMouseMovedEvents:"), .{true});
         // Don't let AppKit cache-and-stretch the old frame during a live

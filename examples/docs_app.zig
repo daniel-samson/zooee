@@ -66,9 +66,9 @@ fn cardExamples(u: *ui.Ui) !Widget {
     });
 }
 
-/// Sidebar panel tone — translucent so the window vibrancy material shows
-/// through (#268); over an opaque backdrop it just reads as a lighter panel.
-const sidebar_bg = Color{ .r = 76, .g = 76, .b = 82, .a = 130 };
+/// Sidebar tone = the window background (28,28,30), translucent so the vibrancy
+/// material still bleeds through subtly rather than reading as a lighter panel.
+const sidebar_bg = Color{ .r = 28, .g = 28, .b = 30, .a = 205 };
 
 /// One half of the back/forward segmented control: a chevron centered in a cell.
 fn navCell(u: *ui.Ui, name: ui.IconName, dim: bool) !Widget {
@@ -259,7 +259,7 @@ const Docs = struct {
             .grow = 1,
             .corner_radius = 10,
             .background = sidebar_bg,
-            .padding = .{ .top = 34, .left = 10, .right = 10, .bottom = 10 },
+            .padding = .{ .top = 44, .left = 10, .right = 10, .bottom = 10 },
         }, &.{
             try u.list(.{ .selected = sel_row }, rowlist.items),
             u.spacer(), // pin the footer to the bottom
@@ -277,7 +277,7 @@ const Docs = struct {
         const toolbar = try u.row(.{
             .align_items = .center,
             .gap = 8,
-            .padding = .{ .top = 12, .bottom = 8, .left = 16, .right = 16 },
+            .padding = .{ .top = 16, .bottom = 10, .left = 16, .right = 16 },
         }, &.{
             try navSegment(u),
             u.text(page.name, .{ .size = 22, .bold = true }),
