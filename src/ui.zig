@@ -135,7 +135,7 @@ fn buttonTextSize(sz: ButtonSize) f32 {
 /// Vector icon (host, #272). Lowers to an Element with a filled polygon path
 /// (reusing the path renderer, #120) sized to a `size`×`size` box. The starter
 /// set is normalized to a 0..1 unit square. Tint follows `role`/`disabled`.
-pub const IconName = enum { plus, check, play, chevron_right };
+pub const IconName = enum { plus, check, play, chevron_right, circle, square, star, doc };
 
 pub const Icon = struct {
     name: IconName,
@@ -163,6 +163,29 @@ fn iconPath(name: IconName) []const geometry.Point {
             .{ .x = 0.3, .y = 0.12 },  .{ .x = 0.48, .y = 0.12 }, .{ .x = 0.82, .y = 0.5 },
             .{ .x = 0.48, .y = 0.88 }, .{ .x = 0.3, .y = 0.88 },  .{ .x = 0.6, .y = 0.5 },
         },
+        // 12-gon approximating a disc.
+        .circle => &.{
+            .{ .x = 0.95, .y = 0.5 }, .{ .x = 0.89, .y = 0.725 }, .{ .x = 0.725, .y = 0.89 },
+            .{ .x = 0.5, .y = 0.95 }, .{ .x = 0.275, .y = 0.89 }, .{ .x = 0.11, .y = 0.725 },
+            .{ .x = 0.05, .y = 0.5 }, .{ .x = 0.11, .y = 0.275 }, .{ .x = 0.275, .y = 0.11 },
+            .{ .x = 0.5, .y = 0.05 }, .{ .x = 0.725, .y = 0.11 }, .{ .x = 0.89, .y = 0.275 },
+        },
+        .square => &.{
+            .{ .x = 0.15, .y = 0.15 }, .{ .x = 0.85, .y = 0.15 },
+            .{ .x = 0.85, .y = 0.85 }, .{ .x = 0.15, .y = 0.85 },
+        },
+        // 5-point star (alternating outer/inner radii), traced in order.
+        .star => &.{
+            .{ .x = 0.5, .y = 0.02 },    .{ .x = 0.612, .y = 0.346 }, .{ .x = 0.957, .y = 0.352 },
+            .{ .x = 0.681, .y = 0.559 }, .{ .x = 0.782, .y = 0.888 }, .{ .x = 0.5, .y = 0.69 },
+            .{ .x = 0.218, .y = 0.888 }, .{ .x = 0.319, .y = 0.559 }, .{ .x = 0.043, .y = 0.352 },
+            .{ .x = 0.388, .y = 0.346 },
+        },
+        // A page with a folded top-right corner.
+        .doc => &.{
+            .{ .x = 0.22, .y = 0.08 }, .{ .x = 0.62, .y = 0.08 }, .{ .x = 0.78, .y = 0.24 },
+            .{ .x = 0.78, .y = 0.92 }, .{ .x = 0.22, .y = 0.92 },
+        },
     };
 }
 
@@ -172,6 +195,11 @@ fn iconPath(name: IconName) []const geometry.Point {
 pub const ListRow = struct {
     label: []const u8,
     on_click: ?u32 = null,
+    /// Optional leading icon (source-list style, #268).
+    icon: ?IconName = null,
+    /// A non-interactive group header (gray caption, extra top space) rather than
+    /// a selectable row — for sectioned source lists.
+    header: bool = false,
 };
 
 pub const List = struct {
@@ -509,17 +537,45 @@ pub const Ui = struct {
                 for (l.rows, 0..) |r, i| {
                     const row_el = try self.arena.create(Element);
                     const sel = l.selected != null and l.selected.? == i;
-                    row_el.* = .{
-                        .text = r.label,
-                        .on_click = r.on_click,
-                        .cursor = if (r.on_click != null) .pointer else null,
-                        .padding = .symmetric(10 * s, 7 * s),
-                        .text_style = .{ .size = 15 * s, .color = if (sel) self.theme.on_accent else self.theme.text },
-                        .rect_style = .{
-                            .background = if (sel) self.theme.accent else null,
-                            .corner_radius = .all(5 * s),
-                        },
-                    };
+                    if (r.header) {
+                        // Group header: a muted caption with extra top space.
+                        row_el.* = .{
+                            .text = r.label,
+                            .padding = .{ .top = 14 * s, .bottom = 4 * s, .left = 8 * s, .right = 8 * s },
+                            .text_style = .{ .size = 11 * s, .bold = true, .color = self.theme.text_muted },
+                        };
+                    } else {
+                        const fg = if (sel) self.theme.on_accent else self.theme.text;
+                        const label_el = try self.arena.create(Element);
+                        label_el.* = .{ .text = r.label, .text_style = .{ .size = 15 * s, .color = fg } };
+                        // Optional leading icon, tinted to match the row state.
+                        var kids: []const *const Element = undefined;
+                        if (r.icon) |name| {
+                            const icon_el = @constCast(try self.lower(self.icon(.{ .name = name, .size = 15 })));
+                            icon_el.path_color = if (sel) self.theme.on_accent else self.theme.text_muted;
+                            const pair = try self.arena.alloc(*const Element, 2);
+                            pair[0] = icon_el;
+                            pair[1] = label_el;
+                            kids = pair;
+                        } else {
+                            const one = try self.arena.alloc(*const Element, 1);
+                            one[0] = label_el;
+                            kids = one;
+                        }
+                        row_el.* = .{
+                            .direction = .row,
+                            .align_items = .center,
+                            .gap = 8 * s,
+                            .on_click = r.on_click,
+                            .cursor = if (r.on_click != null) .pointer else null,
+                            .padding = .symmetric(8 * s, 6 * s),
+                            .children = kids,
+                            .rect_style = .{
+                                .background = if (sel) self.theme.accent else null,
+                                .corner_radius = .all(6 * s),
+                            },
+                        };
+                    }
                     rows[i] = row_el;
                 }
                 el.* = .{
@@ -795,12 +851,31 @@ test "lower: list rows are clickable; selected row is highlighted (#273)" {
 
     try testing.expectEqual(layout.Direction.column, el.direction);
     try testing.expectEqual(@as(usize, 3), el.children.len);
-    try testing.expectEqualStrings("Alpha", el.children[0].text.?);
+    // Each row is a container holding the label (and optional icon).
+    try testing.expectEqualStrings("Alpha", el.children[0].children[0].text.?);
     try testing.expectEqual(@as(?u32, 102), el.children[2].on_click);
     try testing.expectEqual(cursorPointer(), el.children[0].cursor.?);
     // Only the selected row paints a background.
     try testing.expect(el.children[0].rect_style.background == null);
     try testing.expect(el.children[1].rect_style.background != null);
+}
+
+test "lower: list row with icon + a header (#268)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ui = Ui.init(arena.allocator());
+    const el = try ui.lower(try ui.list(.{ .selected = 1 }, &.{
+        .{ .label = "Section", .header = true },
+        .{ .label = "Item", .icon = .star, .on_click = 5 },
+    }));
+    // Header: a caption, no click, no fill.
+    try testing.expect(el.children[0].on_click == null);
+    try testing.expectEqualStrings("Section", el.children[0].text.?);
+    // Icon row: [icon, label], centered, clickable.
+    try testing.expectEqual(layout.AlignItems.center, el.children[1].align_items);
+    try testing.expectEqual(@as(usize, 2), el.children[1].children.len);
+    try testing.expect(el.children[1].children[0].path != null); // the icon
+    try testing.expectEqualStrings("Item", el.children[1].children[1].text.?);
 }
 
 test "lower: scroll view is a clamped viewport with offset+children (#274)" {
