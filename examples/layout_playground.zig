@@ -47,7 +47,6 @@ const Play = struct {
     // ./zooee-debug/ so issues can be handed back as data, not a live window.
     gpa: std.mem.Allocator = undefined,
     io: std.Io = undefined,
-    seq: u32 = 0,
 
     pub fn theme(self: *Play) ui.Theme {
         _ = self;
@@ -160,21 +159,22 @@ const Play = struct {
     /// that produced it (state-N.txt) into ./zooee-debug/ for hand-back.
     fn exportSnapshot(self: *Play) void {
         std.Io.Dir.cwd().createDirPath(self.io, "zooee-debug") catch {};
-        self.seq += 1;
+        // Monotonic ns stamp: strictly increasing → unique across runs (no
+        // overwrite) and sorts by recency; shot + state share it so they pair.
+        const stamp = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
         var nbuf: [64]u8 = undefined;
         var pbuf: [64]u8 = undefined;
         var cbuf: [256]u8 = undefined;
         var dbuf: [300]u8 = undefined;
         const cfg = self.configLine(&cbuf);
-        // config file (paired with the screenshot by sequence number)
-        const state_path = std.fmt.bufPrint(&nbuf, "zooee-debug/state-{d}.txt", .{self.seq}) catch return;
+        const state_path = std.fmt.bufPrint(&nbuf, "zooee-debug/state-{d}.txt", .{stamp}) catch return;
         const data = std.fmt.bufPrint(&dbuf, "{s}\n", .{cfg}) catch cfg;
         std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = state_path, .data = data }) catch {};
-        std.debug.print("[playground] snapshot {d}: {s}\n", .{ self.seq, cfg });
+        std.debug.print("[playground] snapshot {d}: {s}\n", .{ stamp, cfg });
         // Window-only PNG via `screencapture -l<windowID>` (-o omits the drop
         // shadow). Falls back to full-screen if the key window id is unavailable.
         // Needs Screen Recording permission.
-        const shot_path = std.fmt.bufPrint(&pbuf, "zooee-debug/shot-{d}.png", .{self.seq}) catch return;
+        const shot_path = std.fmt.bufPrint(&pbuf, "zooee-debug/shot-{d}.png", .{stamp}) catch return;
         var idbuf: [24]u8 = undefined;
         const result = if (zooee.app.keyWindowId()) |wid|
             std.process.run(self.gpa, self.io, .{ .argv = &.{ "screencapture", "-o", "-x", "-l", std.fmt.bufPrint(&idbuf, "{d}", .{wid}) catch return, shot_path } })
