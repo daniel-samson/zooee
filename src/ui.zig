@@ -135,7 +135,7 @@ fn buttonTextSize(sz: ButtonSize) f32 {
 /// Vector icon (host, #272). Lowers to an Element with a filled polygon path
 /// (reusing the path renderer, #120) sized to a `size`×`size` box. The starter
 /// set is normalized to a 0..1 unit square. Tint follows `role`/`disabled`.
-pub const IconName = enum { plus, check, play, chevron_right, circle, square, star, doc };
+pub const IconName = enum { plus, check, play, chevron_right, chevron_left, circle, square, star, doc };
 
 pub const Icon = struct {
     name: IconName,
@@ -162,6 +162,10 @@ fn iconPath(name: IconName) []const geometry.Point {
         .chevron_right => &.{
             .{ .x = 0.3, .y = 0.12 },  .{ .x = 0.48, .y = 0.12 }, .{ .x = 0.82, .y = 0.5 },
             .{ .x = 0.48, .y = 0.88 }, .{ .x = 0.3, .y = 0.88 },  .{ .x = 0.6, .y = 0.5 },
+        },
+        .chevron_left => &.{
+            .{ .x = 0.7, .y = 0.12 },  .{ .x = 0.52, .y = 0.12 }, .{ .x = 0.18, .y = 0.5 },
+            .{ .x = 0.52, .y = 0.88 }, .{ .x = 0.7, .y = 0.88 },  .{ .x = 0.4, .y = 0.5 },
         },
         // 12-gon approximating a disc.
         .circle => &.{
