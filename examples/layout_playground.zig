@@ -234,11 +234,13 @@ const Play = struct {
                 // Wheel pans the container. Lines → ~20px each; pixels 1:1. The
                 // engine clamps the offset to content at render; we keep a
                 // generous local clamp so the stored value can't run away.
-                // Positive AppKit dy = content should move down = smaller offset,
-                // so subtract (matches native trackpad/wheel direction).
+                // Our ScrollEvent dy follows the platform's natural-scroll
+                // convention, so add it to the offset (a downward swipe reveals
+                // later content). Engine clamps to content; local clamp is a
+                // runaway guard.
                 const step: f32 = if (s.unit == .line) 20 else 1;
-                self.scroll_y = std.math.clamp(self.scroll_y - s.dy * step, 0, 2000);
-                self.scroll_x = std.math.clamp(self.scroll_x - s.dx * step, 0, 2000);
+                self.scroll_y = std.math.clamp(self.scroll_y + s.dy * step, 0, 2000);
+                self.scroll_x = std.math.clamp(self.scroll_x + s.dx * step, 0, 2000);
                 return .redraw;
             },
             else => {},
