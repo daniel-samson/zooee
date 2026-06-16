@@ -148,7 +148,14 @@ const Play = struct {
 
     pub fn update(self: *Play, msg: Msg) zooee.app.Command {
         switch (msg) {
-            .dir_toggle => self.dir = if (self.dir == .row) .column else .row,
+            .dir_toggle => {
+                self.dir = if (self.dir == .row) .column else .row;
+                // Reset the offset: the old scroll position is meaningless once
+                // the main axis flips, and a stale offset can leave the viewport
+                // scrolled into empty space (looks like "boxes disappeared").
+                self.scroll_x = 0;
+                self.scroll_y = 0;
+            },
             .justify_cycle => self.justify = nextJustify(self.justify),
             .align_cycle => self.align_items = nextAlign(self.align_items),
             .wrap_toggle => self.wrap = !self.wrap,
@@ -227,9 +234,11 @@ const Play = struct {
                 // Wheel pans the container. Lines → ~20px each; pixels 1:1. The
                 // engine clamps the offset to content at render; we keep a
                 // generous local clamp so the stored value can't run away.
+                // Positive AppKit dy = content should move down = smaller offset,
+                // so subtract (matches native trackpad/wheel direction).
                 const step: f32 = if (s.unit == .line) 20 else 1;
-                self.scroll_y = std.math.clamp(self.scroll_y + s.dy * step, 0, 2000);
-                self.scroll_x = std.math.clamp(self.scroll_x + s.dx * step, 0, 2000);
+                self.scroll_y = std.math.clamp(self.scroll_y - s.dy * step, 0, 2000);
+                self.scroll_x = std.math.clamp(self.scroll_x - s.dx * step, 0, 2000);
                 return .redraw;
             },
             else => {},
@@ -281,8 +290,54 @@ fn stepRow(u: *ui.Ui, label: []const u8, value: []const u8, dec: u32, inc: u32) 
     });
 }
 
+/// Apply a `ZOOEE_PLAY` override string so a single config can be rendered
+/// headlessly (with ZOOEE_CAPTURE) for self-verification — no clicking needed.
+/// Format: comma-separated `key=value`, e.g.
+///   ZOOEE_PLAY="dir=column,oy=scroll,sy=80,count=6,wrap=1"
+/// Keys: dir(row|column) justify align ox oy(visible|hidden|scroll|auto)
+///       sx sy gap pad (floats) count(int) wrap boxwrap(0|1).
+fn applyEnv(self: *Play, spec: []const u8) void {
+    var it = std.mem.tokenizeScalar(u8, spec, ',');
+    while (it.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+        const k = pair[0..eq];
+        const v = pair[eq + 1 ..];
+        const ovf = struct {
+            fn parse(s: []const u8) ?ui.Overflow {
+                return std.meta.stringToEnum(ui.Overflow, s);
+            }
+        };
+        if (std.mem.eql(u8, k, "dir")) {
+            self.dir = std.meta.stringToEnum(ui.Direction, v) orelse self.dir;
+        } else if (std.mem.eql(u8, k, "justify")) {
+            self.justify = std.meta.stringToEnum(ui.Justify, v) orelse self.justify;
+        } else if (std.mem.eql(u8, k, "align")) {
+            self.align_items = std.meta.stringToEnum(ui.AlignItems, v) orelse self.align_items;
+        } else if (std.mem.eql(u8, k, "ox")) {
+            self.overflow_x = ovf.parse(v) orelse self.overflow_x;
+        } else if (std.mem.eql(u8, k, "oy")) {
+            self.overflow_y = ovf.parse(v) orelse self.overflow_y;
+        } else if (std.mem.eql(u8, k, "sx")) {
+            self.scroll_x = std.fmt.parseFloat(f32, v) catch self.scroll_x;
+        } else if (std.mem.eql(u8, k, "sy")) {
+            self.scroll_y = std.fmt.parseFloat(f32, v) catch self.scroll_y;
+        } else if (std.mem.eql(u8, k, "gap")) {
+            self.gap = std.fmt.parseFloat(f32, v) catch self.gap;
+        } else if (std.mem.eql(u8, k, "pad")) {
+            self.pad = std.fmt.parseFloat(f32, v) catch self.pad;
+        } else if (std.mem.eql(u8, k, "count")) {
+            self.count = std.fmt.parseInt(usize, v, 10) catch self.count;
+        } else if (std.mem.eql(u8, k, "wrap")) {
+            self.wrap = !std.mem.eql(u8, v, "0");
+        } else if (std.mem.eql(u8, k, "boxwrap")) {
+            self.box_wrap = !std.mem.eql(u8, v, "0");
+        }
+    }
+}
+
 pub fn main(init: std.process.Init) !void {
     var play: Play = .{ .gpa = init.arena.allocator(), .io = init.io };
+    if (init.environ_map.get("ZOOEE_PLAY")) |spec| applyEnv(&play, spec);
     try zooee.app.runWindow(Play, Msg, &play, init, .{
         .title = "Zooee Layout Playground",
         .width = 960,

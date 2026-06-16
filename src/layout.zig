@@ -267,38 +267,44 @@ fn renderNode(b: Backend, placements: []const Placement, i: *usize) void {
         }
     }
 
-    // Overflow (#96/#309): clip + pan per axis. `scroll`/`auto` clip and pan by
-    // the offset (clamped to content); `hidden` clips with no pan; `visible`
-    // neither clips nor pans on that axis. `el.scroll` is the legacy
-    // scroll-viewport flag (≡ scroll on both axes). Because a scissor rect bounds
-    // both axes at once, a visible axis must stay unconstrained — we expand the
-    // clip rect to the canvas on any axis that doesn't clip, so content spills
-    // there (matching overflow:visible) while the other axis still clips.
-    const clip_x = el.scroll or el.overflow_x != .visible;
-    const clip_y = el.scroll or el.overflow_y != .visible;
-    const pan_x = el.scroll or el.overflow_x == .scroll or el.overflow_x == .auto;
-    const pan_y = el.scroll or el.overflow_y == .scroll or el.overflow_y == .auto;
-    const clips = clip_x or clip_y;
-    if (clips) {
+    // Overflow (#96/#309): clip + pan per axis.
+    //   visible — never clip/pan (content spills);
+    //   hidden  — always clip, never pan;
+    //   scroll  — always clip, pan by the offset;
+    //   auto    — clip + pan only on an axis whose content overflows.
+    // `el.scroll` is the legacy scroll-viewport flag (≡ scroll on both axes).
+    // Because a scissor rect bounds both axes at once, a non-clipping axis must
+    // stay unconstrained — we expand the clip rect to the canvas there so content
+    // spills (matching visible) while the other axis still clips.
+    var scrolling = false;
+    if (el.scroll or el.overflow_x != .visible or el.overflow_y != .visible) {
         const cbox = contentBox(el, p.rect);
         // Clamp the scroll offset to the content extent so the viewport can't
         // pan past its content into empty space (#96).
         const ext = contentExtent(b, el, if (el.direction == .column) cbox.width else null);
-        const sx = if (pan_x) std.math.clamp(el.scroll_x, 0, @max(0, ext.width - cbox.width)) else 0;
-        const sy = if (pan_y) std.math.clamp(el.scroll_y, 0, @max(0, ext.height - cbox.height)) else 0;
-        // Unclipped axes get a huge bound so the scissor only constrains the
-        // axis that actually clips (parent clips still intersect normally).
-        const big: f32 = 1 << 24;
-        const clip_rect: geometry.Rect = .{
-            .x = if (clip_x) cbox.x else cbox.x - big,
-            .y = if (clip_y) cbox.y else cbox.y - big,
-            .width = if (clip_x) cbox.width else big * 2,
-            .height = if (clip_y) cbox.height else big * 2,
-        };
-        b.pushClip(clip_rect);
-        b.pushTranslate(-sx, -sy);
+        const over_x = ext.width > cbox.width + 0.5;
+        const over_y = ext.height > cbox.height + 0.5;
+        const clip_x = el.scroll or el.overflow_x == .hidden or el.overflow_x == .scroll or (el.overflow_x == .auto and over_x);
+        const clip_y = el.scroll or el.overflow_y == .hidden or el.overflow_y == .scroll or (el.overflow_y == .auto and over_y);
+        const pan_x = el.scroll or el.overflow_x == .scroll or (el.overflow_x == .auto and over_x);
+        const pan_y = el.scroll or el.overflow_y == .scroll or (el.overflow_y == .auto and over_y);
+        if (clip_x or clip_y) {
+            const sx = if (pan_x) std.math.clamp(el.scroll_x, 0, @max(0, ext.width - cbox.width)) else 0;
+            const sy = if (pan_y) std.math.clamp(el.scroll_y, 0, @max(0, ext.height - cbox.height)) else 0;
+            // Unclipped axes get a huge bound so the scissor only constrains the
+            // axis that actually clips (parent clips still intersect normally).
+            const big: f32 = 1 << 24;
+            const clip_rect: geometry.Rect = .{
+                .x = if (clip_x) cbox.x else cbox.x - big,
+                .y = if (clip_y) cbox.y else cbox.y - big,
+                .width = if (clip_x) cbox.width else big * 2,
+                .height = if (clip_y) cbox.height else big * 2,
+            };
+            b.pushClip(clip_rect);
+            b.pushTranslate(-sx, -sy);
+            scrolling = true;
+        }
     }
-    const scrolling = clips;
     for (el.children) |_| renderNode(b, placements, i);
     if (scrolling) {
         b.popTranslate();
@@ -749,6 +755,89 @@ test "overflow: scroll/hidden clip content below the box; visible spills (#309)"
         // y=40 is below the 20px box: scroll/hidden clip it (white); visible spills (blue).
         const expect = if (ov == .visible) style.Color.rgb(0, 0, 255) else style.Color.rgb(255, 255, 255);
         try testing.expectEqual(expect, rb.pixelAt(10, 40));
+    }
+}
+
+test "overflow: scroll pans along the main axis per direction; cross axis unaffected (#309)" {
+    const red = style.Color.rgb(255, 0, 0);
+    const grn = style.Color.rgb(0, 255, 0);
+    const blu = style.Color.rgb(0, 0, 255);
+
+    // COLUMN: three 20px rows stacked in a 20px box. scroll_y pans vertically
+    // (row 2/green shows after panning one row); scroll_x must do nothing.
+    {
+        var rb = raster.RasterBackend.init(testing.allocator);
+        defer rb.deinit();
+        const b = rb.interface();
+        const r0: Element = .{ .height = 20, .rect_style = .{ .background = red } };
+        const r1: Element = .{ .height = 20, .rect_style = .{ .background = grn } };
+        const r2: Element = .{ .height = 20, .rect_style = .{ .background = blu } };
+        // scroll_y=20 pans down one row → green at top; scroll_x ignored (no x overflow).
+        const box: Element = .{ .width = 20, .height = 20, .direction = .column, .overflow_y = .scroll, .overflow_x = .scroll, .scroll_y = 20, .scroll_x = 999, .children = &.{ &r0, &r1, &r2 } };
+        try b.beginFrame(.{ .width = 20, .height = 20 });
+        var result = try layout(testing.allocator, b, &box, .{ .width = 20, .height = 20 });
+        defer result.deinit(testing.allocator);
+        render(b, result);
+        try b.endFrame();
+        try testing.expectEqual(grn, rb.pixelAt(10, 5)); // panned to row 2 vertically
+    }
+
+    // ROW: three 20px columns in a 20px box. scroll_x pans horizontally
+    // (col 2/green shows after panning one column); scroll_y must do nothing.
+    {
+        var rb = raster.RasterBackend.init(testing.allocator);
+        defer rb.deinit();
+        const b = rb.interface();
+        const c0: Element = .{ .width = 20, .rect_style = .{ .background = red } };
+        const c1: Element = .{ .width = 20, .rect_style = .{ .background = grn } };
+        const c2: Element = .{ .width = 20, .rect_style = .{ .background = blu } };
+        const box: Element = .{ .width = 20, .height = 20, .direction = .row, .overflow_x = .scroll, .overflow_y = .scroll, .scroll_x = 20, .scroll_y = 999, .children = &.{ &c0, &c1, &c2 } };
+        try b.beginFrame(.{ .width = 20, .height = 20 });
+        var result = try layout(testing.allocator, b, &box, .{ .width = 20, .height = 20 });
+        defer result.deinit(testing.allocator);
+        render(b, result);
+        try b.endFrame();
+        try testing.expectEqual(grn, rb.pixelAt(5, 10)); // panned to col 2 horizontally
+    }
+}
+
+test "overflow: auto clips+pans only when content overflows that axis (#309)" {
+    const red = style.Color.rgb(255, 0, 0);
+    const blu = style.Color.rgb(0, 0, 255);
+
+    // auto, content FITS: a 20px child in a 60px box. No overflow → auto must not
+    // clip and must ignore the offset; the child sits at the top unchanged.
+    {
+        var rb = raster.RasterBackend.init(testing.allocator);
+        defer rb.deinit();
+        const b = rb.interface();
+        const child: Element = .{ .height = 20, .rect_style = .{ .background = red } };
+        const col: Element = .{ .direction = .column, .children = &.{&child} };
+        const box: Element = .{ .width = 20, .height = 60, .overflow_y = .auto, .scroll_y = 30, .children = &.{&col} };
+        try b.beginFrame(.{ .width = 20, .height = 60 });
+        var result = try layout(testing.allocator, b, &box, .{ .width = 20, .height = 60 });
+        defer result.deinit(testing.allocator);
+        render(b, result);
+        try b.endFrame();
+        try testing.expectEqual(red, rb.pixelAt(10, 5)); // not panned (fits)
+    }
+
+    // auto, content OVERFLOWS: three 20px rows in a 20px box, scroll_y=20 → auto
+    // behaves like scroll, panning to the 2nd row.
+    {
+        var rb = raster.RasterBackend.init(testing.allocator);
+        defer rb.deinit();
+        const b = rb.interface();
+        const r0: Element = .{ .height = 20, .rect_style = .{ .background = red } };
+        const r1: Element = .{ .height = 20, .rect_style = .{ .background = blu } };
+        const col: Element = .{ .direction = .column, .children = &.{ &r0, &r1 } };
+        const box: Element = .{ .width = 20, .height = 20, .overflow_y = .auto, .scroll_y = 20, .children = &.{&col} };
+        try b.beginFrame(.{ .width = 20, .height = 20 });
+        var result = try layout(testing.allocator, b, &box, .{ .width = 20, .height = 20 });
+        defer result.deinit(testing.allocator);
+        render(b, result);
+        try b.endFrame();
+        try testing.expectEqual(blu, rb.pixelAt(10, 5)); // panned (overflows)
     }
 }
 
