@@ -267,13 +267,18 @@ fn renderNode(b: Backend, placements: []const Placement, i: *usize) void {
         }
     }
 
-    // Overflow (#96/#309): clip children to the content box; pan only on axes
-    // whose overflow scrolls. `scroll`/`auto` pan by the offset (clamped to
-    // content); `hidden` clips with no pan; `visible` doesn't clip. `el.scroll`
-    // is the legacy scroll-viewport flag (≡ scroll on both axes).
+    // Overflow (#96/#309): clip + pan per axis. `scroll`/`auto` clip and pan by
+    // the offset (clamped to content); `hidden` clips with no pan; `visible`
+    // neither clips nor pans on that axis. `el.scroll` is the legacy
+    // scroll-viewport flag (≡ scroll on both axes). Because a scissor rect bounds
+    // both axes at once, a visible axis must stay unconstrained — we expand the
+    // clip rect to the canvas on any axis that doesn't clip, so content spills
+    // there (matching overflow:visible) while the other axis still clips.
+    const clip_x = el.scroll or el.overflow_x != .visible;
+    const clip_y = el.scroll or el.overflow_y != .visible;
     const pan_x = el.scroll or el.overflow_x == .scroll or el.overflow_x == .auto;
     const pan_y = el.scroll or el.overflow_y == .scroll or el.overflow_y == .auto;
-    const clips = el.scroll or el.overflow_x != .visible or el.overflow_y != .visible or el.scroll_x != 0 or el.scroll_y != 0;
+    const clips = clip_x or clip_y;
     if (clips) {
         const cbox = contentBox(el, p.rect);
         // Clamp the scroll offset to the content extent so the viewport can't
@@ -281,7 +286,16 @@ fn renderNode(b: Backend, placements: []const Placement, i: *usize) void {
         const ext = contentExtent(b, el, if (el.direction == .column) cbox.width else null);
         const sx = if (pan_x) std.math.clamp(el.scroll_x, 0, @max(0, ext.width - cbox.width)) else 0;
         const sy = if (pan_y) std.math.clamp(el.scroll_y, 0, @max(0, ext.height - cbox.height)) else 0;
-        b.pushClip(cbox);
+        // Unclipped axes get a huge bound so the scissor only constrains the
+        // axis that actually clips (parent clips still intersect normally).
+        const big: f32 = 1 << 24;
+        const clip_rect: geometry.Rect = .{
+            .x = if (clip_x) cbox.x else cbox.x - big,
+            .y = if (clip_y) cbox.y else cbox.y - big,
+            .width = if (clip_x) cbox.width else big * 2,
+            .height = if (clip_y) cbox.height else big * 2,
+        };
+        b.pushClip(clip_rect);
         b.pushTranslate(-sx, -sy);
     }
     const scrolling = clips;
@@ -736,6 +750,29 @@ test "overflow: scroll/hidden clip content below the box; visible spills (#309)"
         const expect = if (ov == .visible) style.Color.rgb(0, 0, 255) else style.Color.rgb(255, 255, 255);
         try testing.expectEqual(expect, rb.pixelAt(10, 40));
     }
+}
+
+test "overflow: a visible axis spills while the other axis clips (#309)" {
+    var rb = raster.RasterBackend.init(testing.allocator);
+    defer rb.deinit();
+    const b = rb.interface();
+
+    // A 20x20 box whose single child is 40x40 (overflows both axes). With
+    // overflow_x=hidden, overflow_y=visible the child must be clipped on x
+    // (nothing past x=20) but spill on y (painted below y=20).
+    const child: Element = .{ .width = 40, .height = 40, .rect_style = .{ .background = style.Color.rgb(0, 0, 255) } };
+    const boxel: Element = .{ .width = 20, .height = 20, .overflow_x = .hidden, .overflow_y = .visible, .children = &.{&child} };
+    const spacer: Element = .{ .grow = 1 };
+    const root: Element = .{ .direction = .column, .children = &.{ &boxel, &spacer } };
+
+    try b.beginFrame(.{ .width = 60, .height = 60 });
+    var result = try layout(testing.allocator, b, &root, .{ .width = 60, .height = 60 });
+    defer result.deinit(testing.allocator);
+    render(b, result);
+    try b.endFrame();
+
+    try testing.expectEqual(style.Color.rgb(0, 0, 255), rb.pixelAt(10, 30)); // y spills (below box)
+    try testing.expectEqual(style.Color.rgb(255, 255, 255), rb.pixelAt(30, 10)); // x clipped (right of box)
 }
 
 test "fixed-size children stack in a column with gap" {
