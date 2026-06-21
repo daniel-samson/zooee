@@ -1601,6 +1601,48 @@ test "Space activates the focused control; :focus-visible only on keyboard focus
     resetFocus();
 }
 
+test "click hits a list row at Retina scale (2x) through the real buildTree path" {
+    resetFocus();
+    const Msg = enum(u32) { _ };
+    const M = struct {
+        selected: usize = 0,
+        pub fn viewUi(self: *@This(), u: *ui_mod.Ui) !ui_mod.Widget {
+            return u.column(.{ .width = 140, .height = 140, .overflow_y = .auto, .on_scroll = 7777 }, &.{
+                try u.list(.{ .selected = self.selected }, &.{
+                    .{ .label = "A", .on_click = 0 }, .{ .label = "B", .on_click = 1 }, .{ .label = "C", .on_click = 2 },
+                }),
+            });
+        }
+        pub fn update(self: *@This(), msg: Msg) Command {
+            self.selected = @intFromEnum(msg);
+            return .redraw;
+        }
+        pub fn onEvent(_: *@This(), _: event_mod.Event) Command {
+            return .none;
+        }
+    };
+    var rb = raster_mod.RasterBackend.init(testing.allocator);
+    defer rb.deinit();
+    try rb.setFont(@embedFile("poppins")); // real glyph metrics so text scales with s
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var m: M = .{};
+    const root = try buildTree(M, &m, arena.allocator(), 2);
+    var res = try layout_mod.layout(arena.allocator(), rb.interface(), root, .{ .width = 280, .height = 280 });
+    defer res.deinit(arena.allocator());
+    // Find row C's placement and click its center (physical/scaled coords).
+    var target: ?geometry.Rect = null;
+    for (res.placements) |pl| {
+        if (pl.element.on_click) |oc| if (oc == 2) {
+            target = pl.rect;
+        };
+    }
+    try testing.expect(target != null);
+    const c = target.?;
+    _ = dispatch(M, Msg, &m, .{ .pointer_down = .{ .position = .{ .x = c.x + c.width / 2, .y = c.y + c.height / 2 }, .buttons = .{ .primary = true } } }, res.placements);
+    try testing.expectEqual(@as(usize, 2), m.selected);
+}
+
 test "roving tabindex: a group is one Tab stop; arrows move within it (#310/#16)" {
     resetFocus();
     const Msg = enum(u32) { _ };
