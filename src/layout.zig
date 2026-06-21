@@ -182,6 +182,10 @@ pub const Element = struct {
     /// focus through focusable elements in layout order; Enter activates the
     /// focused element's `on_click` — web-parity keyboard navigation.
     focusable: bool = false,
+    /// Messages dispatched when this element gains / loses keyboard focus (#310),
+    /// so widgets can react (e.g. open on focus, validate on blur).
+    on_focus: ?u32 = null,
+    on_blur: ?u32 = null,
     /// Cursor shape (#123) shown while the pointer is over this element's
     /// border-box. null = inherit (the app resolves the topmost region that
     /// sets one, defaulting to `.default`). Set `.pointer` on clickables,

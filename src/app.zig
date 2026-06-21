@@ -1000,6 +1000,20 @@ fn activateFocused(comptime Model: type, comptime Msg: type, model: *Model, plac
     return null;
 }
 
+/// Move focus to `new` (an index into the focusable placements, or null),
+/// firing `on_blur` on the element losing focus and `on_focus` on the one
+/// gaining it (#310). No-op when focus is unchanged.
+fn changeFocus(comptime Model: type, comptime Msg: type, model: *Model, placements: []const layout_mod.Placement, new: ?usize) void {
+    if (g_focus == new) return;
+    if (focusedPlacement(placements)) |old| {
+        if (old.element.on_blur) |m| _ = model.update(@as(Msg, @enumFromInt(m)));
+    }
+    g_focus = new;
+    if (focusedPlacement(placements)) |nw| {
+        if (nw.element.on_focus) |m| _ = model.update(@as(Msg, @enumFromInt(m)));
+    }
+}
+
 /// Focus-ring color (#310): the theme accent, refreshed each frame from the
 /// model's theme in `buildTree`. Falls back to the system accent blue before the
 /// first build / for raw `view` models. Width/offset/radius are still the
@@ -1053,7 +1067,7 @@ fn dispatch(
                 // to the focusable element under the pointer — but without a ring
                 // (:focus-visible shows only for keyboard focus).
                 if (focusIndexAt(placements, p.position)) |fi| {
-                    g_focus = fi;
+                    changeFocus(Model, Msg, model, placements, fi);
                     g_focus_visible = false;
                 }
                 if (hitMsg(placements, p.position, .click)) |m| {
@@ -1086,7 +1100,7 @@ fn dispatch(
             if (k.key == .tab) {
                 const n = focusableCount(placements);
                 if (n == 0) break :blk model.onEvent(ev);
-                g_focus = moveFocus(g_focus, n, k.mods.shift);
+                changeFocus(Model, Msg, model, placements, moveFocus(g_focus, n, k.mods.shift));
                 g_focus_visible = true; // keyboard focus → show the ring
                 break :blk .redraw;
             }
@@ -1097,7 +1111,7 @@ fn dispatch(
             // the app can also use Esc (e.g. to close a dialog).
             if (k.key == .escape) {
                 const had = g_focus != null;
-                g_focus = null;
+                changeFocus(Model, Msg, model, placements, null);
                 g_focus_visible = false;
                 const cmd = model.onEvent(ev);
                 break :blk if (cmd == .none and had) .redraw else cmd;
@@ -1377,6 +1391,34 @@ test "Space activates the focused control; :focus-visible only on keyboard focus
     // Then Tab reveals the ring again.
     _ = dispatch(M, Msg, &m, .{ .key_down = .{ .key = .tab } }, &placements);
     try testing.expect(focusVisible());
+    resetFocus();
+}
+
+test "on_focus / on_blur fire as focus moves (#310)" {
+    resetFocus();
+    const Msg = enum(u32) { _ };
+    const M = struct {
+        log: [8]u32 = undefined,
+        n: usize = 0,
+        pub fn update(self: *@This(), m: Msg) Command {
+            self.log[self.n] = @intFromEnum(m);
+            self.n += 1;
+            return .redraw;
+        }
+        pub fn onEvent(_: *@This(), _: event_mod.Event) Command {
+            return .none;
+        }
+    };
+    const r: geometry.Rect = .{ .x = 0, .y = 0, .width = 10, .height = 10 };
+    const a: layout_mod.Element = .{ .focusable = true, .on_focus = 1, .on_blur = 2 };
+    const b: layout_mod.Element = .{ .focusable = true, .on_focus = 3, .on_blur = 4 };
+    const placements = [_]layout_mod.Placement{ .{ .element = &a, .rect = r }, .{ .element = &b, .rect = r } };
+    var m: M = .{};
+    const tab: event_mod.Event = .{ .key_down = .{ .key = .tab } };
+    _ = dispatch(M, Msg, &m, tab, &placements); // focus a → on_focus(1)
+    _ = dispatch(M, Msg, &m, tab, &placements); // blur a (2), focus b (3)
+    _ = dispatch(M, Msg, &m, .{ .key_down = .{ .key = .escape } }, &placements); // blur b (4)
+    try testing.expectEqualSlices(u32, &.{ 1, 2, 3, 4 }, m.log[0..m.n]);
     resetFocus();
 }
 

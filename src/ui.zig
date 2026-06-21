@@ -79,6 +79,9 @@ pub const Box = struct {
     on_scroll: ?u32 = null,
     /// Join the keyboard Tab order (#310); Enter activates `on_click`.
     focusable: bool = false,
+    /// Messages dispatched when this box gains / loses keyboard focus (#310).
+    on_focus: ?u32 = null,
+    on_blur: ?u32 = null,
     children: []const Widget = &.{},
 };
 
@@ -521,6 +524,8 @@ pub const Ui = struct {
                     .on_click = b.on_click,
                     .on_scroll = b.on_scroll,
                     .focusable = b.focusable,
+                    .on_focus = b.on_focus,
+                    .on_blur = b.on_blur,
                     .cursor = if (b.on_click != null) .pointer else null,
                     .children = kids,
                     .rect_style = .{
