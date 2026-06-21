@@ -62,7 +62,7 @@ const Play = struct {
     last_scale: f32 = 1,
     gap: f32 = 8,
     pad: f32 = 12,
-    count: usize = 3,
+    count: usize = 5, // overflow the container by default so scrolling is visible
     // Debug-export plumbing (set in main): write paired screenshot + config to
     // ./zooee-debug/ so issues can be handed back as data, not a live window.
     gpa: std.mem.Allocator = undefined,
@@ -254,10 +254,19 @@ const Play = struct {
                 // distance. Falls back to a generous bound before the first render.
                 const sc = if (self.last_scale > 0) self.last_scale else 1;
                 const rng = zooee.layout.lastScrollMax();
-                const max_x = if (rng.width > 0) rng.width / sc else 4000;
-                const max_y = if (rng.height > 0) rng.height / sc else 4000;
-                self.scroll_y = std.math.clamp(self.scroll_y + s.dy * step, 0, max_y);
-                self.scroll_x = std.math.clamp(self.scroll_x + s.dx * step, 0, max_x);
+                const max_x = rng.width / sc;
+                const max_y = rng.height / sc;
+                // A mouse wheel is vertical; if the content only overflows the
+                // horizontal axis (e.g. a row), let the vertical wheel drive it so
+                // scrolling is actually reachable with a normal wheel.
+                var dx = s.dx;
+                var dy = s.dy;
+                if (max_y <= 0 and max_x > 0 and dx == 0) {
+                    dx = dy;
+                    dy = 0;
+                }
+                self.scroll_y = std.math.clamp(self.scroll_y + dy * step, 0, max_y);
+                self.scroll_x = std.math.clamp(self.scroll_x + dx * step, 0, max_x);
                 return .redraw;
             },
             else => {},
