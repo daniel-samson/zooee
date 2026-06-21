@@ -311,6 +311,84 @@ extern "X11" fn XCreateGC(*Display, Drawable, c_ulong, ?*anyopaque) ?*GC;
 extern "X11" fn XCreateImage(*Display, ?*Visual, c_uint, c_int, c_int, [*]u8, c_uint, c_uint, c_int, c_int) ?*XImage;
 extern "X11" fn XPutImage(*Display, Drawable, *GC, *XImage, c_int, c_int, c_int, c_int, c_uint, c_uint) c_int;
 
+// --- XInput2 (#309): smooth + natural-scroll-aware wheel ---------------------
+// The legacy core button 4/5/6/7 wheel path is not adjusted by libinput's
+// "natural scrolling" setting and is notch-only. XInput2 delivers scroll as
+// valuator deltas on the pointer device: each scroll axis has an increment whose
+// sign already encodes the natural-scroll setting, so (value − last)/increment
+// gives a signed, high-resolution line delta in our canonical convention
+// (dy>0 = toward later content; dx>0 = toward the right).
+const GenericEvent = 35;
+const XIAllMasterDevices: c_int = 1;
+const XIScrollClass: c_int = 8;
+const XI_Motion: c_int = 17;
+const XIScrollTypeVertical: c_int = 1;
+const XIScrollTypeHorizontal: c_int = 2;
+
+const XIEventMask = extern struct { deviceid: c_int, mask_len: c_int, mask: [*]u8 };
+const XIAnyClassInfo = extern struct { type: c_int, sourceid: c_int };
+const XIScrollClassInfo = extern struct {
+    type: c_int,
+    sourceid: c_int,
+    number: c_int,
+    scroll_type: c_int,
+    increment: f64,
+    flags: c_int,
+};
+const XIDeviceInfo = extern struct {
+    deviceid: c_int,
+    name: ?[*:0]u8,
+    use: c_int,
+    attachment: c_int,
+    enabled: Bool,
+    num_classes: c_int,
+    classes: ?[*]*XIAnyClassInfo,
+};
+const XIValuatorState = extern struct { mask_len: c_int, mask: ?[*]u8, values: ?[*]f64 };
+const XIModifierState = extern struct { base: c_int, latched: c_int, locked: c_int, effective: c_int };
+const XIButtonState = extern struct { mask_len: c_int, mask: ?[*]u8 };
+const XIDeviceEvent = extern struct {
+    type: c_int,
+    serial: c_ulong,
+    send_event: Bool,
+    display: ?*Display,
+    extension: c_int,
+    evtype: c_int,
+    time: Time,
+    deviceid: c_int,
+    sourceid: c_int,
+    detail: c_int,
+    root: Window_,
+    event: Window_,
+    child: Window_,
+    root_x: f64,
+    root_y: f64,
+    event_x: f64,
+    event_y: f64,
+    flags: c_int,
+    buttons: XIButtonState,
+    valuators: XIValuatorState,
+    mods: XIModifierState,
+    group: XIModifierState,
+};
+const XGenericEventCookie = extern struct {
+    type: c_int,
+    serial: c_ulong,
+    send_event: Bool,
+    display: ?*Display,
+    extension: c_int,
+    evtype: c_int,
+    cookie: c_uint,
+    data: ?*anyopaque,
+};
+extern "X11" fn XQueryExtension(*Display, [*:0]const u8, *c_int, *c_int, *c_int) Bool;
+extern "X11" fn XGetEventData(*Display, *XGenericEventCookie) Bool;
+extern "X11" fn XFreeEventData(*Display, *XGenericEventCookie) void;
+extern "Xi" fn XIQueryVersion(*Display, *c_int, *c_int) c_int;
+extern "Xi" fn XISelectEvents(*Display, Window_, [*]XIEventMask, c_int) c_int;
+extern "Xi" fn XIQueryDevice(*Display, c_int, *c_int) ?[*]XIDeviceInfo;
+extern "Xi" fn XIFreeDeviceInfo([*]XIDeviceInfo) void;
+
 /// System clipboard backed by the X11 CLIPBOARD selection (#209). Unlike the
 /// macOS/Win32 ones, X11's clipboard is asynchronous and window-owned, so this
 /// wraps a *Window: setText takes ownership of the selection (served from
@@ -531,6 +609,18 @@ pub const Window = struct {
     xic: XIC = null,
     /// Drop arena (#212): dropped paths live here until the next pumpEvents.
     drop_arena: std.heap.ArenaAllocator = undefined,
+    /// XInput2 scroll state (#309). `xi_opcode` < 0 = XI2 unavailable → fall back
+    /// to legacy core button 4/5/6/7 wheel events. The vertical/horizontal scroll
+    /// valuators (number + increment) come from XIQueryDevice; `*_last` holds the
+    /// previous absolute valuator value (NaN until the first event) so we can emit
+    /// signed deltas.
+    xi_opcode: c_int = -1,
+    xi_v_number: c_int = -1,
+    xi_v_incr: f64 = 0,
+    xi_h_number: c_int = -1,
+    xi_h_incr: f64 = 0,
+    xi_v_last: f64 = std.math.nan(f64),
+    xi_h_last: f64 = std.math.nan(f64),
 
     pub const CreateOptions = struct {
         title: [:0]const u8 = "zooee",
@@ -650,7 +740,95 @@ pub const Window = struct {
             .gl_ctx = gl_ctx,
             .gl_vi = gl_vi,
         };
+        self.initXi2(); // smooth + natural-scroll-aware wheel (#309); best-effort
         return self;
+    }
+
+    /// Best-effort XInput2 setup (#309): probe the extension, select XI_Motion on
+    /// this window, and find the pointer's vertical/horizontal scroll valuators.
+    /// On any failure leaves `xi_opcode` < 0 so pumpEvents uses the legacy
+    /// button-wheel fallback.
+    fn initXi2(self: *Window) void {
+        var op: c_int = 0;
+        var first_ev: c_int = 0;
+        var first_err: c_int = 0;
+        if (XQueryExtension(self.display, "XInputExtension", &op, &first_ev, &first_err) == 0) return;
+        var major: c_int = 2;
+        var minor: c_int = 0;
+        if (XIQueryVersion(self.display, &major, &minor) != 0) return; // Success == 0
+
+        // Select XI_Motion (carries scroll valuators) for all master pointers.
+        var bits = [_]u8{0} ** 4;
+        const e: usize = @intCast(XI_Motion);
+        bits[e >> 3] |= @as(u8, 1) << @intCast(e & 7);
+        var em: XIEventMask = .{ .deviceid = XIAllMasterDevices, .mask_len = bits.len, .mask = &bits };
+        _ = XISelectEvents(self.display, self.handle, @ptrCast(&em), 1);
+
+        // Discover scroll valuators (axis number + increment) on the devices.
+        var n: c_int = 0;
+        const devs = XIQueryDevice(self.display, XIAllMasterDevices, &n) orelse return;
+        defer XIFreeDeviceInfo(devs);
+        var di: usize = 0;
+        while (di < @as(usize, @intCast(n))) : (di += 1) {
+            const dev = devs[di];
+            const classes = dev.classes orelse continue;
+            var ci: usize = 0;
+            while (ci < @as(usize, @intCast(dev.num_classes))) : (ci += 1) {
+                const any = classes[ci];
+                if (any.type != XIScrollClass) continue;
+                const sc: *XIScrollClassInfo = @ptrCast(@alignCast(any));
+                if (sc.scroll_type == XIScrollTypeVertical) {
+                    self.xi_v_number = sc.number;
+                    self.xi_v_incr = sc.increment;
+                } else if (sc.scroll_type == XIScrollTypeHorizontal) {
+                    self.xi_h_number = sc.number;
+                    self.xi_h_incr = sc.increment;
+                }
+            }
+        }
+        self.xi_opcode = op; // mark XI2 active last (gates the button fallback)
+    }
+
+    /// Turn an XI_Motion's scroll valuators into a canonical scroll event (#309).
+    /// Each axis reports an absolute accumulator; the per-event delta is
+    /// (value − last)/increment, whose sign already reflects natural scrolling.
+    fn handleXiScroll(self: *Window, de: *const XIDeviceEvent) void {
+        const vs = de.valuators;
+        const mask = vs.mask orelse return;
+        const values = vs.values orelse return;
+        var dx: f64 = 0;
+        var dy: f64 = 0;
+        var have = false;
+        var vidx: usize = 0; // index into the packed values[] (set bits only)
+        const nbits: usize = @intCast(vs.mask_len * 8);
+        var i: usize = 0;
+        while (i < nbits) : (i += 1) {
+            if (mask[i >> 3] & (@as(u8, 1) << @intCast(i & 7)) == 0) continue;
+            const val = values[vidx];
+            vidx += 1;
+            const num: c_int = @intCast(i);
+            if (num == self.xi_v_number and self.xi_v_incr != 0) {
+                if (!std.math.isNan(self.xi_v_last)) {
+                    dy += (val - self.xi_v_last) / self.xi_v_incr;
+                    have = true;
+                }
+                self.xi_v_last = val;
+            } else if (num == self.xi_h_number and self.xi_h_incr != 0) {
+                if (!std.math.isNan(self.xi_h_last)) {
+                    dx += (val - self.xi_h_last) / self.xi_h_incr;
+                    have = true;
+                }
+                self.xi_h_last = val;
+            }
+        }
+        if (!have or (dx == 0 and dy == 0)) return;
+        self.queue.append(self.gpa, .{ .scroll = .{
+            .position = .{ .x = @floatCast(de.event_x), .y = @floatCast(de.event_y) },
+            .dx = @floatCast(dx),
+            .dy = @floatCast(dy),
+            .unit = .line,
+            .mods = x11Mods(@intCast(de.mods.effective)),
+        } }) catch {};
     }
 
     /// Present the GL default framebuffer (GPU-present path). No-op if this
@@ -1023,13 +1201,29 @@ pub const Window = struct {
                         self.queue.append(self.gpa, .{ .key_up = .{ .key = k, .mods = x11Mods(ev.xkey.state) } }) catch {};
                     }
                 },
+                GenericEvent => {
+                    // XInput2 scroll (#309): a cookie-bearing event from the
+                    // XInputExtension; fetch its data, and if it's an XI_Motion
+                    // turn its scroll valuators into a canonical scroll event.
+                    if (self.xi_opcode >= 0) {
+                        const cookie: *XGenericEventCookie = @ptrCast(&ev);
+                        if (cookie.extension == self.xi_opcode and XGetEventData(self.display, cookie) != 0) {
+                            if (cookie.evtype == XI_Motion) {
+                                if (cookie.data) |d| self.handleXiScroll(@ptrCast(@alignCast(d)));
+                            }
+                            XFreeEventData(self.display, cookie);
+                        }
+                    }
+                },
                 ButtonPress, ButtonRelease => {
                     const b = ev.xbutton.button;
+                    // Legacy wheel: 4=up, 5=down, 6=left, 7=right (one notch per
+                    // press). Only used when XInput2 is unavailable — otherwise
+                    // XI_Motion carries the (smooth, natural-scroll-aware) wheel
+                    // and emitting here too would double-scroll. Canonical sign
+                    // (#309): dy>0 = toward later content (down), dx>0 = right.
                     if (b >= 4 and b <= 7) {
-                        // Wheel: 4=up, 5=down, 6=left, 7=right. One notch per
-                        // press (X sends a press+release pair) → a line-unit
-                        // .scroll (#126/#210). dy>0 = up, dx>0 = right.
-                        if (ev.type == ButtonPress) {
+                        if (self.xi_opcode < 0 and ev.type == ButtonPress) {
                             self.queue.append(self.gpa, .{ .scroll = .{
                                 .position = .{ .x = @floatFromInt(ev.xbutton.x), .y = @floatFromInt(ev.xbutton.y) },
                                 .dx = switch (b) {
@@ -1038,8 +1232,8 @@ pub const Window = struct {
                                     else => 0,
                                 },
                                 .dy = switch (b) {
-                                    4 => 1,
-                                    5 => -1,
+                                    4 => -1,
+                                    5 => 1,
                                     else => 0,
                                 },
                                 .unit = .line,

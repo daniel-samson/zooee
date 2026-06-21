@@ -719,7 +719,11 @@ pub const Window = struct {
             WM_MOUSEWHEEL, WM_MOUSEHWHEEL => {
                 // Wheel delta is in the high word of wParam, in WHEEL_DELTA (120)
                 // units; lParam is *screen* coords → ScreenToClient (#126/#210).
-                // dy>0 = wheel up, dx>0 = tilt right. unit = line.
+                // Win32 raw sign: positive vertical = wheel rolled up/away (toward
+                // earlier content); positive horizontal = tilt right. Normalize to
+                // the canonical convention (#309): dy>0 = toward later content, so
+                // negate vertical; tilt-right already maps to dx>0. Touchpad
+                // "reverse scrolling direction" is already baked into the delta.
                 const lp: usize = @bitCast(lparam);
                 var pt: POINT = .{ .x = loShort(lp), .y = hiShort(lp) };
                 _ = ScreenToClient(hwnd, &pt);
@@ -728,7 +732,7 @@ pub const Window = struct {
                 self.queue.append(self.gpa, .{ .scroll = .{
                     .position = .{ .x = @floatFromInt(pt.x), .y = @floatFromInt(pt.y) },
                     .dx = if (horiz) steps else 0,
-                    .dy = if (horiz) 0 else steps,
+                    .dy = if (horiz) 0 else -steps,
                     .unit = .line,
                 } }) catch {};
             },
