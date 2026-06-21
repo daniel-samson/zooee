@@ -292,6 +292,7 @@ pub fn runWindow(
     // ZOOEE_SOFTWARE forces the CPU raster path (deterministic CI, debugging).
     const want_gpu = has_gpu_window and !opts.force_software and !init.environ_map.contains("ZOOEE_SOFTWARE");
     clipboard_debug = init.environ_map.contains("ZOOEE_CLIPLOG"); // selection→clipboard diagnostic (#318)
+    if (clipboard_debug) std.debug.print("CLIP: diagnostic enabled\n", .{});
 
     // Only Linux carries a GL context on the window (macOS=Metal, Windows=D3D).
     const want_gl_ctx = want_gpu and builtin.os.tag == .linux;
@@ -1327,9 +1328,11 @@ fn dispatch(
                 // Text selection (#318): pressing on selectable text starts a
                 // drag-select; pressing elsewhere clears any existing selection.
                 if (selectableAt(placements, p.position)) |sidx| {
+                    if (clipboard_debug) std.debug.print("CLIP press: selectable idx={d} at ({d},{d})\n", .{ sidx, p.position.x, p.position.y });
                     g_textsel = .{ .idx = sidx, .anchor_pt = p.position, .focus_pt = p.position, .dragging = true };
                     break :blk .redraw;
                 }
+                if (clipboard_debug) std.debug.print("CLIP press: NOT selectable at ({d},{d})\n", .{ p.position.x, p.position.y });
                 if (g_textsel != null) g_textsel = null;
                 // Click-to-focus (#310, web parity): a primary click moves focus
                 // to the focusable element under the pointer — but without a ring
@@ -1427,6 +1430,7 @@ fn dispatch(
         // plain Space — otherwise it's ordinary text. (Once focusable text fields
         // exist, the focused element's kind decides type-vs-activate.)
         .text => |t| blk: {
+            if (clipboard_debug) std.debug.print("CLIP text: cp={d} ctrl={} super={} textsel={}\n", .{ t.codepoint, t.mods.ctrl, t.mods.super, g_textsel != null });
             // Copy the active text selection (#318): ⌘C / Ctrl+C. The render pass
             // resolves the selected substring and the OS-hooks pass writes it.
             if ((t.mods.super or t.mods.ctrl) and (t.codepoint == 'c' or t.codepoint == 'C') and g_textsel != null) {
