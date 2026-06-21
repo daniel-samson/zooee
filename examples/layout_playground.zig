@@ -54,12 +54,8 @@ const Play = struct {
     // overflow controls to visible to see content spill (CSS default).
     overflow_x: ui.Overflow = .scroll,
     overflow_y: ui.Overflow = .scroll,
-    scroll_x: f32 = 0,
-    scroll_y: f32 = 0,
-    // Device scale captured from the Ui each frame, so the scroll handler can
-    // convert the engine's device-px scroll range back to the logical offsets
-    // this model stores.
-    last_scale: f32 = 1,
+    // Scroll offset is framework-owned now (#313): the view reads
+    // app.scrollOffset(scroll_region); ZOOEE_PLAY/dump go through setScrollOffset.
     gap: f32 = 8,
     pad: f32 = 12,
     count: usize = 5, // overflow the container by default so scrolling is visible
@@ -77,7 +73,6 @@ const Play = struct {
     }
 
     pub fn viewUi(self: *Play, u: *ui.Ui) !Widget {
-        self.last_scale = u.scale;
         // --- controls panel -------------------------------------------------
         const controls = try u.column(.{ .width = 280, .padding = .all(16), .gap = 10, .background = u.theme.surface }, &.{
             u.text("Layout", .{ .variant = .heading }),
@@ -137,8 +132,8 @@ const Play = struct {
             .wrap = if (self.box_wrap) .wrap else .nowrap,
             .overflow_x = self.overflow_x,
             .overflow_y = self.overflow_y,
-            .scroll_x = self.scroll_x,
-            .scroll_y = self.scroll_y,
+            .scroll_x = zooee.app.scrollOffset(@intFromEnum(Msg.scroll_region)).x, // built-in (#313)
+            .scroll_y = zooee.app.scrollOffset(@intFromEnum(Msg.scroll_region)).y,
             .background = u.theme.surface_variant,
             .corner_radius = 8,
             // Only react to the wheel while the pointer is over this container,
@@ -159,11 +154,9 @@ const Play = struct {
         switch (msg) {
             .dir_toggle => {
                 self.dir = if (self.dir == .row) .column else .row;
-                // Reset the offset: the old scroll position is meaningless once
-                // the main axis flips, and a stale offset can leave the viewport
-                // scrolled into empty space (looks like "boxes disappeared").
-                self.scroll_x = 0;
-                self.scroll_y = 0;
+                // Reset the offset when the main axis flips (a stale offset could
+                // leave the viewport scrolled into empty space) (#313).
+                zooee.app.setScrollOffset(@intFromEnum(Msg.scroll_region), 0, 0);
             },
             .justify_cycle => self.justify = nextJustify(self.justify),
             .align_cycle => self.align_items = nextAlign(self.align_items),
@@ -193,10 +186,11 @@ const Play = struct {
 
     /// The current control values as one line.
     fn configLine(self: *Play, buf: []u8) []const u8 {
+        const off = zooee.app.scrollOffset(@intFromEnum(Msg.scroll_region));
         return std.fmt.bufPrint(buf, "direction={s} justify={s} align={s} text-wrap={} flex-wrap={} overflow=({s},{s}) scroll=({d:.0},{d:.0}) gap={d:.0} padding={d:.0} boxes={d}", .{
             @tagName(self.dir),       @tagName(self.justify),    @tagName(self.align_items),
             self.wrap,                self.box_wrap,             @tagName(self.overflow_x),
-            @tagName(self.overflow_y), self.scroll_x,            self.scroll_y,
+            @tagName(self.overflow_y), off.x,                    off.y,
             self.gap,                 self.pad,                  self.count,
         }) catch "(config too long)";
     }
@@ -238,37 +232,11 @@ const Play = struct {
     }
 
     pub fn onEvent(self: *Play, ev: zooee.event.Event) zooee.app.Command {
+        _ = self;
         switch (ev) {
             .text => |t| if (t.codepoint == 'q') return .quit,
-            .scroll => |s| {
-                // Wheel pans the container. Lines → ~20px each; pixels 1:1. The
-                // engine clamps the offset to content at render; we keep a
-                // generous local clamp so the stored value can't run away.
-                // Our ScrollEvent dy/dx already reflects the OS natural-scroll
-                // setting (AppKit pre-inverts scrollingDelta), so add it to the
-                // offset directly — a downward swipe reveals later content.
-                const step: f32 = if (s.unit == .line) 20 else 1;
-                // Clamp to the engine's real scrollable range (device px → logical)
-                // so the offset can't over-scroll into dead range: once at the end,
-                // scrolling back responds immediately instead of unwinding phantom
-                // distance. Falls back to a generous bound before the first render.
-                const sc = if (self.last_scale > 0) self.last_scale else 1;
-                const rng = zooee.layout.lastScrollMax();
-                const max_x = rng.width / sc;
-                const max_y = rng.height / sc;
-                // A mouse wheel is vertical; if the content only overflows the
-                // horizontal axis (e.g. a row), let the vertical wheel drive it so
-                // scrolling is actually reachable with a normal wheel.
-                var dx = s.dx;
-                var dy = s.dy;
-                if (max_y <= 0 and max_x > 0 and dx == 0) {
-                    dx = dy;
-                    dy = 0;
-                }
-                self.scroll_y = std.math.clamp(self.scroll_y + dy * step, 0, max_y);
-                self.scroll_x = std.math.clamp(self.scroll_x + dx * step, 0, max_x);
-                return .redraw;
-            },
+            // Scroll is built-in (#313): the framework owns the container's offset
+            // (direction + clamp + natural-scroll); the view reads scrollOffset.
             else => {},
         }
         return .none;
@@ -346,9 +314,11 @@ fn applyEnv(self: *Play, spec: []const u8) void {
         } else if (std.mem.eql(u8, k, "oy")) {
             self.overflow_y = ovf.parse(v) orelse self.overflow_y;
         } else if (std.mem.eql(u8, k, "sx")) {
-            self.scroll_x = std.fmt.parseFloat(f32, v) catch self.scroll_x;
+            const off = zooee.app.scrollOffset(@intFromEnum(Msg.scroll_region));
+            zooee.app.setScrollOffset(@intFromEnum(Msg.scroll_region), std.fmt.parseFloat(f32, v) catch off.x, off.y);
         } else if (std.mem.eql(u8, k, "sy")) {
-            self.scroll_y = std.fmt.parseFloat(f32, v) catch self.scroll_y;
+            const off = zooee.app.scrollOffset(@intFromEnum(Msg.scroll_region));
+            zooee.app.setScrollOffset(@intFromEnum(Msg.scroll_region), off.x, std.fmt.parseFloat(f32, v) catch off.y);
         } else if (std.mem.eql(u8, k, "gap")) {
             self.gap = std.fmt.parseFloat(f32, v) catch self.gap;
         } else if (std.mem.eql(u8, k, "pad")) {

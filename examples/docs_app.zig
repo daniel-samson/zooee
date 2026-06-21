@@ -244,9 +244,7 @@ const Msg = enum(u32) { _ };
 const Docs = struct {
     selected: usize = 0,
     list_demo: usize = 1, // selected row on the List page's demo
-    scroll_y: f32 = 0, // offset for the Scroll page's viewport
-    sidebar_scroll: f32 = 0, // sidebar list scroll offset (#312)
-    content_scroll: f32 = 0, // content area scroll offset (#312)
+    // Scroll offsets are framework-owned now (#313): read via app.scrollOffset.
     sel_check: bool = false, // Selection page: checkbox
     sel_toggle: bool = true, // Selection page: toggle
     sel_radio: usize = 1, // Selection page: radio choice
@@ -282,7 +280,7 @@ const Docs = struct {
             try u.column(.{
                 .grow = 1,
                 .overflow_y = .auto,
-                .scroll_y = self.sidebar_scroll,
+                .scroll_y = zooee.app.scrollOffset(sidebar_scroll_id).y, // built-in (#313)
                 .on_scroll = sidebar_scroll_id,
             }, &.{try u.list(.{ .selected = sel_row }, rowlist.items)}),
             u.divider(.column),
@@ -319,7 +317,7 @@ const Docs = struct {
         } else if (std.mem.eql(u8, page.name, "List")) {
             try blocks.append(u.arena, try listExamples(u, self.list_demo));
         } else if (std.mem.eql(u8, page.name, "Scroll")) {
-            try blocks.append(u.arena, try scrollExamples(u, self.scroll_y));
+            try blocks.append(u.arena, try scrollExamples(u, zooee.app.scrollOffset(demo_scroll_id).y));
         } else if (std.mem.eql(u8, page.name, "Card")) {
             try blocks.append(u.arena, try cardExamples(u));
         } else if (std.mem.eql(u8, page.name, "Selection")) {
@@ -330,7 +328,7 @@ const Docs = struct {
             .padding = .{ .top = 4, .left = 28, .right = 28, .bottom = 28 },
             .gap = 14,
             .overflow_y = .auto, // the content area scrolls when it overflows (#312)
-            .scroll_y = self.content_scroll,
+            .scroll_y = zooee.app.scrollOffset(content_scroll_id).y, // built-in (#313)
             .on_scroll = content_scroll_id,
         }, blocks.items);
         const content = try u.column(.{ .grow = 1 }, &.{ toolbar, detail });
@@ -381,19 +379,9 @@ const Docs = struct {
     pub fn onEvent(self: *Docs, ev: zooee.event.Event) zooee.app.Command {
         switch (ev) {
             .text => |t| if (t.codepoint == 'q') return .quit,
-            // Route the wheel to whichever scroll region the pointer is over
-            // (#312); the engine clamps each to its content extent at render.
-            .scroll => |s| {
-                const d = s.dy * (if (s.unit == .line) @as(f32, 40) else 1);
-                const target = zooee.app.scrollTarget() orelse demo_scroll_id;
-                // Clamp to each region's real range so it can't over-scroll (#312).
-                switch (target) {
-                    sidebar_scroll_id => self.sidebar_scroll = std.math.clamp(self.sidebar_scroll + d, 0, zooee.app.scrollMaxFor(sidebar_scroll_id)),
-                    content_scroll_id => self.content_scroll = std.math.clamp(self.content_scroll + d, 0, zooee.app.scrollMaxFor(content_scroll_id)),
-                    else => self.scroll_y = std.math.clamp(self.scroll_y + d, 0, zooee.app.scrollMaxFor(demo_scroll_id)),
-                }
-                return .redraw;
-            },
+            // Scroll is built-in (#313): the framework owns each region's offset
+            // (direction + clamp + natural-scroll); we just read scrollOffset in
+            // the view. No per-app scroll handling needed.
             // Divider drag: grab near the sidebar's trailing edge, then track the
             // pointer. Pointer x is device px; sidebar_w is logical (÷ scale).
             .pointer_down => |p| {

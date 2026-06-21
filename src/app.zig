@@ -976,11 +976,67 @@ var g_scale: f32 = 1;
 /// overflowing. Lets a model clamp its stored offset per region so scrolling /
 /// dragging can't drift past the ends (sticky scroll-back).
 pub fn scrollMaxFor(id: u32) f32 {
+    return scrollMaxAxis(id, true);
+}
+
+/// Logical max scroll offset for a region on one axis (#313), from last frame's
+/// scrollbar; 0 if that axis isn't overflowing.
+fn scrollMaxAxis(id: u32, vertical: bool) f32 {
     const sc = if (g_scale > 0) g_scale else 1;
     for (layout_mod.scrollbars()) |sb| {
-        if (sb.scroll_id == id and sb.vertical) return sb.max_offset / sc;
+        if (sb.scroll_id == id and sb.vertical == vertical) return sb.max_offset / sc;
     }
     return 0;
+}
+
+// --- Built-in scroll (#313) -------------------------------------------------
+// The framework owns the scroll offset per region (keyed by `on_scroll` id):
+// it applies the wheel/drag with the OS-supplied (natural-scroll-aware) delta in
+// the canonical direction and clamps to the content. Apps just read
+// scrollOffset(id) into the container's scroll_x/scroll_y and never code scroll
+// direction or clamping. One logical scroll-line ≈ this many px.
+const scroll_line_px: f32 = 40;
+
+const ScrollState = struct { id: u32, x: f32 = 0, y: f32 = 0 };
+var g_scroll_state: [16]ScrollState = undefined;
+var g_scroll_state_n: usize = 0;
+
+fn scrollSlot(id: u32) *ScrollState {
+    for (g_scroll_state[0..g_scroll_state_n]) |*s| {
+        if (s.id == id) return s;
+    }
+    if (g_scroll_state_n < g_scroll_state.len) {
+        g_scroll_state[g_scroll_state_n] = .{ .id = id };
+        g_scroll_state_n += 1;
+        return &g_scroll_state[g_scroll_state_n - 1];
+    }
+    return &g_scroll_state[0];
+}
+
+/// The framework-owned scroll offset (logical px) for the region with this
+/// `on_scroll` id (#313). Apps read it into the scroll container's
+/// scroll_x/scroll_y; the framework keeps it correct (direction + clamp) on
+/// wheel and thumb-drag. Built-in — no per-app scroll-direction code.
+pub fn scrollOffset(id: u32) struct { x: f32, y: f32 } {
+    const s = scrollSlot(id);
+    return .{ .x = s.x, .y = s.y };
+}
+
+/// Set a region's built-in scroll offset programmatically (#313): jump to a
+/// position, reset on a layout change, or restore saved state. Clamped to
+/// content at render.
+pub fn setScrollOffset(id: u32, x: f32, y: f32) void {
+    const s = scrollSlot(id);
+    s.x = x;
+    s.y = y;
+}
+
+/// Apply a wheel delta to a region's built-in offset, clamped to content (#313).
+fn applyWheel(id: u32, dx: f32, dy: f32, unit: event_mod.ScrollUnit) void {
+    const step: f32 = if (unit == .pixel) 1 else scroll_line_px;
+    const s = scrollSlot(id);
+    s.y = std.math.clamp(s.y + dy * step, 0, scrollMaxAxis(id, true));
+    s.x = std.math.clamp(s.x + dx * step, 0, scrollMaxAxis(id, false));
 }
 
 /// An in-progress scrollbar thumb drag (#312).
@@ -1005,28 +1061,20 @@ fn beginBarDrag(p: geometry.Point) bool {
     return false;
 }
 
-/// While dragging a thumb, map the pointer to the target offset and deliver a
-/// pixel-unit scroll (in logical units) to the dragged region so it tracks the
-/// cursor (#312). The app applies it like any wheel scroll (pixel step = 1).
-fn dragBar(comptime Model: type, model: *Model, p: geometry.Point) void {
+/// While dragging a thumb, map the pointer to the target offset and set the
+/// dragged region's built-in offset so the thumb tracks the cursor (#312/#313).
+fn dragBar(p: geometry.Point) void {
     const drag = g_bar_drag orelse return;
-    layout_mod.bumpScrollbars(); // stay lit through the drag (#312)
+    layout_mod.bumpScrollbars(); // stay lit through the drag
     for (layout_mod.scrollbars()) |sb| {
         if (sb.scroll_id != drag.scroll_id or sb.vertical != drag.vertical) continue;
         const avail = sb.track_len - sb.thumb_len;
         if (avail <= 0) return;
         const along = if (drag.vertical) p.y else p.x;
         const t = std.math.clamp((along - drag.grab - sb.track_start) / avail, 0, 1);
-        const target = t * sb.max_offset; // device px
-        const delta_logical = (target - sb.offset) / (if (g_scale > 0) g_scale else 1);
-        if (delta_logical == 0) return;
-        g_scroll_target = drag.scroll_id;
-        _ = model.onEvent(.{ .scroll = .{
-            .position = p,
-            .dx = if (drag.vertical) 0 else delta_logical,
-            .dy = if (drag.vertical) delta_logical else 0,
-            .unit = .pixel,
-        } });
+        const target_logical = (t * sb.max_offset) / (if (g_scale > 0) g_scale else 1);
+        const s = scrollSlot(drag.scroll_id);
+        if (drag.vertical) s.y = target_logical else s.x = target_logical;
         return;
     }
 }
@@ -1206,7 +1254,7 @@ fn dispatch(
         .pointer_move => |p| blk: {
             // A scrollbar drag takes precedence and scrolls the dragged region.
             if (g_bar_drag != null) {
-                dragBar(Model, model, p.position);
+                dragBar(p.position);
                 break :blk .redraw;
             }
             if (hitMsg(placements, p.position, .hover)) |m| {
@@ -1227,8 +1275,12 @@ fn dispatch(
             }
             if (hitMsg(placements, s.position, .scroll)) |id| {
                 g_scroll_target = id; // which region the wheel is over (#312)
+                applyWheel(id, s.dx, s.dy, s.unit); // built-in offset (#313)
                 layout_mod.bumpScrollbars(); // reveal the overlay bars
-                break :blk model.onEvent(ev);
+                // Still notify onEvent for apps that handle scroll themselves; the
+                // built-in offset is the recommended path (read app.scrollOffset).
+                const cmd = model.onEvent(ev);
+                break :blk if (cmd == .quit) .quit else .redraw;
             }
             break :blk .none;
         },
@@ -1695,23 +1747,53 @@ test "Tab moves focus in layout order, wraps; Enter activates; Shift+Tab reverse
     resetFocus();
 }
 
-test "scrollbar thumb drag scrolls the region (#312)" {
-    resetFocus();
+test "built-in scroll: wheel moves the framework offset with direction + clamp (#313)" {
     g_scale = 1;
+    setScrollOffset(2, 0, 0);
     var rb = raster_mod.RasterBackend.init(testing.allocator);
     defer rb.deinit();
     const b = rb.interface();
     const Msg = enum(u32) { _ };
     const M = struct {
-        scroll: f32 = 0,
         pub fn update(_: *@This(), _: Msg) Command {
             return .none;
         }
-        pub fn onEvent(self: *@This(), ev: event_mod.Event) Command {
-            if (ev == .scroll) {
-                self.scroll += ev.scroll.dy;
-                return .redraw;
-            }
+        pub fn onEvent(_: *@This(), _: event_mod.Event) Command {
+            return .none;
+        }
+    };
+    const child: layout_mod.Element = .{ .height = 300 };
+    const box: layout_mod.Element = .{ .width = 50, .height = 100, .direction = .column, .overflow_y = .scroll, .on_scroll = 2, .children = &.{&child} };
+    try b.beginFrame(.{ .width = 50, .height = 100 });
+    var result = try layout_mod.layout(testing.allocator, b, &box, .{ .width = 50, .height = 100 });
+    defer result.deinit(testing.allocator);
+    layout_mod.render(b, result); // records the scrollbar → max = 200
+    try b.endFrame();
+    var m: M = .{};
+    const over: geometry.Point = .{ .x = 25, .y = 50 };
+    // Wheel down (dy>0 = toward later content): offset increases, clamped to 200.
+    _ = dispatch(M, Msg, &m, .{ .scroll = .{ .position = over, .dy = 2, .unit = .line } }, result.placements);
+    try testing.expectApproxEqAbs(@as(f32, 80), scrollOffset(2).y, 0.5); // 2 lines × 40
+    _ = dispatch(M, Msg, &m, .{ .scroll = .{ .position = over, .dy = 10, .unit = .line } }, result.placements);
+    try testing.expectApproxEqAbs(@as(f32, 200), scrollOffset(2).y, 0.5); // clamped to max
+    _ = dispatch(M, Msg, &m, .{ .scroll = .{ .position = over, .dy = -100, .unit = .line } }, result.placements);
+    try testing.expectEqual(@as(f32, 0), scrollOffset(2).y); // clamped to 0
+    setScrollOffset(2, 0, 0);
+}
+
+test "scrollbar thumb drag scrolls the region (#312/#313)" {
+    resetFocus();
+    g_scale = 1;
+    setScrollOffset(1, 0, 0);
+    var rb = raster_mod.RasterBackend.init(testing.allocator);
+    defer rb.deinit();
+    const b = rb.interface();
+    const Msg = enum(u32) { _ };
+    const M = struct {
+        pub fn update(_: *@This(), _: Msg) Command {
+            return .none;
+        }
+        pub fn onEvent(_: *@This(), _: event_mod.Event) Command {
             return .none;
         }
     };
@@ -1732,9 +1814,10 @@ test "scrollbar thumb drag scrolls the region (#312)" {
     _ = dispatch(M, Msg, &m, .{ .pointer_down = .{ .position = .{ .x = cx, .y = cy }, .buttons = .{ .primary = true } } }, result.placements);
     try testing.expect(g_bar_drag != null); // grabbed the thumb
     _ = dispatch(M, Msg, &m, .{ .pointer_move = .{ .position = .{ .x = cx, .y = cy + 30 } } }, result.placements);
-    try testing.expect(m.scroll > 0); // dragging down increased the offset
+    try testing.expect(scrollOffset(1).y > 0); // dragging down increased the built-in offset
     _ = dispatch(M, Msg, &m, .{ .pointer_up = .{ .position = .{ .x = cx, .y = cy + 30 } } }, result.placements);
     try testing.expect(g_bar_drag == null); // released
+    setScrollOffset(1, 0, 0);
     resetFocus();
 }
 
