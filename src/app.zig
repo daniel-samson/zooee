@@ -1091,6 +1091,15 @@ fn dispatch(
             if (k.key == .enter) {
                 if (activateFocused(Model, Msg, model, placements)) |cmd| break :blk cmd;
             }
+            // Esc blurs (clears focus), web parity — but still reaches onEvent so
+            // the app can also use Esc (e.g. to close a dialog).
+            if (k.key == .escape) {
+                const had = g_focus != null;
+                g_focus = null;
+                g_focus_visible = false;
+                const cmd = model.onEvent(ev);
+                break :blk if (cmd == .none and had) .redraw else cmd;
+            }
             break :blk model.onEvent(ev);
         },
         // Space activates the focused control too (web parity), as long as it's a
@@ -1366,6 +1375,28 @@ test "Space activates the focused control; :focus-visible only on keyboard focus
     // Then Tab reveals the ring again.
     _ = dispatch(M, Msg, &m, .{ .key_down = .{ .key = .tab } }, &placements);
     try testing.expect(focusVisible());
+    resetFocus();
+}
+
+test "Esc clears keyboard focus (#310)" {
+    resetFocus();
+    const Msg = enum(u32) { _ };
+    const M = struct {
+        pub fn update(_: *@This(), _: Msg) Command {
+            return .none;
+        }
+        pub fn onEvent(_: *@This(), _: event_mod.Event) Command {
+            return .none;
+        }
+    };
+    const btn: layout_mod.Element = .{ .focusable = true, .on_click = 1 };
+    const placements = [_]layout_mod.Placement{.{ .element = &btn, .rect = .{ .x = 0, .y = 0, .width = 10, .height = 10 } }};
+    var m: M = .{};
+    _ = dispatch(M, Msg, &m, .{ .key_down = .{ .key = .tab } }, &placements);
+    try testing.expect(focusedIndex() != null);
+    _ = dispatch(M, Msg, &m, .{ .key_down = .{ .key = .escape } }, &placements);
+    try testing.expectEqual(@as(?usize, null), focusedIndex());
+    try testing.expect(!focusVisible());
     resetFocus();
 }
 
