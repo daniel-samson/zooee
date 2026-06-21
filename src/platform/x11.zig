@@ -389,6 +389,27 @@ extern "Xi" fn XISelectEvents(*Display, Window_, [*]XIEventMask, c_int) c_int;
 extern "Xi" fn XIQueryDevice(*Display, c_int, *c_int) ?[*]XIDeviceInfo;
 extern "Xi" fn XIFreeDeviceInfo([*]XIDeviceInfo) void;
 
+// X errors are asynchronous and Xlib's default handler *exits the process*. A
+// failed XISelectEvents (some servers' XInput2 is incomplete — e.g. Xvfb) must
+// not be fatal, and we must detect it to fall back to the button wheel. Install
+// a handler that just records that an error happened, then XSync + check it.
+const XErrorEvent = extern struct {
+    type: c_int,
+    display: ?*Display,
+    serial: c_ulong,
+    error_code: u8,
+    request_code: u8,
+    minor_code: u8,
+    resourceid: XID,
+};
+const XErrorHandlerFn = ?*const fn (?*Display, *XErrorEvent) callconv(.c) c_int;
+extern "X11" fn XSetErrorHandler(XErrorHandlerFn) XErrorHandlerFn;
+var g_x_error: bool = false;
+fn xErrorHandler(_: ?*Display, _: *XErrorEvent) callconv(.c) c_int {
+    g_x_error = true;
+    return 0;
+}
+
 /// System clipboard backed by the X11 CLIPBOARD selection (#209). Unlike the
 /// macOS/Win32 ones, X11's clipboard is asynchronous and window-owned, so this
 /// wraps a *Window: setText takes ownership of the selection (served from
@@ -757,12 +778,21 @@ pub const Window = struct {
         var minor: c_int = 0;
         if (XIQueryVersion(self.display, &major, &minor) != 0) return; // Success == 0
 
-        // Select XI_Motion (carries scroll valuators) for all master pointers.
+        // From here, make X errors non-fatal so a server with incomplete XInput2
+        // (e.g. Xvfb) can't kill us — we detect the failure and fall back instead.
+        _ = XSetErrorHandler(xErrorHandler);
+
+        // Select XI_Motion (carries scroll valuators) for all master pointers,
+        // then XSync and check whether the server accepted it. If not, bail with
+        // xi_opcode still < 0 so pumpEvents uses the legacy button wheel.
         var bits = [_]u8{0} ** 4;
         const e: usize = @intCast(XI_Motion);
         bits[e >> 3] |= @as(u8, 1) << @intCast(e & 7);
         var em: XIEventMask = .{ .deviceid = XIAllMasterDevices, .mask_len = bits.len, .mask = &bits };
+        g_x_error = false;
         _ = XISelectEvents(self.display, self.handle, @ptrCast(&em), 1);
+        _ = XSync(self.display, 0);
+        if (g_x_error) return; // XI2 scroll selection rejected → button fallback
 
         // Discover scroll valuators (axis number + increment) on the devices.
         var n: c_int = 0;
@@ -786,7 +816,11 @@ pub const Window = struct {
                 }
             }
         }
-        self.xi_opcode = op; // mark XI2 active last (gates the button fallback)
+        // Enable XI2 only if we actually found a vertical scroll valuator (the
+        // common axis); otherwise keep the legacy button wheel so scrolling still
+        // works. Setting xi_opcode last is what gates the button fallback off.
+        if (self.xi_v_number < 0) return;
+        self.xi_opcode = op;
     }
 
     /// Turn an XI_Motion's scroll valuators into a canonical scroll event (#309).
