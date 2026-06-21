@@ -219,8 +219,8 @@ fn textExamples(u: *ui.Ui) !Widget {
             try Line.make(u, "עברית", "דג סקרן שט בים מאוכזב ולפתע מצא חברה"),
             try Line.make(u, "BiDi mix", "He said \"مرحبا بالعالم\" and smiled"),
         })),
-        try example(u, "wrapping body text in a fixed-width column", try u.column(.{ .width = 360 }, &.{
-            u.text("This is a longer run of body text that wraps to the content width instead of overflowing on a single line, exercising the shaping + wrap pipeline.", .{ .wrap = true }),
+        try example(u, "paragraphs wrap to the available width by default (no opt-in)", try u.column(.{}, &.{
+            u.text("Text wraps to its container's width like a browser — that's the default for every label and paragraph, so a long run reflows instead of overflowing on one line. The page description above and these examples all wrap to the content column automatically.", .{}),
         })),
     });
 }
@@ -325,7 +325,7 @@ const Docs = struct {
 
         // Detail: description + live examples (the title lives in the toolbar now).
         var blocks: std.ArrayList(Widget) = .empty;
-        try blocks.append(u.arena, u.text(page.body, .{ .variant = .body, .wrap = true }));
+        try blocks.append(u.arena, u.text(page.body, .{ .variant = .body }));
         if (std.mem.eql(u8, page.name, "Layout")) {
             try blocks.append(u.arena, try layoutExamples(u));
         } else if (std.mem.eql(u8, page.name, "Text")) {
