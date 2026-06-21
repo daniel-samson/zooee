@@ -434,7 +434,10 @@ pub const SystemClipboard = struct {
         if (w.clipboard_text) |old| w.gpa.free(old);
         w.clipboard_text = copy;
         const clip = XInternAtom(w.display, "CLIPBOARD", 0);
-        _ = XSetSelectionOwner(w.display, clip, w.handle, 0); // CurrentTime
+        // ICCCM: acquire with the latest real event time, NOT CurrentTime — else
+        // clipboard managers / the Xwayland bridge reject ownership (#318).
+        w.clipboard_time = w.last_event_time;
+        _ = XSetSelectionOwner(w.display, clip, w.handle, w.last_event_time);
         _ = XFlush(w.display);
     }
 
@@ -622,6 +625,13 @@ pub const Window = struct {
     /// CLIPBOARD selection contents we own (#209), served to other apps on
     /// SelectionRequest. Owned by `gpa`; freed in destroy.
     clipboard_text: ?[]u8 = null,
+    /// Timestamp of the last input event. ICCCM requires acquiring a selection
+    /// with a real event time, NOT CurrentTime — clipboard managers and the
+    /// Xwayland↔Wayland bridge reject ownership taken with CurrentTime, so copy
+    /// silently fails. We stamp ownership with this (#318).
+    last_event_time: Time = 0,
+    /// The time we took CLIPBOARD ownership — served for the TIMESTAMP target.
+    clipboard_time: Time = 0,
     /// XDND drag source during a drag-over (#212); 0 = no drag in progress.
     xdnd_source: Window_ = 0,
     /// X Input Method / Context (#213); null when no IM is available (the
@@ -1208,6 +1218,13 @@ pub const Window = struct {
             _ = XNextEvent(self.display, &ev);
             // Let the input method consume keystrokes it's composing (#213).
             if (self.xic != null and XFilterEvent(&ev, self.handle) != 0) continue;
+            // Track the latest input-event time for selection ownership (#318).
+            switch (ev.type) {
+                KeyPress, KeyRelease => self.last_event_time = ev.xkey.time,
+                ButtonPress, ButtonRelease => self.last_event_time = ev.xbutton.time,
+                MotionNotify => self.last_event_time = ev.xmotion.time,
+                else => {},
+            }
             switch (ev.type) {
                 ClientMessage => {
                     if (@as(Atom, @bitCast(ev.xclient.data.l[0])) == self.wm_delete) {
@@ -1346,13 +1363,19 @@ pub const Window = struct {
                     const req = ev.xselectionrequest;
                     const utf8 = XInternAtom(self.display, "UTF8_STRING", 0);
                     const targets_atom = XInternAtom(self.display, "TARGETS", 0);
+                    const timestamp_atom = XInternAtom(self.display, "TIMESTAMP", 0);
                     var prop = req.property;
                     if (self.clipboard_text) |text| {
                         if (req.target == utf8 or req.target == 31) { // XA_STRING=31
                             _ = XChangeProperty(self.display, req.requestor, req.property, req.target, 8, 0, text.ptr, @intCast(text.len));
                         } else if (req.target == targets_atom) {
-                            var list = [_]Atom{ utf8, 31 };
-                            _ = XChangeProperty(self.display, req.requestor, req.property, 4, 32, 0, @ptrCast(&list), 2); // XA_ATOM=4
+                            // Advertise the targets a clipboard manager checks for.
+                            var list = [_]Atom{ targets_atom, timestamp_atom, utf8, 31 };
+                            _ = XChangeProperty(self.display, req.requestor, req.property, 4, 32, 0, @ptrCast(&list), list.len); // XA_ATOM=4
+                        } else if (req.target == timestamp_atom) {
+                            // ICCCM: report the ownership time as an INTEGER (XA_INTEGER=19).
+                            var t: Time = self.clipboard_time;
+                            _ = XChangeProperty(self.display, req.requestor, req.property, 19, 32, 0, @ptrCast(&t), 1);
                         } else {
                             prop = 0; // unsupported target → None
                         }
