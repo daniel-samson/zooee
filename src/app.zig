@@ -42,6 +42,7 @@ pub fn buildTree(comptime Model: type, model: *Model, arena: std.mem.Allocator, 
         // else the dark default. (Pairs with `background()` for the clear color.)
         if (@hasDecl(Model, "theme")) u.theme = model.theme();
         focus_ring_color = u.theme.accent; // focus ring tracks the theme accent (#310)
+        layout_mod.scrollbar_thumb = .{ .r = u.theme.text_muted.r, .g = u.theme.text_muted.g, .b = u.theme.text_muted.b, .a = 150 }; // muted neutral thumb (#312)
         return u.lower(try model.viewUi(&u));
     }
     return model.view(arena, scale);
@@ -964,6 +965,18 @@ pub fn scrollTarget() ?u32 {
 /// Device-pixel scale for the current frame (set in buildTree), used to convert
 /// a device-space scrollbar drag back to the app's logical scroll offset (#312).
 var g_scale: f32 = 1;
+
+/// The logical max scroll offset for the region with this `on_scroll` id (#312),
+/// read from the scrollbar recorded last frame; 0 if the region isn't
+/// overflowing. Lets a model clamp its stored offset per region so scrolling /
+/// dragging can't drift past the ends (sticky scroll-back).
+pub fn scrollMaxFor(id: u32) f32 {
+    const sc = if (g_scale > 0) g_scale else 1;
+    for (layout_mod.scrollbars()) |sb| {
+        if (sb.scroll_id == id and sb.vertical) return sb.max_offset / sc;
+    }
+    return 0;
+}
 
 /// An in-progress scrollbar thumb drag (#312).
 const BarDrag = struct {

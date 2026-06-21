@@ -385,10 +385,12 @@ const Docs = struct {
             // (#312); the engine clamps each to its content extent at render.
             .scroll => |s| {
                 const d = s.dy * (if (s.unit == .line) @as(f32, 40) else 1);
-                switch (zooee.app.scrollTarget() orelse demo_scroll_id) {
-                    sidebar_scroll_id => self.sidebar_scroll = @max(0, self.sidebar_scroll + d),
-                    content_scroll_id => self.content_scroll = @max(0, self.content_scroll + d),
-                    else => self.scroll_y = @max(0, self.scroll_y + d), // Scroll-page demo
+                const target = zooee.app.scrollTarget() orelse demo_scroll_id;
+                // Clamp to each region's real range so it can't over-scroll (#312).
+                switch (target) {
+                    sidebar_scroll_id => self.sidebar_scroll = std.math.clamp(self.sidebar_scroll + d, 0, zooee.app.scrollMaxFor(sidebar_scroll_id)),
+                    content_scroll_id => self.content_scroll = std.math.clamp(self.content_scroll + d, 0, zooee.app.scrollMaxFor(content_scroll_id)),
+                    else => self.scroll_y = std.math.clamp(self.scroll_y + d, 0, zooee.app.scrollMaxFor(demo_scroll_id)),
                 }
                 return .redraw;
             },

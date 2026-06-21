@@ -251,9 +251,10 @@ pub fn render(b: Backend, result: LayoutResult) void {
     if (result.placements.len > 0) renderNode(b, result.placements, &i);
 }
 
-/// Scrollbar thumb color (#312): a translucent overlay. Provisional — width,
-/// inset, and color are the pixel-tunable bits.
-const scrollbar_thumb = style.Color{ .r = 145, .g = 145, .b = 152, .a = 150 };
+/// Scrollbar thumb color (#312): a translucent overlay, refreshed from the theme
+/// each frame in buildTree (a muted neutral, not the accent). Width and inset are
+/// still the pixel-tunable bits.
+pub var scrollbar_thumb = style.Color{ .r = 145, .g = 145, .b = 152, .a = 150 };
 
 /// Metrics for drawing a scroll container's scrollbar(s) after its children.
 const ScrollBars = struct {
