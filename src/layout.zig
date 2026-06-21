@@ -326,6 +326,14 @@ pub fn scrollbars() []const Scrollbar {
     return g_scrollbars[0..g_scrollbar_n];
 }
 
+/// Are the auto-hide overlay scrollbars currently visible? A thumb is recorded
+/// whenever content overflows (so wheel scroll + the per-region max keep
+/// working even while hidden), but you can only *grab* a bar you can see —
+/// otherwise an invisible thumb silently eats clicks on the content under it.
+pub fn scrollbarsVisible() bool {
+    return g_sb_alpha > 0.01;
+}
+
 fn recordScrollbar(sb: Scrollbar) void {
     if (g_scrollbar_n < g_scrollbars.len) {
         g_scrollbars[g_scrollbar_n] = sb;

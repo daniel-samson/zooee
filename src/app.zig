@@ -1055,6 +1055,10 @@ var g_bar_drag: ?BarDrag = null;
 /// A primary-button press over a scrollbar thumb starts a drag (#312). Returns
 /// true if a thumb was grabbed (the press is consumed).
 fn beginBarDrag(p: geometry.Point) bool {
+    // You can only grab a bar you can see. Thumbs stay recorded while the
+    // overlay is auto-hidden (so wheel scroll still works), but hit-testing a
+    // faded-out thumb would silently swallow clicks on the content beneath it.
+    if (!layout_mod.scrollbarsVisible()) return false;
     for (layout_mod.scrollbars()) |sb| {
         if (!sb.thumb.contains(p)) continue;
         const along = if (sb.vertical) p.y else p.x;

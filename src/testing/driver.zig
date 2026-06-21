@@ -432,6 +432,44 @@ test "viewUi list row click selects through the real path (#273/#130)" {
     try testing.expectEqual(@as(usize, 2), m.selected);
 }
 
+// An overflowing scroll container with a clickable element reaching the right
+// edge — where the auto-hide scrollbar thumb sits.
+const HiddenBarApp = struct {
+    clicked: bool = false,
+    pub const Msg = enum(u32) { hit };
+    pub fn viewUi(self: *HiddenBarApp, u: *ui_mod.Ui) !ui_mod.Widget {
+        _ = self;
+        return u.column(.{ .width = 100, .height = 50, .overflow_y = .auto, .on_scroll = 8888 }, &.{
+            try u.column(.{ .width = 100, .height = 40, .on_click = @intFromEnum(Msg.hit) }, &.{}),
+            try u.column(.{ .width = 100, .height = 40 }, &.{}),
+            try u.column(.{ .width = 100, .height = 40 }, &.{}),
+        });
+    }
+    pub fn update(self: *HiddenBarApp, msg: Msg) Command {
+        if (msg == .hit) self.clicked = true;
+        return .redraw;
+    }
+    pub fn onEvent(self: *HiddenBarApp, ev: event_mod.Event) Command {
+        _ = self;
+        _ = ev;
+        return .none;
+    }
+};
+
+test "auto-hidden scrollbar does not swallow clicks on the content beneath it (#312)" {
+    var m: HiddenBarApp = .{};
+    var d = try Driver(HiddenBarApp, HiddenBarApp.Msg).init(testing.allocator, &m, .{ .width = 100, .height = 50 });
+    defer d.deinit();
+    _ = try d.render(); // records the overflow thumb
+    // Drive the overlay fully hidden (as it is at rest / long after a scroll),
+    // independent of any global fade state left by earlier tests.
+    _ = layout_mod.tickScrollbarFade(5_000_000_000);
+    // Click the top row at the far-right edge, exactly where the (invisible)
+    // thumb sits. It must reach the row's on_click, not be eaten as a drag.
+    _ = try d.click(97, 12);
+    try testing.expect(m.clicked);
+}
+
 // A scroll-view model (#274): wheel events adjust the bound offset, which the
 // ScrollView renders; the layout engine clamps it to the content extent.
 const ScrollApp = struct {
