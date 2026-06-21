@@ -642,6 +642,12 @@ pub const Window = struct {
     xi_h_incr: f64 = 0,
     xi_v_last: f64 = std.math.nan(f64),
     xi_h_last: f64 = std.math.nan(f64),
+    /// Server time of the last XI2 scroll we emitted. The legacy button wheel is
+    /// suppressed only within a short window after this (so a wheel that fires
+    /// both XI2 *and* core button events doesn't double-scroll) — but if XI2 is
+    /// enabled yet silent (some drivers/RDP only send buttons), buttons still
+    /// work. 0 = no XI2 scroll seen yet.
+    xi_last_scroll_time: Time = 0,
 
     pub const CreateOptions = struct {
         title: [:0]const u8 = "zooee",
@@ -818,7 +824,7 @@ pub const Window = struct {
         }
         // Enable XI2 only if we actually found a vertical scroll valuator (the
         // common axis); otherwise keep the legacy button wheel so scrolling still
-        // works. Setting xi_opcode last is what gates the button fallback off.
+        // works.
         if (self.xi_v_number < 0) return;
         self.xi_opcode = op;
     }
@@ -856,6 +862,7 @@ pub const Window = struct {
             }
         }
         if (!have or (dx == 0 and dy == 0)) return;
+        self.xi_last_scroll_time = de.time; // de-dup the core button wheel
         self.queue.append(self.gpa, .{ .scroll = .{
             .position = .{ .x = @floatCast(de.event_x), .y = @floatCast(de.event_y) },
             .dx = @floatCast(dx),
@@ -1252,12 +1259,15 @@ pub const Window = struct {
                 ButtonPress, ButtonRelease => {
                     const b = ev.xbutton.button;
                     // Legacy wheel: 4=up, 5=down, 6=left, 7=right (one notch per
-                    // press). Only used when XInput2 is unavailable — otherwise
-                    // XI_Motion carries the (smooth, natural-scroll-aware) wheel
-                    // and emitting here too would double-scroll. Canonical sign
-                    // (#309): dy>0 = toward later content (down), dx>0 = right.
+                    // press). Suppressed only within ~60ms of an XI2 scroll, so a
+                    // wheel that fires both XI2 and core buttons doesn't double-
+                    // scroll — but if XI2 is enabled yet silent (some drivers/RDP
+                    // only deliver buttons), these still drive scrolling. Canonical
+                    // sign (#309): dy>0 = toward later content (down), dx>0 = right.
                     if (b >= 4 and b <= 7) {
-                        if (self.xi_opcode < 0 and ev.type == ButtonPress) {
+                        const t = ev.xbutton.time;
+                        const xi_recent = self.xi_last_scroll_time != 0 and t >= self.xi_last_scroll_time and (t - self.xi_last_scroll_time) < 60;
+                        if (!xi_recent and ev.type == ButtonPress) {
                             self.queue.append(self.gpa, .{ .scroll = .{
                                 .position = .{ .x = @floatFromInt(ev.xbutton.x), .y = @floatFromInt(ev.xbutton.y) },
                                 .dx = switch (b) {
