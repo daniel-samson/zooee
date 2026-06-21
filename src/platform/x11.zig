@@ -724,11 +724,14 @@ pub const Window = struct {
         var xdnd_version: Atom = 5;
         _ = XChangeProperty(display, handle, XInternAtom(display, "XdndAware", 0), 4, 32, 0, @ptrCast(&xdnd_version), 1); // XA_ATOM=4
 
-        // Integrated/headless title bars (#64): drop the WM decorations via
-        // _MOTIF_WM_HINTS so the app owns the whole surface. flags =
-        // MWM_HINTS_DECORATIONS (1<<1), decorations = 0. Drag-to-move via
-        // _NET_WM_MOVERESIZE arrives with the Element.drag_region hook.
-        if (opts.titlebar != .native) {
+        // Title bar (#64): only `.headless` drops the WM decorations (the app
+        // owns the whole surface) via _MOTIF_WM_HINTS (flags =
+        // MWM_HINTS_DECORATIONS 1<<1, decorations = 0). `.integrated` is a
+        // macOS-specific transparent-overlay look that has no X11 analogue while
+        // keeping working window controls, so on X11 it falls back to the normal
+        // window-manager title bar (same as `.native`) — otherwise the window
+        // has no title bar and can't be moved or closed.
+        if (opts.titlebar == .headless) {
             const motif = XInternAtom(display, "_MOTIF_WM_HINTS", 0);
             var hints = [5]c_long{ 2, 0, 0, 0, 0 };
             _ = XChangeProperty(display, handle, motif, motif, 32, 0, @ptrCast(&hints), 5);
