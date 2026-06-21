@@ -192,12 +192,32 @@ fn buttonExamples(u: *ui.Ui) !Widget {
 
 /// Live examples for the Text page (#270): the semantic type scale + wrapping.
 fn textExamples(u: *ui.Ui) !Widget {
+    // One labelled sample line: a fixed-width script name + the native text, so
+    // the shaping/BiDi result lines up in a column.
+    const Line = struct {
+        fn make(uu: *ui.Ui, name: []const u8, sample: []const u8) !Widget {
+            return uu.row(.{ .gap = 16, .align_items = .center }, &.{
+                try uu.column(.{ .width = 90 }, &.{uu.text(name, .{ .variant = .caption, .role = .secondary })}),
+                uu.text(sample, .{ .variant = .body }),
+            });
+        }
+    };
     return u.column(.{ .gap = 18 }, &.{
         try example(u, "the type scale (title / heading / body / caption)", try u.column(.{ .gap = 6 }, &.{
             u.text("Title", .{ .variant = .title }),
             u.text("Heading", .{ .variant = .heading }),
             u.text("Body text — the default paragraph style.", .{ .variant = .body }),
             u.text("Caption — secondary, smaller.", .{ .variant = .caption, .role = .secondary }),
+        })),
+        try example(u, "world scripts — Latin, Cyrillic, Greek + contextual shaping (#116) and RTL BiDi (#202/#203)", try u.column(.{ .gap = 8 }, &.{
+            try Line.make(u, "English", "The quick brown fox jumps over the lazy dog"),
+            try Line.make(u, "Français", "Portez ce vieux whisky au juge — déjà l'été"),
+            try Line.make(u, "Deutsch", "Zwölf Boxkämpfer — Größe, Fußgänger"),
+            try Line.make(u, "Русский", "Съешь же ещё этих мягких французских булочек"),
+            try Line.make(u, "Ελληνικά", "Ξεσκεπάζω τὴν ψυχοφθόρα βδελυγμία"),
+            try Line.make(u, "العربية", "نص حكيم له سر قاطع وذو شأن عظيم"),
+            try Line.make(u, "עברית", "דג סקרן שט בים מאוכזב ולפתע מצא חברה"),
+            try Line.make(u, "BiDi mix", "He said \"مرحبا بالعالم\" and smiled"),
         })),
         try example(u, "wrapping body text in a fixed-width column", try u.column(.{ .width = 360 }, &.{
             u.text("This is a longer run of body text that wraps to the content width instead of overflowing on a single line, exercising the shaping + wrap pipeline.", .{ .wrap = true }),
