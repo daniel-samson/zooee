@@ -1309,6 +1309,11 @@ pub const Window = struct {
                     const ks = XLookupKeysym(&ev.xkey, 0);
                     if (keysymToKey(ks)) |k| {
                         self.queue.append(self.gpa, .{ .key_down = .{ .key = k, .mods = x11Mods(ev.xkey.state) } }) catch {};
+                    } else if ((x11Mods(ev.xkey.state).ctrl or x11Mods(ev.xkey.state).super) and ks >= 'a' and ks <= 'z') {
+                        // Ctrl/Super + letter → the base letter as a .text event with
+                        // mods, so shortcuts like Ctrl+C reach the app (#318).
+                        // XLookupString would otherwise yield a dropped control char.
+                        self.queue.append(self.gpa, .{ .text = .{ .codepoint = @intCast(ks), .mods = x11Mods(ev.xkey.state) } }) catch {};
                     } else {
                         // With an input context (#213) use Xutf8LookupString so
                         // IME-composed / dead-key / multi-byte input comes back as

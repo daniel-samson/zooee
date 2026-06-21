@@ -161,6 +161,27 @@ extern "user32" fn DrawMenuBar(HWND) callconv(WINAPI) win.BOOL;
 // window. dwmapi is Vista+; the call is a no-op-equivalent if DWM is off.
 const MARGINS = extern struct { left: i32, right: i32, top: i32, bottom: i32 };
 extern "dwmapi" fn DwmExtendFrameIntoClientArea(HWND, *const MARGINS) callconv(WINAPI) i32;
+extern "dwmapi" fn DwmGetColorizationColor(*u32, *i32) callconv(WINAPI) i32;
+
+const style_mod = @import("../style.zig");
+
+/// The user's system accent (DWM colorization color, 0xAARRGGBB) → sRGB, so the
+/// app theme can match the OS (#318). Null if DWM is off / the call fails.
+pub fn systemAccent() ?style_mod.Color {
+    var argb: u32 = 0;
+    var opaque_blend: i32 = 0;
+    if (DwmGetColorizationColor(&argb, &opaque_blend) != 0) return null;
+    return style_mod.Color.rgb(@intCast((argb >> 16) & 0xFF), @intCast((argb >> 8) & 0xFF), @intCast(argb & 0xFF));
+}
+
+var g_theme_changed: bool = false;
+
+/// Consume the "OS theme changed" flag (accent / personalization) so the present
+/// loop repaints and theme() re-reads systemAccent() (#318).
+pub fn takeAppearanceChanged() bool {
+    defer g_theme_changed = false;
+    return g_theme_changed;
+}
 
 // --- events ----------------------------------------------------------------
 
@@ -255,6 +276,9 @@ const WM_KEYDOWN = 0x0100;
 const WM_KEYUP = 0x0101;
 const WM_SYSKEYUP = 0x0105;
 const WM_CHAR = 0x0102;
+// OS theme-change notifications (#318): accent (DWM colorization) + settings.
+const WM_DWMCOLORIZATIONCOLORCHANGED = 0x0320;
+const WM_SETTINGCHANGE = 0x001A;
 // Input completeness (#211).
 const WM_LBUTTONDBLCLK = 0x0203;
 const WM_RBUTTONDBLCLK = 0x0206;
@@ -737,8 +761,15 @@ pub const Window = struct {
                 } }) catch {};
             },
             WM_KEYDOWN => {
-                if (vkToKey(wparam)) |k| {
-                    self.queue.append(self.gpa, .{ .key_down = .{ .key = k, .mods = winMods() } }) catch {};
+                const kmods = winMods();
+                // Ctrl/Win + letter → a .text event WITH mods so the app can act
+                // on the shortcut (e.g. Ctrl+C copy, #318). WM_CHAR would only
+                // deliver a control char (0x03) with no mods. The base lowercase
+                // letter mirrors macOS's charactersIgnoringModifiers.
+                if ((kmods.ctrl or kmods.super) and wparam >= 'A' and wparam <= 'Z') {
+                    self.queue.append(self.gpa, .{ .text = .{ .codepoint = @intCast(wparam + ('a' - 'A')), .mods = kmods } }) catch {};
+                } else if (vkToKey(wparam)) |k| {
+                    self.queue.append(self.gpa, .{ .key_down = .{ .key = k, .mods = kmods } }) catch {};
                 }
             },
             WM_KEYUP, WM_SYSKEYUP => {
@@ -751,6 +782,11 @@ pub const Window = struct {
                 if (ch >= 0x20 and ch != 0x7F) {
                     self.queue.append(self.gpa, .{ .text = .{ .codepoint = ch } }) catch {};
                 }
+            },
+            // OS accent / personalization changed → repaint so theme() re-reads
+            // the system colors (#318).
+            WM_DWMCOLORIZATIONCOLORCHANGED, WM_SETTINGCHANGE => {
+                g_theme_changed = true;
             },
             WM_IME_STARTCOMPOSITION => {
                 self.queue.append(self.gpa, .{ .composition = .{ .phase = .start } }) catch {};
