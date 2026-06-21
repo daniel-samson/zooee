@@ -327,6 +327,15 @@ pub fn drawStroke(b: Backend, s: f32) !void {
     b.strokePath(&check, 1.3 * s, Color.rgb(40, 160, 70), false);
     const tri = [_]geometry.Point{ .{ .x = 5 * s, .y = 8 * s }, .{ .x = 9 * s, .y = 8 * s }, .{ .x = 7 * s, .y = 9.5 * s } };
     b.strokePath(&tri, 1.0 * s, Color.rgb(60, 90, 220), true);
+    // A dense (>64-point) closed polyline guards the GPU path/stroke point cap:
+    // if it regresses below this count the GPU truncates and diverges from the
+    // raster reference, spiking the parity check (#272).
+    var ring: [96]geometry.Point = undefined;
+    for (&ring, 0..) |*p, i| {
+        const t = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(ring.len)) * std.math.tau;
+        p.* = .{ .x = (5 + 3 * @cos(t)) * s, .y = (4 + 3 * @sin(t)) * s };
+    }
+    b.strokePath(&ring, 0.8 * s, Color.rgb(200, 120, 40), true);
 }
 
 /// Box shadow (#119): a filled rect with an offset, blurred shadow behind it.
