@@ -282,6 +282,34 @@ pub const Scrollbar = struct {
 var g_scrollbars: [32]Scrollbar = undefined;
 var g_scrollbar_n: usize = 0;
 
+// Auto-hide fade (#312): overlay scrollbars appear on scroll/drag and fade out
+// when idle (macOS overlay style). One global timer (last scroll activity).
+var g_sb_alpha: f32 = 0; // 0 = hidden, 1 = fully shown
+var g_sb_age_ns: u64 = std.math.maxInt(u64);
+const sb_hold_ns: u64 = 700 * std.time.ns_per_ms; // stay solid after activity
+const sb_fade_ns: u64 = 400 * std.time.ns_per_ms; // then fade out
+
+/// Mark scroll activity (#312): bars snap to fully visible. Called by the app
+/// loop on a wheel scroll or a thumb drag.
+pub fn bumpScrollbars() void {
+    g_sb_age_ns = 0;
+    g_sb_alpha = 1;
+}
+
+/// Advance the scrollbar fade by `dt_ns`; returns true while bars are still
+/// visible (so the loop keeps redrawing the fade-out, then idles). Per frame.
+pub fn tickScrollbarFade(dt_ns: u64) bool {
+    if (g_sb_alpha <= 0) return false;
+    g_sb_age_ns +|= dt_ns;
+    if (g_sb_age_ns <= sb_hold_ns) {
+        g_sb_alpha = 1;
+    } else {
+        const into = g_sb_age_ns - sb_hold_ns;
+        g_sb_alpha = if (into >= sb_fade_ns) 0 else 1.0 - @as(f32, @floatFromInt(into)) / @as(f32, @floatFromInt(sb_fade_ns));
+    }
+    return g_sb_alpha > 0;
+}
+
 /// The scrollbar thumbs drawn this frame (for drag hit-testing). Rebuilt by
 /// `render`; valid until the next render.
 pub fn scrollbars() []const Scrollbar {
@@ -302,6 +330,12 @@ fn recordScrollbar(sb: Scrollbar) void {
 fn drawScrollbars(b: Backend, sb: ScrollBars) void {
     const bw: f32 = 6; // bar thickness
     const min_thumb: f32 = 18;
+    // Faded color for the auto-hide overlay; geometry is still recorded even when
+    // fully faded so wheel scroll, drag hit-testing, and the per-region max keep
+    // working (#312).
+    const visible = g_sb_alpha > 0.01;
+    var col = scrollbar_thumb;
+    col.a = @intFromFloat(@as(f32, @floatFromInt(scrollbar_thumb.a)) * g_sb_alpha);
     if (sb.show_v and sb.ext.height > sb.cbox.height) {
         const track = sb.cbox.height;
         const thumb = @max(min_thumb, @min(track, track * sb.cbox.height / sb.ext.height));
@@ -309,7 +343,7 @@ fn drawScrollbars(b: Backend, sb: ScrollBars) void {
         const t = if (maxoff > 0) std.math.clamp(sb.sy / maxoff, 0, 1) else 0;
         const ty = sb.cbox.y + t * (track - thumb);
         const rect: Rect = .{ .x = sb.cbox.x + sb.cbox.width - bw, .y = ty, .width = bw, .height = thumb };
-        b.drawRect(rect, .{ .background = scrollbar_thumb, .corner_radius = style.CornerRadius.all(bw / 2) });
+        if (visible) b.drawRect(rect, .{ .background = col, .corner_radius = style.CornerRadius.all(bw / 2) });
         recordScrollbar(.{ .thumb = rect, .vertical = true, .track_start = sb.cbox.y, .track_len = track, .thumb_len = thumb, .max_offset = maxoff, .offset = sb.sy, .scroll_id = sb.scroll_id });
     }
     if (sb.show_h and sb.ext.width > sb.cbox.width) {
@@ -319,7 +353,7 @@ fn drawScrollbars(b: Backend, sb: ScrollBars) void {
         const t = if (maxoff > 0) std.math.clamp(sb.sx / maxoff, 0, 1) else 0;
         const tx = sb.cbox.x + t * (track - thumb);
         const rect: Rect = .{ .x = tx, .y = sb.cbox.y + sb.cbox.height - bw, .width = thumb, .height = bw };
-        b.drawRect(rect, .{ .background = scrollbar_thumb, .corner_radius = style.CornerRadius.all(bw / 2) });
+        if (visible) b.drawRect(rect, .{ .background = col, .corner_radius = style.CornerRadius.all(bw / 2) });
         recordScrollbar(.{ .thumb = rect, .vertical = false, .track_start = sb.cbox.x, .track_len = track, .thumb_len = thumb, .max_offset = maxoff, .offset = sb.sx, .scroll_id = sb.scroll_id });
     }
 }
@@ -1023,6 +1057,7 @@ test "scrollbar: a thumb draws on the overflowing axis only (#312)" {
             const b = rb.interface();
             const child: Element = .{ .width = 30, .height = content_h, .rect_style = .{ .background = style.Color.rgb(255, 0, 0) } };
             const box: Element = .{ .width = 30, .height = 20, .direction = .column, .overflow_y = .scroll, .children = &.{&child} };
+            bumpScrollbars(); // overlay bars auto-hide; show them for the check (#312)
             b.beginFrame(.{ .width = 30, .height = 20 }) catch unreachable;
             var result = layout(testing.allocator, b, &box, .{ .width = 30, .height = 20 }) catch unreachable;
             defer result.deinit(testing.allocator);
@@ -1035,6 +1070,22 @@ test "scrollbar: a thumb draws on the overflowing axis only (#312)" {
     try testing.expect(mk.run(60) < 255);
     // Content that fits → no overflow, no thumb → pure red.
     try testing.expectEqual(red.r, mk.run(12));
+}
+
+test "scrollbar auto-hide: bump shows, then fades to hidden when idle (#312)" {
+    bumpScrollbars();
+    // Solid during the hold window.
+    try testing.expect(tickScrollbarFade(100 * std.time.ns_per_ms)); // still visible
+    try testing.expectEqual(@as(f32, 1), g_sb_alpha);
+    // Into the fade window: visible but dimming.
+    try testing.expect(tickScrollbarFade(sb_hold_ns)); // past hold, mid-fade
+    try testing.expect(g_sb_alpha > 0 and g_sb_alpha < 1);
+    // Past the fade: hidden, and the loop can idle (returns false).
+    try testing.expect(!tickScrollbarFade(sb_fade_ns));
+    try testing.expectEqual(@as(f32, 0), g_sb_alpha);
+    // A fresh bump re-shows it.
+    bumpScrollbars();
+    try testing.expectEqual(@as(f32, 1), g_sb_alpha);
 }
 
 test "overflow: lastScrollMax reports the scrollable range for over-scroll clamping (#309)" {

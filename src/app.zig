@@ -262,6 +262,7 @@ pub fn run(
             }
         }
         if (animate(Model, model, dt) == .redraw) dirty = true;
+        if (layout_mod.tickScrollbarFade(dt)) dirty = true; // scrollbar fade (#312)
 
         try fl.pace(io);
     }
@@ -394,6 +395,7 @@ pub fn runWindow(
         // Native menu-bar selections + file-open requests (#129).
         if (frameOsHooks(Model, window, model, gpa, io) == .redraw) dirty = true;
         if (animate(Model, model, dt) == .redraw) dirty = true;
+        if (layout_mod.tickScrollbarFade(dt)) dirty = true; // scrollbar fade (#312)
 
         if (dirty) {
             frame.draw();
@@ -500,6 +502,7 @@ fn runWindowGl(
         // Native menu-bar selections + file-open requests (#129).
         if (frameOsHooks(Model, window, model, gpa, io) == .redraw) dirty = true;
         if (animate(Model, model, dt) == .redraw) dirty = true;
+        if (layout_mod.tickScrollbarFade(dt)) dirty = true; // scrollbar fade (#312)
         if (modelBackground(Model, model)) |c| glb.clear_color = c.rgbaF(); // theming toggle
 
         if (dirty) {
@@ -668,6 +671,7 @@ fn runWindowMetal(
         // Native menu-bar selections + file-open requests (#129).
         if (frameOsHooks(Model, window, model, gpa, io) == .redraw) dirty = true;
         if (animate(Model, model, dt) == .redraw) dirty = true;
+        if (layout_mod.tickScrollbarFade(dt)) dirty = true; // scrollbar fade (#312)
         frame.sync_present = pointer_drag; // low-latency present while dragging
 
         if (dirty) {
@@ -794,6 +798,7 @@ fn runWindowD3d(
         // Native menu-bar selections + file-open requests (#129).
         if (frameOsHooks(Model, window, model, gpa, io) == .redraw) dirty = true;
         if (animate(Model, model, dt) == .redraw) dirty = true;
+        if (layout_mod.tickScrollbarFade(dt)) dirty = true; // scrollbar fade (#312)
         if (modelBackground(Model, model)) |c| db.clear_color = c.rgbaF(); // theming toggle
 
         if (dirty) {
@@ -994,6 +999,7 @@ fn beginBarDrag(p: geometry.Point) bool {
         const along = if (sb.vertical) p.y else p.x;
         const thumb_start = if (sb.vertical) sb.thumb.y else sb.thumb.x;
         g_bar_drag = .{ .scroll_id = sb.scroll_id, .vertical = sb.vertical, .grab = along - thumb_start };
+        layout_mod.bumpScrollbars(); // keep the bar lit while dragging (#312)
         return true;
     }
     return false;
@@ -1004,6 +1010,7 @@ fn beginBarDrag(p: geometry.Point) bool {
 /// cursor (#312). The app applies it like any wheel scroll (pixel step = 1).
 fn dragBar(comptime Model: type, model: *Model, p: geometry.Point) void {
     const drag = g_bar_drag orelse return;
+    layout_mod.bumpScrollbars(); // stay lit through the drag (#312)
     for (layout_mod.scrollbars()) |sb| {
         if (sb.scroll_id != drag.scroll_id or sb.vertical != drag.vertical) continue;
         const avail = sb.track_len - sb.thumb_len;
@@ -1220,6 +1227,7 @@ fn dispatch(
             }
             if (hitMsg(placements, s.position, .scroll)) |id| {
                 g_scroll_target = id; // which region the wheel is over (#312)
+                layout_mod.bumpScrollbars(); // reveal the overlay bars
                 break :blk model.onEvent(ev);
             }
             break :blk .none;
