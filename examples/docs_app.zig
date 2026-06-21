@@ -14,15 +14,15 @@ const force_software = @import("build_options").force_software;
 
 const Page = struct { name: []const u8, body: []const u8, icon: ui.IconName };
 const pages = [_]Page{
-    .{ .name = "Welcome", .icon = .star, .body = "Welcome to zooee — a native, cross-platform UI in Zig.\n\nThis app is the component gallery: pick an item on the left to see it, with variants and examples. The look adapts per OS (macOS / WinUI / Linux) and is still being tuned." },
-    .{ .name = "Layout", .icon = .square, .body = "Flex containers (row / column) with gap, padding, grow, and CSS-style justify-content / align-items. `spacer()` fills free space; `divider()` draws a 1px rule across the cross axis." },
-    .{ .name = "Button", .icon = .circle, .body = "Buttons trigger actions. Variants: primary, secondary, danger. (Live examples land as the Button component is built, #271.)" },
-    .{ .name = "Icon", .icon = .star, .body = "Vector icons drawn with the path renderer. They tint with the current role and dim when disabled. Starter set: plus, check, play, chevron." },
-    .{ .name = "Text", .icon = .doc, .body = "Text and labels: titles, headings, body, captions — with the shaping pipeline (Latin, Arabic, BiDi). (#270)" },
-    .{ .name = "List", .icon = .square, .body = "A selectable list — the master/nav pattern. Each row dispatches on click; the selected row is highlighted. (The sidebar on the left is itself a List.) Virtualization (#29) and keyboard nav (#16) are follow-ups." },
-    .{ .name = "Scroll", .icon = .circle, .body = "A scroll viewport: a fixed-size box that clips its content and pans it on wheel/trackpad. Offsets are clamped to the content extent. Scroll inside the box below." },
-    .{ .name = "Card", .icon = .doc, .body = "Surfaces / panels: a background, rounded corners, an optional border, and an elevation shadow. The building block for content blocks." },
-    .{ .name = "Selection", .icon = .check, .body = "Checkbox, toggle/switch, and radio group — boolean and single-choice selection. Click any control to change it. Checked state is prop-driven; clicks dispatch on_change." },
+    .{ .name = "Welcome", .icon = .sparkles, .body = "Welcome to zooee — a native, cross-platform UI in Zig.\n\nThis app is the component gallery: pick an item on the left to see it, with variants and examples. The look adapts per OS (macOS / WinUI / Linux) and is still being tuned." },
+    .{ .name = "Layout", .icon = .layout_dashboard, .body = "Flex containers (row / column) with gap, padding, grow, and CSS-style justify-content / align-items. `spacer()` fills free space; `divider()` draws a 1px rule across the cross axis." },
+    .{ .name = "Button", .icon = .square_mouse_pointer, .body = "Buttons trigger actions. Variants: primary, secondary, danger. (Live examples land as the Button component is built, #271.)" },
+    .{ .name = "Icon", .icon = .shapes, .body = "Vector icons baked from real SVGs at build time (Lucide). Each icon flattens to stroke/fill subpaths; they tint with the current role and dim when disabled. Drop an SVG in icons/ and run `zig build gen-icons`." },
+    .{ .name = "Text", .icon = .type, .body = "Text and labels: titles, headings, body, captions — with the shaping pipeline (Latin, Arabic, BiDi). (#270)" },
+    .{ .name = "List", .icon = .list, .body = "A selectable list — the master/nav pattern. Each row dispatches on click; the selected row is highlighted. (The sidebar on the left is itself a List.) Virtualization (#29) and keyboard nav (#16) are follow-ups." },
+    .{ .name = "Scroll", .icon = .scroll_text, .body = "A scroll viewport: a fixed-size box that clips its content and pans it on wheel/trackpad. Offsets are clamped to the content extent. Scroll inside the box below." },
+    .{ .name = "Card", .icon = .credit_card, .body = "Surfaces / panels: a background, rounded corners, an optional border, and an elevation shadow. The building block for content blocks." },
+    .{ .name = "Selection", .icon = .square_check, .body = "Checkbox, toggle/switch, and radio group — boolean and single-choice selection. Click any control to change it. Checked state is prop-driven; clicks dispatch on_change." },
 };
 
 /// Message ids for the Selection page's interactive controls.

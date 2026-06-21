@@ -62,6 +62,17 @@ pub fn build(b: *std.Build) void {
     rm.has_side_effects = true; // always run; never cached
     clean_step.dependOn(&rm.step);
 
+    // --- gen-icons: SVG → baked icon data (build-time, #272) ---------------
+    // Regenerates src/generated_icons.zig from the SVGs in icons/. The output
+    // is committed so normal builds don't need this step; rerun when icons
+    // change. Runs the parser+flattener at build time so the runtime ships only
+    // point tables, never an SVG parser (keeps the binary small).
+    const svg2icons = addExe(b, target, optimize, null, "svg2icons", "tools/svg2icons.zig");
+    const gen_icons = b.addRunArtifact(svg2icons);
+    gen_icons.addArgs(&.{ "icons", "src/generated_icons.zig" });
+    gen_icons.has_side_effects = true; // writes into the source tree
+    b.step("gen-icons", "Regenerate src/generated_icons.zig from icons/*.svg").dependOn(&gen_icons.step);
+
     // --- test --------------------------------------------------------------
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mod })).step);

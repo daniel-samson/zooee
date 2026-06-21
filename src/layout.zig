@@ -93,6 +93,10 @@ pub const Overflow = enum { visible, hidden, scroll, auto };
 /// A layout element. This is the layout engine's input tree; the widget
 /// API (#4) will build these. Lifetime: caller-owned, layout never
 /// mutates the element tree.
+/// One subpath of a vector icon (#272): a flattened polyline in the icon's
+/// local coords, `closed` if it should join back to its start.
+pub const IconSubPath = struct { pts: []const geometry.Point, closed: bool };
+
 pub const Element = struct {
     // Box model.
     margin: EdgeInsets = .zero,
@@ -138,6 +142,12 @@ pub const Element = struct {
     stroke_color: style.Color = .black,
     stroke_width: f32 = 1,
     stroke_closed: bool = false,
+    // Multi-subpath vector icon (#272): each subpath is a polyline in LOCAL
+    // coords (already scaled to the icon box). Stroked with round caps/joins
+    // (`stroke_width`) when `icon_stroke`, else filled — both tinted with
+    // `path_color`. Built from baked SVG data (src/generated_icons.zig).
+    icon_paths: ?[]const IconSubPath = null,
+    icon_stroke: bool = false,
 
     // Image fill (#122): raw RGBA pixels (`image_w`×`image_h`) drawn into the
     // element's border-box with `image_fit`. The texture is created and freed
@@ -384,6 +394,20 @@ fn renderNode(b: Backend, placements: []const Placement, i: *usize) void {
         const n = @min(pts.len, buf.len);
         for (0..n) |k| buf[k] = .{ .x = p.rect.x + pts[k].x, .y = p.rect.y + pts[k].y };
         b.strokePath(buf[0..n], el.stroke_width, el.stroke_color, el.stroke_closed);
+    }
+    if (el.icon_paths) |sps| {
+        // Vector icon (#272): each subpath offset to the border-box origin,
+        // then stroked (round caps/joins) or filled, tinted with path_color.
+        var buf: [512]geometry.Point = undefined;
+        for (sps) |sp| {
+            const n = @min(sp.pts.len, buf.len);
+            for (0..n) |k| buf[k] = .{ .x = p.rect.x + sp.pts[k].x, .y = p.rect.y + sp.pts[k].y };
+            if (el.icon_stroke) {
+                b.strokePath(buf[0..n], el.stroke_width, el.path_color, sp.closed);
+            } else {
+                b.fillPath(buf[0..n], el.path_color);
+            }
+        }
     }
     if (el.image_rgba) |rgba| {
         if (b.createTexture(el.image_w, el.image_h, rgba)) |tex| {

@@ -19,6 +19,7 @@ const layout = @import("layout.zig");
 const style = @import("style.zig");
 const geometry = @import("geometry.zig");
 const theme_mod = @import("theme.zig");
+const gen_icons = @import("generated_icons.zig");
 
 const Element = layout.Element;
 const Color = style.Color;
@@ -165,10 +166,11 @@ fn buttonTextSize(sz: ButtonSize) f32 {
     };
 }
 
-/// Vector icon (host, #272). Lowers to an Element with a filled polygon path
-/// (reusing the path renderer, #120) sized to a `size`×`size` box. The starter
-/// set is normalized to a 0..1 unit square. Tint follows `role`/`disabled`.
-pub const IconName = enum { plus, check, play, chevron_right, chevron_left, circle, square, star, doc };
+/// Vector icon (host, #272). Lowers to an Element carrying the baked subpaths
+/// for `name` (stroked or filled), scaled to a `size`×`size` box and tinted by
+/// `role`/`disabled`. The set is generated at build time from real SVGs in
+/// icons/ (Lucide) — see tools/svg2icons.zig and src/generated_icons.zig.
+pub const IconName = gen_icons.Name;
 
 pub const Icon = struct {
     name: IconName,
@@ -176,55 +178,6 @@ pub const Icon = struct {
     role: Role = .normal,
     disabled: bool = false,
 };
-
-/// Normalized (0..1, y-down) closed polygon for each icon in the starter set.
-fn iconPath(name: IconName) []const geometry.Point {
-    const P = geometry.Point;
-    return switch (name) {
-        .plus => &.{
-            .{ .x = 0.4, .y = 0 }, .{ .x = 0.6, .y = 0 }, .{ .x = 0.6, .y = 0.4 },
-            .{ .x = 1, .y = 0.4 }, .{ .x = 1, .y = 0.6 }, .{ .x = 0.6, .y = 0.6 },
-            .{ .x = 0.6, .y = 1 }, .{ .x = 0.4, .y = 1 }, .{ .x = 0.4, .y = 0.6 },
-            .{ .x = 0, .y = 0.6 }, .{ .x = 0, .y = 0.4 }, .{ .x = 0.4, .y = 0.4 },
-        },
-        .check => &.{
-            .{ .x = 0.4, .y = 0.78 }, .{ .x = 0.05, .y = 0.45 }, .{ .x = 0.18, .y = 0.32 },
-            .{ .x = 0.4, .y = 0.52 }, .{ .x = 0.82, .y = 0.12 }, .{ .x = 0.95, .y = 0.25 },
-        },
-        .play => &.{ P{ .x = 0.2, .y = 0.1 }, P{ .x = 0.85, .y = 0.5 }, P{ .x = 0.2, .y = 0.9 } },
-        .chevron_right => &.{
-            .{ .x = 0.3, .y = 0.12 },  .{ .x = 0.48, .y = 0.12 }, .{ .x = 0.82, .y = 0.5 },
-            .{ .x = 0.48, .y = 0.88 }, .{ .x = 0.3, .y = 0.88 },  .{ .x = 0.6, .y = 0.5 },
-        },
-        .chevron_left => &.{
-            .{ .x = 0.7, .y = 0.12 },  .{ .x = 0.52, .y = 0.12 }, .{ .x = 0.18, .y = 0.5 },
-            .{ .x = 0.52, .y = 0.88 }, .{ .x = 0.7, .y = 0.88 },  .{ .x = 0.4, .y = 0.5 },
-        },
-        // 12-gon approximating a disc.
-        .circle => &.{
-            .{ .x = 0.95, .y = 0.5 }, .{ .x = 0.89, .y = 0.725 }, .{ .x = 0.725, .y = 0.89 },
-            .{ .x = 0.5, .y = 0.95 }, .{ .x = 0.275, .y = 0.89 }, .{ .x = 0.11, .y = 0.725 },
-            .{ .x = 0.05, .y = 0.5 }, .{ .x = 0.11, .y = 0.275 }, .{ .x = 0.275, .y = 0.11 },
-            .{ .x = 0.5, .y = 0.05 }, .{ .x = 0.725, .y = 0.11 }, .{ .x = 0.89, .y = 0.275 },
-        },
-        .square => &.{
-            .{ .x = 0.15, .y = 0.15 }, .{ .x = 0.85, .y = 0.15 },
-            .{ .x = 0.85, .y = 0.85 }, .{ .x = 0.15, .y = 0.85 },
-        },
-        // 5-point star (alternating outer/inner radii), traced in order.
-        .star => &.{
-            .{ .x = 0.5, .y = 0.02 },    .{ .x = 0.612, .y = 0.346 }, .{ .x = 0.957, .y = 0.352 },
-            .{ .x = 0.681, .y = 0.559 }, .{ .x = 0.782, .y = 0.888 }, .{ .x = 0.5, .y = 0.69 },
-            .{ .x = 0.218, .y = 0.888 }, .{ .x = 0.319, .y = 0.559 }, .{ .x = 0.043, .y = 0.352 },
-            .{ .x = 0.388, .y = 0.346 },
-        },
-        // A page with a folded top-right corner.
-        .doc => &.{
-            .{ .x = 0.22, .y = 0.08 }, .{ .x = 0.62, .y = 0.08 }, .{ .x = 0.78, .y = 0.24 },
-            .{ .x = 0.78, .y = 0.92 }, .{ .x = 0.22, .y = 0.92 },
-        },
-    };
-}
 
 /// Selectable list (host, #273): a vertical stack of clickable rows with a
 /// highlighted selection. Row click dispatches `on_click`. Virtualization (#29)
@@ -585,13 +538,21 @@ pub const Ui = struct {
             },
             .icon => |ic| {
                 const px = ic.size * s;
-                const unit = iconPath(ic.name);
-                const pts = try self.arena.alloc(geometry.Point, unit.len);
-                for (unit, 0..) |p, i| pts[i] = .{ .x = p.x * px, .y = p.y * px };
+                const d = gen_icons.get(ic.name);
+                const sps = try self.arena.alloc(layout.IconSubPath, d.subpaths.len);
+                for (d.subpaths, 0..) |sp, k| {
+                    const pts = try self.arena.alloc(geometry.Point, sp.pts.len);
+                    for (sp.pts, 0..) |p, j| pts[j] = .{ .x = p.x * px, .y = p.y * px };
+                    sps[k] = .{ .pts = pts, .closed = sp.closed };
+                }
                 el.* = .{
                     .width = px,
                     .height = px,
-                    .path = pts,
+                    .icon_paths = sps,
+                    .icon_stroke = d.stroke,
+                    // Stroke width scales with the icon (Lucide authors at 24px);
+                    // floor at ~1px so small icons stay visible.
+                    .stroke_width = @max(1, d.stroke_width * px),
                     .path_color = if (ic.disabled) self.theme.text_muted else iconTint(self.theme, ic.role),
                 };
             },
@@ -896,10 +857,13 @@ test "lower: icon → sized filled path; disabled dims the tint (#272)" {
     const el = try ui.lower(ui.icon(.{ .name = .plus, .size = 24 }));
     try testing.expectEqual(@as(?f32, 24), el.width);
     try testing.expectEqual(@as(?f32, 24), el.height);
-    try testing.expect(el.path != null);
-    try testing.expectEqual(@as(usize, 12), el.path.?.len); // plus = 12-point cross
-    // Points are scaled into the 24px box.
-    try testing.expectEqual(@as(f32, 24), el.path.?[3].x);
+    try testing.expect(el.icon_paths != null);
+    try testing.expect(el.icon_paths.?.len >= 1); // baked Lucide plus = 2 strokes
+    try testing.expect(el.icon_stroke); // Lucide icons are stroked
+    // Points are scaled into the 24px box (normalized 0..1 × size).
+    for (el.icon_paths.?) |sp| for (sp.pts) |pt| {
+        try testing.expect(pt.x >= 0 and pt.x <= 24 and pt.y >= 0 and pt.y <= 24);
+    };
 
     // Disabled tint differs from the enabled role tint.
     const on = try ui.lower(ui.icon(.{ .name = .check, .role = .primary }));
@@ -943,7 +907,7 @@ test "lower: list row with icon + a header (#268)" {
     // Icon row: [icon, label], centered, clickable.
     try testing.expectEqual(layout.AlignItems.center, el.children[1].align_items);
     try testing.expectEqual(@as(usize, 2), el.children[1].children.len);
-    try testing.expect(el.children[1].children[0].path != null); // the icon
+    try testing.expect(el.children[1].children[0].icon_paths != null); // the icon
     try testing.expectEqualStrings("Item", el.children[1].children[1].text.?);
 }
 
