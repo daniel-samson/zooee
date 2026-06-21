@@ -303,15 +303,41 @@ fn resizeDelegate() id {
     // windowDidEndLiveResize: guarantees one final redraw at the settled size
     // even if the last windowDidResize: raced the drag's end.
     _ = class_addMethod(class, sel("windowDidEndLiveResize:"), @ptrCast(&onWindowDidResize), "v@:@");
+    // OS theme-change notifications (#318): accent + light/dark, so a live app
+    // re-themes when the user changes them in System Settings.
+    _ = class_addMethod(class, sel("zooeeThemeChanged:"), @ptrCast(&onThemeChanged), "v@:@");
     objc_registerClassPair(class);
     const inst = msg(id, struct {}, msg(id, struct {}, class, sel("alloc"), .{}), sel("init"), .{});
     delegate_instance = inst;
+    // Accent + appearance changes post on the *distributed* center; system color
+    // changes on the regular one. We re-read all OS colors on any of them.
+    const dnc = msg(id, struct {}, cls("NSDistributedNotificationCenter"), sel("defaultCenter"), .{});
+    inline for (.{ "AppleColorPreferencesChangedNotification", "AppleInterfaceThemeChangedNotification" }) |nm| {
+        _ = msg(void, struct { id, SEL, id, id }, dnc, sel("addObserver:selector:name:object:"), .{ inst, sel("zooeeThemeChanged:"), nsString(nm), null });
+    }
+    const nc = msg(id, struct {}, cls("NSNotificationCenter"), sel("defaultCenter"), .{});
+    _ = msg(void, struct { id, SEL, id, id }, nc, sel("addObserver:selector:name:object:"), .{ inst, sel("zooeeThemeChanged:"), nsString("NSSystemColorsDidChangeNotification"), null });
     return inst;
 }
 
 /// IMP for `windowDidResize:` — redraw the live window during the modal drag.
 fn onWindowDidResize(_: id, _: SEL, _: id) callconv(.c) void {
     if (live_resize_window) |w| if (w.redraw_fn) |f| f(w.redraw_ctx);
+}
+
+/// OS accent / appearance changed → flag it (the present loop polls
+/// takeAppearanceChanged each frame) and nudge a repaint (#318).
+var theme_changed: bool = false;
+fn onThemeChanged(_: id, _: SEL, _: id) callconv(.c) void {
+    theme_changed = true;
+    if (live_resize_window) |w| if (w.redraw_fn) |f| f(w.redraw_ctx);
+}
+
+/// Consume the "OS theme changed" flag — the app repaints so its theme()
+/// hook re-reads systemAccent()/prefersDark() (#318).
+pub fn takeAppearanceChanged() bool {
+    defer theme_changed = false;
+    return theme_changed;
 }
 
 // --- IME / text input (#213) ------------------------------------------------

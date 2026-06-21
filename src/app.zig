@@ -1495,6 +1495,9 @@ fn frameOsHooks(comptime Model: type, window: anytype, model: *Model, gpa: std.m
         clip.interface().setText(g_copy_buf[0..g_copy_len]) catch {};
         g_copy_pending = false;
     }
+    // Live OS theme change (#318): the user changed their accent / light-dark in
+    // System Settings → repaint so theme() re-reads the system colors.
+    if (@hasDecl(WindowPlatform, "takeAppearanceChanged") and WindowPlatform.takeAppearanceChanged()) cmd = .redraw;
     if (@hasDecl(Model, "requestPaste") and @hasDecl(Model, "onPaste")) {
         if (model.requestPaste()) {
             var clip = systemClipboard(window, gpa);
