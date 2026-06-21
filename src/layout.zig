@@ -186,6 +186,11 @@ pub const Element = struct {
     /// so widgets can react (e.g. open on focus, validate on blur).
     on_focus: ?u32 = null,
     on_blur: ?u32 = null,
+    /// Roving-tabindex group (#310/#16): focusable elements sharing the same
+    /// non-null id are ONE tab stop (a listbox / radio group / segmented
+    /// control). Tab moves between stops; Up/Down arrows move within the group.
+    /// null = a standalone tab stop.
+    tab_group: ?u32 = null,
     /// Cursor shape (#123) shown while the pointer is over this element's
     /// border-box. null = inherit (the app resolves the topmost region that
     /// sets one, defaulting to `.default`). Set `.pointer` on clickables,

@@ -965,12 +965,54 @@ fn focusableCount(placements: []const layout_mod.Placement) usize {
     return n;
 }
 
-/// Advance the focus index by one in Tab order (wrap-around); `shift` reverses.
-/// From nothing focused, Tab focuses the first element and Shift+Tab the last.
-fn moveFocus(cur: ?usize, n: usize, shift: bool) ?usize {
+/// The roving-tabindex group of the i-th focusable element (null = standalone).
+fn groupOf(placements: []const layout_mod.Placement, i: usize) ?u32 {
+    var k: usize = 0;
+    for (placements) |pl| {
+        if (!pl.element.focusable) continue;
+        if (k == i) return pl.element.tab_group;
+        k += 1;
+    }
+    return null;
+}
+
+/// First/last focusable index of the contiguous same-group run containing `i`
+/// (a roving group is one tab "stop"); a standalone element is its own stop.
+fn stopStart(placements: []const layout_mod.Placement, i: usize) usize {
+    const g = groupOf(placements, i) orelse return i;
+    var s = i;
+    while (s > 0 and groupOf(placements, s - 1) == g) s -= 1;
+    return s;
+}
+fn stopEnd(placements: []const layout_mod.Placement, i: usize, n: usize) usize {
+    const g = groupOf(placements, i) orelse return i;
+    var e = i;
+    while (e + 1 < n and groupOf(placements, e + 1) == g) e += 1;
+    return e;
+}
+
+/// Move to the next/prev tab STOP (#310/#16): a roving group counts as one stop,
+/// so Tab enters a list at its first row and Shift+Tab lands on a prior stop's
+/// start. From nothing focused, the first (or last) stop.
+fn nextStop(placements: []const layout_mod.Placement, cur: ?usize, n: usize, shift: bool) ?usize {
     if (n == 0) return null;
-    if (cur) |c| return if (shift) (c + n - 1) % n else (c + 1) % n;
-    return if (shift) n - 1 else 0;
+    const c = cur orelse return if (shift) stopStart(placements, n - 1) else 0;
+    if (shift) {
+        const prev_end = (stopStart(placements, c) + n - 1) % n;
+        return stopStart(placements, prev_end);
+    }
+    return (stopEnd(placements, c, n) + 1) % n;
+}
+
+/// Move within the current roving group with an arrow key (wrap inside the
+/// group); null when the focused element is standalone (arrows then pass to the
+/// app). `up` reverses.
+fn arrowWithinGroup(placements: []const layout_mod.Placement, cur: usize, n: usize, up: bool) ?usize {
+    _ = groupOf(placements, cur) orelse return null;
+    const s = stopStart(placements, cur);
+    const e = stopEnd(placements, cur, n);
+    if (up) return if (cur > s) cur - 1 else e;
+    return if (cur < e) cur + 1 else s;
 }
 
 /// The placement of the currently-focused element, or null. Drives Enter
@@ -1100,17 +1142,16 @@ fn dispatch(
             if (k.key == .tab) {
                 const n = focusableCount(placements);
                 if (n == 0) break :blk model.onEvent(ev);
-                changeFocus(Model, Msg, model, placements, moveFocus(g_focus, n, k.mods.shift));
+                changeFocus(Model, Msg, model, placements, nextStop(placements, g_focus, n, k.mods.shift));
                 g_focus_visible = true; // keyboard focus → show the ring
                 break :blk .redraw;
             }
-            // Arrow keys move focus to the prev/next focusable element (#310/#16,
-            // list & menu nav) — but only while already keyboard-navigating, so
-            // apps keep arrow keys when nothing is focused.
+            // Arrow keys move within the focused roving group (#310/#16: list /
+            // radio group / segmented control). Standalone controls don't capture
+            // arrows — they pass to the app — matching the web.
             if ((k.key == .up or k.key == .down) and g_focus != null) {
-                const n = focusableCount(placements);
-                if (n > 0) {
-                    changeFocus(Model, Msg, model, placements, moveFocus(g_focus, n, k.key == .up));
+                if (arrowWithinGroup(placements, g_focus.?, focusableCount(placements), k.key == .up)) |nx| {
+                    changeFocus(Model, Msg, model, placements, nx);
                     g_focus_visible = true;
                     break :blk .redraw;
                 }
@@ -1405,7 +1446,7 @@ test "Space activates the focused control; :focus-visible only on keyboard focus
     resetFocus();
 }
 
-test "arrow keys move focus while navigating; pass through when unfocused (#310/#16)" {
+test "roving tabindex: a group is one Tab stop; arrows move within it (#310/#16)" {
     resetFocus();
     const Msg = enum(u32) { _ };
     const M = struct {
@@ -1419,28 +1460,43 @@ test "arrow keys move focus while navigating; pass through when unfocused (#310/
         }
     };
     const r: geometry.Rect = .{ .x = 0, .y = 0, .width = 10, .height = 10 };
-    const a: layout_mod.Element = .{ .focusable = true };
-    const b: layout_mod.Element = .{ .focusable = true };
-    const c: layout_mod.Element = .{ .focusable = true };
-    const placements = [_]layout_mod.Placement{ .{ .element = &a, .rect = r }, .{ .element = &b, .rect = r }, .{ .element = &c, .rect = r } };
+    // A 3-row group (tab_group=1), then a standalone button (no group).
+    const g0: layout_mod.Element = .{ .focusable = true, .tab_group = 1 };
+    const g1: layout_mod.Element = .{ .focusable = true, .tab_group = 1 };
+    const g2: layout_mod.Element = .{ .focusable = true, .tab_group = 1 };
+    const btn: layout_mod.Element = .{ .focusable = true };
+    const placements = [_]layout_mod.Placement{
+        .{ .element = &g0, .rect = r }, .{ .element = &g1, .rect = r },
+        .{ .element = &g2, .rect = r }, .{ .element = &btn, .rect = r },
+    };
     var m: M = .{};
+    const tab: event_mod.Event = .{ .key_down = .{ .key = .tab } };
     const down: event_mod.Event = .{ .key_down = .{ .key = .down } };
     const up: event_mod.Event = .{ .key_down = .{ .key = .up } };
-    // Nothing focused: Down passes through to onEvent.
-    _ = dispatch(M, Msg, &m, down, &placements);
-    try testing.expectEqual(@as(?usize, null), focusedIndex());
-    try testing.expectEqual(@as(usize, 1), m.keys);
-    // Tab → a(0); Down → b(1) → c(2) → wrap a(0); Up → c(2).
-    _ = dispatch(M, Msg, &m, .{ .key_down = .{ .key = .tab } }, &placements);
+
+    // Tab enters the group at its first row; arrows move within (wrap).
+    _ = dispatch(M, Msg, &m, tab, &placements);
+    try testing.expectEqual(@as(?usize, 0), focusedIndex());
     _ = dispatch(M, Msg, &m, down, &placements);
     try testing.expectEqual(@as(?usize, 1), focusedIndex());
     _ = dispatch(M, Msg, &m, down, &placements);
-    _ = dispatch(M, Msg, &m, down, &placements);
+    _ = dispatch(M, Msg, &m, down, &placements); // 2 → wrap 0
     try testing.expectEqual(@as(?usize, 0), focusedIndex());
-    _ = dispatch(M, Msg, &m, up, &placements);
+    _ = dispatch(M, Msg, &m, up, &placements); // 0 → wrap 2
     try testing.expectEqual(@as(?usize, 2), focusedIndex());
-    // Arrows while focused were consumed (onEvent count unchanged from the first).
+
+    // Tab leaves the whole group → the standalone button (one stop).
+    _ = dispatch(M, Msg, &m, tab, &placements);
+    try testing.expectEqual(@as(?usize, 3), focusedIndex());
+    // Arrows on a standalone control pass through to the app (not consumed).
+    _ = dispatch(M, Msg, &m, down, &placements);
+    try testing.expectEqual(@as(?usize, 3), focusedIndex());
     try testing.expectEqual(@as(usize, 1), m.keys);
+    // Tab wraps back to the group's first row; Shift+Tab returns to the button.
+    _ = dispatch(M, Msg, &m, tab, &placements);
+    try testing.expectEqual(@as(?usize, 0), focusedIndex());
+    _ = dispatch(M, Msg, &m, .{ .key_down = .{ .key = .tab, .mods = .{ .shift = true } } }, &placements);
+    try testing.expectEqual(@as(?usize, 3), focusedIndex());
     resetFocus();
 }
 

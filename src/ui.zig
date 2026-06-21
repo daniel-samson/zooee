@@ -82,6 +82,9 @@ pub const Box = struct {
     /// Messages dispatched when this box gains / loses keyboard focus (#310).
     on_focus: ?u32 = null,
     on_blur: ?u32 = null,
+    /// Roving-tabindex group id (#310): focusable boxes sharing a non-null id are
+    /// one tab stop, navigated internally with arrows (radio group / toolbar).
+    tab_group: ?u32 = null,
     children: []const Widget = &.{},
 };
 
@@ -142,6 +145,9 @@ pub const Selection = struct {
     label: []const u8 = "",
     disabled: bool = false,
     on_change: ?u32 = null,
+    /// Roving-tabindex group (#310): give the radios of one group the same id
+    /// (e.g. via `u.nextGroup()`) so they form a single Tab stop with arrow nav.
+    tab_group: ?u32 = null,
 };
 
 fn buttonPad(sz: ButtonSize) struct { x: f32, y: f32 } {
@@ -322,6 +328,16 @@ pub const Ui = struct {
     /// Active theme (#21): widget lowering resolves roles/surfaces from this, and
     /// apps can read it to build matching surfaces. Defaults to dark.
     theme: Theme = Theme.dark,
+    /// Monotonic counter for roving-tabindex group ids (#310): each list / radio
+    /// group / segmented control claims one so its items form a single tab stop.
+    /// Frame-local — ids only need to be distinct within one built tree.
+    group_seq: u32 = 0,
+
+    /// Claim a fresh roving-tabindex group id (#310).
+    pub fn nextGroup(self: *Ui) u32 {
+        self.group_seq += 1;
+        return self.group_seq;
+    }
 
     pub fn init(arena: std.mem.Allocator) Ui {
         return .{ .arena = arena };
@@ -419,6 +435,7 @@ pub const Ui = struct {
             .gap = 8,
             .on_click = if (opts.disabled) null else opts.on_change,
             .focusable = !opts.disabled, // joins the Tab order (#310)
+            .tab_group = opts.tab_group, // optional roving group (radios) (#310)
         }, children);
     }
 
@@ -526,6 +543,7 @@ pub const Ui = struct {
                     .focusable = b.focusable,
                     .on_focus = b.on_focus,
                     .on_blur = b.on_blur,
+                    .tab_group = b.tab_group,
                     .cursor = if (b.on_click != null) .pointer else null,
                     .children = kids,
                     .rect_style = .{
@@ -575,6 +593,9 @@ pub const Ui = struct {
                 };
             },
             .list => |l| {
+                // One roving-tabindex group for the whole list (#310/#16): the
+                // list is a single Tab stop, arrows move between its rows.
+                const gid = self.nextGroup();
                 const rows = try self.arena.alloc(*const Element, l.rows.len);
                 for (l.rows, 0..) |r, i| {
                     const row_el = try self.arena.create(Element);
@@ -610,6 +631,7 @@ pub const Ui = struct {
                             .gap = 8 * s,
                             .on_click = r.on_click,
                             .focusable = r.on_click != null, // arrow/Tab nav (#310/#16)
+                            .tab_group = if (r.on_click != null) gid else null, // one tab stop
                             .cursor = if (r.on_click != null) .pointer else null,
                             .padding = .symmetric(8 * s, 6 * s),
                             .children = kids,
