@@ -937,12 +937,22 @@ pub fn dispatchEvent(
 /// the scroll range — single primary window assumed (per-window/keyed state is
 /// the #5 follow-up). Apps/tests can read or reset it.
 var g_focus: ?usize = null;
+/// Whether the focus ring should show (`:focus-visible`, web parity): true when
+/// focus last moved by keyboard (Tab), false when it moved by a pointer click —
+/// so clicking a control focuses it without a ring, but Tabbing shows one.
+var g_focus_visible: bool = false;
 
 pub fn focusedIndex() ?usize {
     return g_focus;
 }
+/// Whether the focus ring should currently show (`:focus-visible`): true after
+/// keyboard focus, false after a mouse click. Backends gate ring drawing on it.
+pub fn focusVisible() bool {
+    return g_focus_visible;
+}
 pub fn resetFocus() void {
     g_focus = null;
+    g_focus_visible = false;
 }
 
 /// Number of focusable elements in the frame (the Tab order length).
@@ -980,6 +990,15 @@ pub fn focusedRect(placements: []const layout_mod.Placement) ?geometry.Rect {
     return if (focusedPlacement(placements)) |pl| pl.rect else null;
 }
 
+/// Activate the focused element's `on_click` (Enter/Space, web parity): returns
+/// the resulting Command, or null if nothing focusable is focused / has a click.
+fn activateFocused(comptime Model: type, comptime Msg: type, model: *Model, placements: []const layout_mod.Placement) ?Command {
+    if (focusedPlacement(placements)) |pl| {
+        if (pl.element.on_click) |m| return model.update(@as(Msg, @enumFromInt(m)));
+    }
+    return null;
+}
+
 /// Default focus-ring color (#310): the system accent blue. Provisional — the
 /// look (color/width/offset/radius) is the pixel-tunable part, and will resolve
 /// from the theme accent once focus rendering is themed.
@@ -989,6 +1008,7 @@ const focus_ring_color = style_mod.Color.rgb(10, 132, 255);
 /// just outside its border box, matching its corner radius. Loops call this
 /// after `render`. No-op when nothing is focused.
 pub fn renderFocusRing(b: backend_mod.Backend, placements: []const layout_mod.Placement) void {
+    if (!g_focus_visible) return; // :focus-visible — keyboard focus only
     const pl = focusedPlacement(placements) orelse return;
     const o: f32 = 2; // outset from the border box
     const ring: geometry.Rect = .{
@@ -1028,8 +1048,12 @@ fn dispatch(
         .pointer_down => |p| blk: {
             if (p.buttons.primary) {
                 // Click-to-focus (#310, web parity): a primary click moves focus
-                // to the focusable element under the pointer (if any).
-                if (focusIndexAt(placements, p.position)) |fi| g_focus = fi;
+                // to the focusable element under the pointer — but without a ring
+                // (:focus-visible shows only for keyboard focus).
+                if (focusIndexAt(placements, p.position)) |fi| {
+                    g_focus = fi;
+                    g_focus_visible = false;
+                }
                 if (hitMsg(placements, p.position, .click)) |m| {
                     break :blk model.update(@as(Msg, @enumFromInt(m)));
                 }
@@ -1061,12 +1085,20 @@ fn dispatch(
                 const n = focusableCount(placements);
                 if (n == 0) break :blk model.onEvent(ev);
                 g_focus = moveFocus(g_focus, n, k.mods.shift);
+                g_focus_visible = true; // keyboard focus → show the ring
                 break :blk .redraw;
             }
             if (k.key == .enter) {
-                if (focusedPlacement(placements)) |pl| {
-                    if (pl.element.on_click) |m| break :blk model.update(@as(Msg, @enumFromInt(m)));
-                }
+                if (activateFocused(Model, Msg, model, placements)) |cmd| break :blk cmd;
+            }
+            break :blk model.onEvent(ev);
+        },
+        // Space activates the focused control too (web parity), as long as it's a
+        // plain Space — otherwise it's ordinary text. (Once focusable text fields
+        // exist, the focused element's kind decides type-vs-activate.)
+        .text => |t| blk: {
+            if (t.codepoint == ' ' and !t.mods.ctrl and !t.mods.alt and !t.mods.super) {
+                if (activateFocused(Model, Msg, model, placements)) |cmd| break :blk cmd;
             }
             break :blk model.onEvent(ev);
         },
@@ -1300,6 +1332,41 @@ test "hitMsg picks the topmost interactive element" {
     try testing.expectEqual(@as(?u32, 2), hitMsg(&placements, .{ .x = 3, .y = 3 }, .click));
     try testing.expectEqual(@as(?u32, 1), hitMsg(&placements, .{ .x = 8, .y = 8 }, .click));
     try testing.expectEqual(@as(?u32, null), hitMsg(&placements, .{ .x = 50, .y = 50 }, .click));
+}
+
+test "Space activates the focused control; :focus-visible only on keyboard focus (#310)" {
+    resetFocus();
+    const Msg = enum(u32) { _ };
+    const M = struct {
+        activated: ?u32 = null,
+        pub fn update(self: *@This(), m: Msg) Command {
+            self.activated = @intFromEnum(m);
+            return .redraw;
+        }
+        pub fn onEvent(_: *@This(), _: event_mod.Event) Command {
+            return .none;
+        }
+    };
+    const r: geometry.Rect = .{ .x = 0, .y = 0, .width = 10, .height = 10 };
+    const btn: layout_mod.Element = .{ .focusable = true, .on_click = 7 };
+    const placements = [_]layout_mod.Placement{.{ .element = &btn, .rect = r }};
+    var m: M = .{};
+
+    // Tab → focus + ring visible; Space activates the focused control.
+    _ = dispatch(M, Msg, &m, .{ .key_down = .{ .key = .tab } }, &placements);
+    try testing.expect(focusVisible());
+    _ = dispatch(M, Msg, &m, .{ .text = .{ .codepoint = ' ' } }, &placements);
+    try testing.expectEqual(@as(?u32, 7), m.activated);
+
+    // Click-to-focus → focused, but the ring is hidden (:focus-visible off).
+    resetFocus();
+    _ = dispatch(M, Msg, &m, .{ .pointer_down = .{ .position = .{ .x = 5, .y = 5 }, .buttons = .{ .primary = true } } }, &placements);
+    try testing.expect(focusedIndex() != null);
+    try testing.expect(!focusVisible());
+    // Then Tab reveals the ring again.
+    _ = dispatch(M, Msg, &m, .{ .key_down = .{ .key = .tab } }, &placements);
+    try testing.expect(focusVisible());
+    resetFocus();
 }
 
 test "Tab moves focus in layout order, wraps; Enter activates; Shift+Tab reverses (#310)" {
