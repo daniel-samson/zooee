@@ -29,6 +29,7 @@ const pages = [_]Page{
 const sel_check: u32 = 2000;
 const sel_toggle: u32 = 2001;
 const sel_radio_base: u32 = 2010; // +0/+1/+2 for the three radio options
+const theme_toggle: u32 = 2500; // sidebar footer light/dark switch
 
 /// Live examples for the Selection page (#277): checkbox, toggle, radio group.
 fn selectionExamples(u: *ui.Ui, check_on: bool, toggle_on: bool, radio: usize) !Widget {
@@ -66,9 +67,6 @@ fn cardExamples(u: *ui.Ui) !Widget {
     });
 }
 
-/// Sidebar panel tone — just above the window backdrop (until vibrancy, #268).
-const sidebar_bg = Color.rgb(40, 40, 43);
-
 /// One half of the back/forward segmented control: a chevron centered in a cell.
 /// When enabled it's clickable + focusable and joins the segment's roving group
 /// (#310): the two cells are a single Tab stop with arrow nav between them.
@@ -91,7 +89,7 @@ fn navSegment(u: *ui.Ui, can_back: bool, can_fwd: bool) !Widget {
     const gid = u.nextGroup();
     return u.row(.{
         .corner_radius = 7,
-        .background = Color.rgb(50, 50, 53),
+        .background = u.theme.surface_variant, // tracks the theme (light/dark)
         .align_items = .center,
     }, &.{
         try navCell(u, .chevron_left, gid, nav_back, can_back),
@@ -252,6 +250,7 @@ const Docs = struct {
     dragging: bool = false, // divider drag in progress
     drag_offset: f32 = 0, // pointer-to-divider gap at grab (device px), so the line tracks exactly
     scale: f32 = 1, // captured each frame so onEvent can map device px → logical
+    dark: bool = true, // light/dark theme, toggled from the sidebar footer
 
     pub fn viewUi(self: *Docs, u: *ui.Ui) !Widget {
         self.scale = u.scale; // for the divider-drag math in onEvent
@@ -273,7 +272,7 @@ const Docs = struct {
         const sidebar_inner = try u.column(.{
             .grow = 1,
             .corner_radius = 10,
-            .background = sidebar_bg,
+            .background = if (self.dark) Color.rgb(40, 40, 43) else Color.rgb(232, 232, 237),
             .padding = .{ .top = 34, .left = 10, .right = 10, .bottom = 10 },
         }, &.{
             // The list scrolls within the sidebar when it's taller than the pane.
@@ -284,9 +283,10 @@ const Docs = struct {
                 .on_scroll = sidebar_scroll_id,
             }, &.{try u.list(.{ .selected = sel_row }, rowlist.items)}),
             u.divider(.column),
+            // Light/dark mode switch (replaces the old wordmark).
             try u.row(.{ .align_items = .center, .gap = 8, .padding = .all(6) }, &.{
-                u.icon(.{ .name = .circle, .size = 16, .role = .secondary }),
-                u.text("zooee", .{ .variant = .caption, .role = .secondary }),
+                u.icon(.{ .name = if (self.dark) .moon else .sun, .size = 16, .role = .secondary }),
+                try u.toggle(.{ .checked = self.dark, .label = "Dark mode", .on_change = theme_toggle }),
             }),
         });
         const sidebar = try u.column(.{ .grow = 1, .padding = .{ .top = 8, .left = 8, .right = 4, .bottom = 8 } }, &.{sidebar_inner});
@@ -350,6 +350,9 @@ const Docs = struct {
         } else if (raw >= sel_radio_base and raw < sel_radio_base + 3) {
             self.sel_radio = raw - sel_radio_base;
             return .redraw;
+        } else if (raw == theme_toggle) {
+            self.dark = !self.dark;
+            return .redraw;
         }
         // Toolbar back/forward (the roving-group example): step the page.
         if (raw == nav_back) {
@@ -410,10 +413,10 @@ const Docs = struct {
         return .none;
     }
 
-    /// The active theme (#21): widgets + the backdrop resolve from it.
+    /// The active theme (#21): widgets + the backdrop resolve from it. Flipping
+    /// `dark` (the sidebar footer switch) swaps the whole UI light ⇆ dark.
     pub fn theme(self: *Docs) ui.Theme {
-        _ = self;
-        return ui.Theme.dark;
+        return if (self.dark) ui.Theme.dark else ui.Theme.light;
     }
 
     pub fn background(self: *Docs) Color {
