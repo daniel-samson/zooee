@@ -2116,27 +2116,18 @@ const exact_hlsl =
     \\  o.pos = float4(i.pos.x / viewport.x * 2.0 - 1.0, 1.0 - i.pos.y / viewport.y * 2.0, 0, 1);
     \\  return o;
     \\}
-    \\bool cornerOut(float2 p, float trad, float cx, float cy, bool left, bool top) {
-    \\  if (trad <= 0.0) return false;
-    \\  bool in_x = left ? (p.x < cx) : (p.x > cx);
-    \\  bool in_y = top  ? (p.y < cy) : (p.y > cy);
-    \\  if (in_x && in_y) { float dx = p.x-cx; float dy = p.y-cy; return dx*dx+dy*dy > trad*trad; }
-    \\  return false;
+    \\// IQ per-corner rounded-box SDF — mirrors raster.sdRoundRect exactly so
+    \\// GPU==raster coverage holds. rd = (tl,tr,br,bl); y-down quadrant select.
+    \\float sdRoundRect(float4 r, float4 rd, float2 p) {
+    \\  float2 hs = r.zw * 0.5;
+    \\  float maxr = min(hs.x, hs.y);
+    \\  float2 q = p - (r.xy + hs);
+    \\  float rr = (q.x > 0.0) ? ((q.y > 0.0) ? rd.z : rd.y) : ((q.y > 0.0) ? rd.w : rd.x);
+    \\  rr = min(rr, maxr);
+    \\  float2 e = abs(q) - hs + rr;
+    \\  return length(max(e, 0.0)) + min(max(e.x, e.y), 0.0) - rr;
     \\}
-    \\bool insideRounded(float4 r, float4 rd, float2 p) {
-    \\  if (p.x < r.x || p.x >= r.x + r.z || p.y < r.y || p.y >= r.y + r.w) return false;
-    \\  float mx = min(r.z, r.w) * 0.5;
-    \\  // Clamp each corner radius BEFORE placing its center, and pass each
-    \\  // corner's outward direction explicitly — inferring it from
-    \\  // center-vs-midline fails for an exact pill (all centers on the midline).
-    \\  float tl = min(rd.x, mx); float tr = min(rd.y, mx);
-    \\  float br = min(rd.z, mx); float bl = min(rd.w, mx);
-    \\  if (cornerOut(p, tl, r.x + tl,       r.y + tl,       true,  true )) return false;
-    \\  if (cornerOut(p, tr, r.x + r.z - tr, r.y + tr,       false, true )) return false;
-    \\  if (cornerOut(p, br, r.x + r.z - br, r.y + r.w - br, false, false)) return false;
-    \\  if (cornerOut(p, bl, r.x + bl,       r.y + r.w - bl, true,  false)) return false;
-    \\  return true;
-    \\}
+    \\float covRR(float4 r, float4 rd, float2 p) { return clamp(0.5 - sdRoundRect(r, rd, p), 0.0, 1.0); }
     \\float4 borderColorAt(float2 p) {
     \\  if (p.x < rect.x + rad.x && p.y < rect.y + rad.x) return (bw.x > 0.0) ? ct : cl;
     \\  if (p.x >= rect.x + rect.z - rad.y && p.y < rect.y + rad.y) return (bw.x > 0.0) ? ct : cr;
@@ -2149,10 +2140,24 @@ const exact_hlsl =
     \\}
     \\float4 PSMain(VSOut i) : SV_TARGET {
     \\  float2 p = i.pos.xy; // pixel center, top-left origin — no flip
-    \\  if (!insideRounded(rect, rad, p)) { discard; }
+    \\  float outer = covRR(rect, rad, p);
+    \\  if (outer <= 0.0) { discard; }
     \\  bool has_border = (bw.x + bw.y + bw.z + bw.w) > 0.0;
-    \\  if (has_border && !insideRounded(inner, irad, p)) return borderColorAt(p);
-    \\  if (flags.x > 0.5) return bg;
+    \\  if (has_border) {
+    \\    // Single-fragment equivalent of raster's two-pass source-over (border
+    \\    // ring under fill): Sa = ra+fa-ra*fa keeps a translucent fill from
+    \\    // revealing the border beneath it.
+    \\    float fillc = covRR(inner, irad, p);
+    \\    float ring = clamp(outer - fillc, 0.0, 1.0);
+    \\    float4 bcol = borderColorAt(p);
+    \\    float ra = bcol.a * ring;
+    \\    float fa = (flags.x > 0.5 ? bg.a : 0.0) * fillc;
+    \\    float Sa = ra + fa - ra * fa;
+    \\    if (Sa <= 0.0) { discard; }
+    \\    float3 Sp = bg.rgb * fa + bcol.rgb * ra * (1.0 - fa);
+    \\    return float4(Sp / Sa, Sa);
+    \\  }
+    \\  if (flags.x > 0.5) return float4(bg.rgb, bg.a * outer);
     \\  discard;
     \\  return float4(0,0,0,0);
     \\}
@@ -2259,10 +2264,11 @@ pub const D3dExactRectRenderer = struct {
         if (!ok(dev.vtbl.CreateBuffer(dev, &cb_desc, &cb_data, &cb)) or cb == null) return error.ShaderFailed;
         defer release(cb.?);
 
-        const x0 = rect.x;
-        const y0 = rect.y;
-        const x1 = rect.x + rect.width;
-        const y1 = rect.y + rect.height;
+        // Inflate the quad 1px so the anti-aliased outer edge has fragments (#314).
+        const x0 = rect.x - 1;
+        const y0 = rect.y - 1;
+        const x1 = rect.x + rect.width + 1;
+        const y1 = rect.y + rect.height + 1;
         const verts = [_]f32{ x0, y0, x1, y0, x0, y1, x1, y1 };
         var vb_data: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = &verts };
         var vb_desc: D3D11_BUFFER_DESC = .{ .byte_width = @sizeOf(@TypeOf(verts)), .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_VERTEX_BUFFER };

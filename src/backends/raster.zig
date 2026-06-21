@@ -99,6 +99,10 @@ pub const RasterBackend = struct {
         fn offset(self: IRect, dx: i32, dy: i32) IRect {
             return .{ .x0 = self.x0 + dx, .y0 = self.y0 + dy, .x1 = self.x1 + dx, .y1 = self.y1 + dy };
         }
+
+        fn inflate(self: IRect, m: i32) IRect {
+            return .{ .x0 = self.x0 - m, .y0 = self.y0 - m, .x1 = self.x1 + m, .y1 = self.y1 + m };
+        }
     };
 
     /// A clip-stack entry: an integer bounds rect plus, for rounded clips
@@ -304,6 +308,40 @@ pub const RasterBackend = struct {
         return true;
     }
 
+    /// Signed distance from pixel center (px,py) to the per-corner rounded-rect
+    /// boundary — negative inside, positive outside (#314). This is the IQ
+    /// rounded-box SDF; the GPU shaders (Metal/D3D11/GL) mirror it byte-for-byte
+    /// so coverage-based AA stays GPU==raster pixel-exact.
+    fn sdRoundRect(r: Rect, radius: style.CornerRadius, px: f32, py: f32) f32 {
+        const hx = r.width / 2;
+        const hy = r.height / 2;
+        const max_rad = @min(hx, hy);
+        const qx = px - (r.x + hx);
+        const qy = py - (r.y + hy);
+        // y-down: qy>0 selects the bottom corners, qx>0 the right corners.
+        const rad_raw = if (qx > 0)
+            (if (qy > 0) radius.bottom_right else radius.top_right)
+        else
+            (if (qy > 0) radius.bottom_left else radius.top_left);
+        const rad = @min(rad_raw, max_rad);
+        const ex = @abs(qx) - hx + rad;
+        const ey = @abs(qy) - hy + rad;
+        const ox = @max(ex, 0);
+        const oy = @max(ey, 0);
+        return @sqrt(ox * ox + oy * oy) + @min(@max(ex, ey), 0) - rad;
+    }
+
+    /// Fractional pixel coverage [0,1] of the rounded rect via a 1px box filter
+    /// of the signed distance — gives ~1px anti-aliased edges (#314).
+    fn coverageRounded(r: Rect, radius: style.CornerRadius, px: f32, py: f32) f32 {
+        return std.math.clamp(0.5 - sdRoundRect(r, radius, px, py), 0, 1);
+    }
+
+    /// Scale a color's alpha by a coverage fraction (for AA edge blending).
+    fn scaleAlpha(c: Color, cov: f32) Color {
+        return .{ .r = c.r, .g = c.g, .b = c.b, .a = @intFromFloat(@round(cov * @as(f32, @floatFromInt(c.a)))) };
+    }
+
     /// Paint a box shadow (#119) behind the rect: analytic Gaussian coverage
     /// (style.BoxShadow.coverage) blended as the shadow color, over the
     /// expanded bounds that capture the blur tail.
@@ -353,7 +391,8 @@ pub const RasterBackend = struct {
     fn drawRect(ptr: *anyopaque, rect: Rect, rect_style: style.RectStyle) void {
         const self = self_(ptr);
         if (rect_style.shadow) |sh| if (!sh.inset) self.drawShadow(rect, sh);
-        const bounds = IRect.fromRect(rect).intersect(self.currentClip());
+        // Inflate by 1px so the anti-aliased outer edge isn't clipped away.
+        const bounds = IRect.fromRect(rect).inflate(1).intersect(self.currentClip());
         if (bounds.isEmpty()) {
             // Even with no fill bounds, an inset shadow may still apply.
             if (rect_style.shadow) |sh| if (sh.inset) self.drawInsetShadow(rect, sh, rect_style.corner_radius);
@@ -382,14 +421,28 @@ pub const RasterBackend = struct {
             while (x < bounds.x1) : (x += 1) {
                 const px = @as(f32, @floatFromInt(x)) + 0.5;
                 const py = @as(f32, @floatFromInt(y)) + 0.5;
-                if (!insideRounded(rect, rect_style.corner_radius, px, py)) continue;
-                const in_inner = insideRounded(inner, inner_radius, px, py);
-                if (has_border and !in_inner) {
-                    self.setPixel(x, y, borderColorAt(rect, rect_style, inner, px, py));
+                // Coverage-based AA (#314): the outer shape feathers over ~1px;
+                // a border is the ring between the outer and inner coverages so a
+                // translucent fill never shows the border bleeding through.
+                const outer = coverageRounded(rect, rect_style.corner_radius, px, py);
+                if (outer <= 0) continue;
+                if (has_border) {
+                    const fill = coverageRounded(inner, inner_radius, px, py);
+                    const ring = std.math.clamp(outer - fill, 0, 1);
+                    if (ring > 0) {
+                        self.setPixel(x, y, scaleAlpha(borderColorAt(rect, rect_style, inner, px, py), ring));
+                    }
+                    if (fill > 0) {
+                        if (rect_style.gradient) |g| {
+                            self.setPixel(x, y, scaleAlpha(g.colorAt(rect.x, rect.y, rect.width, rect.height, px, py), fill));
+                        } else if (rect_style.background) |bg| {
+                            self.setPixel(x, y, scaleAlpha(bg, fill));
+                        }
+                    }
                 } else if (rect_style.gradient) |g| {
-                    self.setPixel(x, y, g.colorAt(rect.x, rect.y, rect.width, rect.height, px, py));
+                    self.setPixel(x, y, scaleAlpha(g.colorAt(rect.x, rect.y, rect.width, rect.height, px, py), outer));
                 } else if (rect_style.background) |bg| {
-                    self.setPixel(x, y, bg);
+                    self.setPixel(x, y, scaleAlpha(bg, outer));
                 }
             }
         }

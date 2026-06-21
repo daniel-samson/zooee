@@ -1351,28 +1351,18 @@ const exact_frag: [*:0]const u8 =
     \\uniform vec4 cr;
     \\uniform vec4 cb;
     \\uniform vec4 cl;
-    \\bool cornerOut(vec2 p, float trad, float cx, float cy, bool left, bool top) {
-    \\  // p is outside the shape if it lies past this corner's quarter-circle.
-    \\  if (trad <= 0.0) return false;
-    \\  bool in_x = left ? (p.x < cx) : (p.x > cx);
-    \\  bool in_y = top  ? (p.y < cy) : (p.y > cy);
-    \\  if (in_x && in_y) { float dx = p.x-cx; float dy = p.y-cy; return dx*dx+dy*dy > trad*trad; }
-    \\  return false;
+    \\// IQ per-corner rounded-box SDF — mirrors raster.sdRoundRect exactly so
+    \\// GPU==raster coverage holds. rd = (tl,tr,br,bl); y-down quadrant select.
+    \\float sdRoundRect(vec4 r, vec4 rd, vec2 p) {
+    \\  vec2 hs = r.zw * 0.5;
+    \\  float maxr = min(hs.x, hs.y);
+    \\  vec2 q = p - (r.xy + hs);
+    \\  float rr = (q.x > 0.0) ? ((q.y > 0.0) ? rd.z : rd.y) : ((q.y > 0.0) ? rd.w : rd.x);
+    \\  rr = min(rr, maxr);
+    \\  vec2 e = abs(q) - hs + rr;
+    \\  return length(max(e, 0.0)) + min(max(e.x, e.y), 0.0) - rr;
     \\}
-    \\bool insideRounded(vec4 r, vec4 rd, vec2 p) {
-    \\  if (p.x < r.x || p.x >= r.x + r.z || p.y < r.y || p.y >= r.y + r.w) return false;
-    \\  float mx = min(r.z, r.w) * 0.5;
-    \\  // Clamp each corner radius BEFORE placing its center, and pass each
-    \\  // corner's outward direction explicitly — inferring it from
-    \\  // center-vs-midline fails for an exact pill (all centers on the midline).
-    \\  float tl = min(rd.x, mx); float tr = min(rd.y, mx);
-    \\  float br = min(rd.z, mx); float bl = min(rd.w, mx);
-    \\  if (cornerOut(p, tl, r.x + tl,        r.y + tl,        true,  true )) return false; // tl
-    \\  if (cornerOut(p, tr, r.x + r.z - tr,  r.y + tr,        false, true )) return false; // tr
-    \\  if (cornerOut(p, br, r.x + r.z - br,  r.y + r.w - br,  false, false)) return false; // br
-    \\  if (cornerOut(p, bl, r.x + bl,        r.y + r.w - bl,  true,  false)) return false; // bl
-    \\  return true;
-    \\}
+    \\float covRR(vec4 r, vec4 rd, vec2 p) { return clamp(0.5 - sdRoundRect(r, rd, p), 0.0, 1.0); }
     \\vec4 borderColorAt(vec2 p) {
     \\  if (p.x < rect.x + rad.x && p.y < rect.y + rad.x) return (bw.x > 0.0) ? ct : cl;
     \\  if (p.x >= rect.x + rect.z - rad.y && p.y < rect.y + rad.y) return (bw.x > 0.0) ? ct : cr;
@@ -1385,10 +1375,25 @@ const exact_frag: [*:0]const u8 =
     \\}
     \\void main() {
     \\  vec2 p = vec2(gl_FragCoord.x, viewport.y - gl_FragCoord.y);
-    \\  if (!insideRounded(rect, rad, p)) discard;
+    \\  float outer = covRR(rect, rad, p);
+    \\  if (outer <= 0.0) discard;
     \\  bool has_border = (bw.x + bw.y + bw.z + bw.w) > 0.0;
-    \\  if (has_border && !insideRounded(inner, irad, p)) { gl_FragColor = borderColorAt(p); return; }
-    \\  if (has_bg > 0.5) { gl_FragColor = bg; return; }
+    \\  if (has_border) {
+    \\    // Single-fragment equivalent of raster's two-pass source-over (border
+    \\    // ring under fill): Sa = ra+fa-ra*fa keeps a translucent fill from
+    \\    // revealing the border beneath it.
+    \\    float fillc = covRR(inner, irad, p);
+    \\    float ring = clamp(outer - fillc, 0.0, 1.0);
+    \\    vec4 bcol = borderColorAt(p);
+    \\    float ra = bcol.a * ring;
+    \\    float fa = (has_bg > 0.5 ? bg.a : 0.0) * fillc;
+    \\    float Sa = ra + fa - ra * fa;
+    \\    if (Sa <= 0.0) discard;
+    \\    vec3 Sp = bg.rgb * fa + bcol.rgb * ra * (1.0 - fa);
+    \\    gl_FragColor = vec4(Sp / Sa, Sa);
+    \\    return;
+    \\  }
+    \\  if (has_bg > 0.5) { gl_FragColor = vec4(bg.rgb, bg.a * outer); return; }
     \\  discard;
     \\}
 ;
@@ -1499,10 +1504,11 @@ pub const ExactRectRenderer = struct {
         gl.uniform4f(self.u.cb, cb[0], cb[1], cb[2], cb[3]);
         gl.uniform4f(self.u.cl, cll[0], cll[1], cll[2], cll[3]);
 
-        const x0 = rect.x;
-        const y0 = rect.y;
-        const x1 = rect.x + rect.width;
-        const y1 = rect.y + rect.height;
+        // Inflate the quad 1px so the anti-aliased outer edge has fragments (#314).
+        const x0 = rect.x - 1;
+        const y0 = rect.y - 1;
+        const x1 = rect.x + rect.width + 1;
+        const y1 = rect.y + rect.height + 1;
         const verts = [_]f32{ x0, y0, x1, y0, x0, y1, x1, y1 };
         gl.bindVertexArray(self.vao);
         gl.bindBuffer(GL_ARRAY_BUFFER, self.vbo);

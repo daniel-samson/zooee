@@ -829,32 +829,22 @@ pub const MetalExactRectRenderer = struct {
         \\struct U { float4 viewport_hasbg; float4 rect; float4 rad; float4 inner; float4 irad; float4 bw; float4 bg; float4 ct; float4 cr; float4 cb; float4 cl; };
         \\vertex float4 v_main(uint vid [[vertex_id]], constant U& u [[buffer(0)]]) {
         \\    float2 corner[4] = { float2(0,0), float2(1,0), float2(0,1), float2(1,1) };
-        \\    float2 px = u.rect.xy + corner[vid] * u.rect.zw;
+        \\    // Inflate the quad 1px so the anti-aliased outer edge has fragments.
+        \\    float2 px = u.rect.xy - 1.0 + corner[vid] * (u.rect.zw + 2.0);
         \\    return float4(px.x / u.viewport_hasbg.x * 2.0 - 1.0, 1.0 - px.y / u.viewport_hasbg.y * 2.0, 0, 1);
         \\}
-        \\static bool cornerOut(float2 p, float trad, float cx, float cy, bool left, bool top) {
-        \\    if (trad <= 0.0) return false;
-        \\    bool in_x = left ? (p.x < cx) : (p.x > cx);
-        \\    bool in_y = top  ? (p.y < cy) : (p.y > cy);
-        \\    if (in_x && in_y) { float dx = p.x - cx; float dy = p.y - cy; return dx*dx + dy*dy > trad*trad; }
-        \\    return false;
+        \\// IQ per-corner rounded-box SDF — mirrors raster.sdRoundRect exactly so
+        \\// GPU==raster coverage holds. rd = (tl,tr,br,bl); y-down quadrant select.
+        \\static float sdRoundRect(float4 r, float4 rd, float2 p) {
+        \\    float2 hs = r.zw * 0.5;
+        \\    float maxr = min(hs.x, hs.y);
+        \\    float2 q = p - (r.xy + hs);
+        \\    float rr = (q.x > 0.0) ? ((q.y > 0.0) ? rd.z : rd.y) : ((q.y > 0.0) ? rd.w : rd.x);
+        \\    rr = min(rr, maxr);
+        \\    float2 e = abs(q) - hs + rr;
+        \\    return length(max(e, 0.0)) + min(max(e.x, e.y), 0.0) - rr;
         \\}
-        \\static bool insideRounded(float4 r, float4 rd, float2 p) {
-        \\    if (p.x < r.x || p.x >= r.x + r.z || p.y < r.y || p.y >= r.y + r.w) return false;
-        \\    float mx = min(r.z, r.w) * 0.5;
-        \\    // Clamp each corner radius BEFORE placing its center (so a radius past
-        \\    // half-height can't push the center past the midline), and pass each
-        \\    // corner's outward direction explicitly — inferring it from
-        \\    // center-vs-midline fails for an exact pill, where all centers sit on
-        \\    // the midline and the bottom corners would test the wrong half.
-        \\    float tl = min(rd.x, mx); float tr = min(rd.y, mx);
-        \\    float br = min(rd.z, mx); float bl = min(rd.w, mx);
-        \\    if (cornerOut(p, tl, r.x + tl,       r.y + tl,       true,  true )) return false;
-        \\    if (cornerOut(p, tr, r.x + r.z - tr, r.y + tr,       false, true )) return false;
-        \\    if (cornerOut(p, br, r.x + r.z - br, r.y + r.w - br, false, false)) return false;
-        \\    if (cornerOut(p, bl, r.x + bl,       r.y + r.w - bl, true,  false)) return false;
-        \\    return true;
-        \\}
+        \\static float covRR(float4 r, float4 rd, float2 p) { return clamp(0.5 - sdRoundRect(r, rd, p), 0.0, 1.0); }
         \\static float4 borderColorAt(constant U& u, float2 p) {
         \\    if (p.x < u.rect.x + u.rad.x && p.y < u.rect.y + u.rad.x) return (u.bw.x > 0.0) ? u.ct : u.cl;
         \\    if (p.x >= u.rect.x + u.rect.z - u.rad.y && p.y < u.rect.y + u.rad.y) return (u.bw.x > 0.0) ? u.ct : u.cr;
@@ -867,12 +857,26 @@ pub const MetalExactRectRenderer = struct {
         \\}
         \\fragment float4 f_main(float4 fragpos [[position]], constant U& u [[buffer(0)]]) {
         \\    float2 p = fragpos.xy;
-        \\    if (!insideRounded(u.rect, u.rad, p)) discard_fragment();
+        \\    float outer = covRR(u.rect, u.rad, p);
+        \\    if (outer <= 0.0) discard_fragment();
         \\    bool has_border = (u.bw.x + u.bw.y + u.bw.z + u.bw.w) > 0.0;
-        \\    if (has_border && !insideRounded(u.inner, u.irad, p)) return borderColorAt(u, p);
-        \\    if (u.viewport_hasbg.z > 0.5) return u.bg;
-        \\    discard_fragment();
-        \\    return float4(0);
+        \\    float hasbg = u.viewport_hasbg.z;
+        \\    if (has_border) {
+        \\        // Single-fragment equivalent of raster's two-pass source-over
+        \\        // (border ring under fill): Sa = ra+fa-ra*fa keeps a translucent
+        \\        // fill from revealing the border beneath it.
+        \\        float fill = covRR(u.inner, u.irad, p);
+        \\        float ring = clamp(outer - fill, 0.0, 1.0);
+        \\        float4 bcol = borderColorAt(u, p);
+        \\        float ra = bcol.a * ring;
+        \\        float fa = (hasbg > 0.5 ? u.bg.a : 0.0) * fill;
+        \\        float Sa = ra + fa - ra * fa;
+        \\        if (Sa <= 0.0) discard_fragment();
+        \\        float3 Sp = u.bg.rgb * fa + bcol.rgb * ra * (1.0 - fa);
+        \\        return float4(Sp / Sa, Sa);
+        \\    }
+        \\    if (hasbg <= 0.5) discard_fragment();
+        \\    return float4(u.bg.rgb, u.bg.a * outer);
         \\}
     ;
 

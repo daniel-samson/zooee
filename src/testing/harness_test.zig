@@ -148,10 +148,10 @@ const RasterGolden = struct {
 // FNV-1a of the RGBA framebuffer at scale 8. On mismatch the actual hash
 // is printed; update deliberately when a scene/renderer change is intended.
 const raster_goldens = [_]RasterGolden{
-    .{ .name = "card", .hash = 0x72977d425223cbb },
+    .{ .name = "card", .hash = 0x9b1b64d3f174f163 },
     .{ .name = "nested_clip", .hash = 0x802b0f2a3db4bb25 },
     .{ .name = "overlap", .hash = 0xc6478bd603cbc525 },
-    .{ .name = "sides", .hash = 0xcc939316ad5d00b9 },
+    .{ .name = "sides", .hash = 0x1610961fa746f7eb },
     .{ .name = "layout_card", .hash = 0xb69813e5bdc834c },
     .{ .name = "hello_text", .hash = 0xc72d0c60fbbb6bbb },
     .{ .name = "image", .hash = 0x8b0e08f61841725 },
