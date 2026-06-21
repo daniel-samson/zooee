@@ -246,6 +246,7 @@ pub fn layout(
 /// effects (opacity #121, rounded clip #117) wrap a whole subtree with
 /// balanced push/pop.
 pub fn render(b: Backend, result: LayoutResult) void {
+    g_scrollbar_n = 0; // rebuild the drawn-scrollbar list for drag hit-testing (#312)
     var i: usize = 0;
     if (result.placements.len > 0) renderNode(b, result.placements, &i);
 }
@@ -262,11 +263,41 @@ const ScrollBars = struct {
     sy: f32,
     show_v: bool,
     show_h: bool,
+    scroll_id: u32, // el.on_scroll (0 = none) — routes a thumb drag (#312)
 };
+
+/// A drawn scrollbar thumb (device px), recorded each frame so the app loop can
+/// hit-test it for dragging (#312).
+pub const Scrollbar = struct {
+    thumb: Rect,
+    vertical: bool,
+    track_start: f32, // along the axis (cbox.y or cbox.x)
+    track_len: f32,
+    thumb_len: f32,
+    max_offset: f32, // ext − cbox along the axis
+    offset: f32, // current scroll offset (sy or sx)
+    scroll_id: u32,
+};
+var g_scrollbars: [32]Scrollbar = undefined;
+var g_scrollbar_n: usize = 0;
+
+/// The scrollbar thumbs drawn this frame (for drag hit-testing). Rebuilt by
+/// `render`; valid until the next render.
+pub fn scrollbars() []const Scrollbar {
+    return g_scrollbars[0..g_scrollbar_n];
+}
+
+fn recordScrollbar(sb: Scrollbar) void {
+    if (g_scrollbar_n < g_scrollbars.len) {
+        g_scrollbars[g_scrollbar_n] = sb;
+        g_scrollbar_n += 1;
+    }
+}
 
 /// Draw the scrollbar thumb(s) for a scroll container (#312): a rounded bar along
 /// the overflowing axis, sized to the viewport/content ratio and positioned by
-/// the scroll offset. Drawn in unscrolled container space, on top of content.
+/// the scroll offset. Drawn in unscrolled container space, on top of content;
+/// records each thumb's geometry for drag hit-testing.
 fn drawScrollbars(b: Backend, sb: ScrollBars) void {
     const bw: f32 = 6; // bar thickness
     const min_thumb: f32 = 18;
@@ -276,7 +307,9 @@ fn drawScrollbars(b: Backend, sb: ScrollBars) void {
         const maxoff = sb.ext.height - sb.cbox.height;
         const t = if (maxoff > 0) std.math.clamp(sb.sy / maxoff, 0, 1) else 0;
         const ty = sb.cbox.y + t * (track - thumb);
-        b.drawRect(.{ .x = sb.cbox.x + sb.cbox.width - bw, .y = ty, .width = bw, .height = thumb }, .{ .background = scrollbar_thumb, .corner_radius = style.CornerRadius.all(bw / 2) });
+        const rect: Rect = .{ .x = sb.cbox.x + sb.cbox.width - bw, .y = ty, .width = bw, .height = thumb };
+        b.drawRect(rect, .{ .background = scrollbar_thumb, .corner_radius = style.CornerRadius.all(bw / 2) });
+        recordScrollbar(.{ .thumb = rect, .vertical = true, .track_start = sb.cbox.y, .track_len = track, .thumb_len = thumb, .max_offset = maxoff, .offset = sb.sy, .scroll_id = sb.scroll_id });
     }
     if (sb.show_h and sb.ext.width > sb.cbox.width) {
         const track = sb.cbox.width;
@@ -284,7 +317,9 @@ fn drawScrollbars(b: Backend, sb: ScrollBars) void {
         const maxoff = sb.ext.width - sb.cbox.width;
         const t = if (maxoff > 0) std.math.clamp(sb.sx / maxoff, 0, 1) else 0;
         const tx = sb.cbox.x + t * (track - thumb);
-        b.drawRect(.{ .x = tx, .y = sb.cbox.y + sb.cbox.height - bw, .width = thumb, .height = bw }, .{ .background = scrollbar_thumb, .corner_radius = style.CornerRadius.all(bw / 2) });
+        const rect: Rect = .{ .x = tx, .y = sb.cbox.y + sb.cbox.height - bw, .width = thumb, .height = bw };
+        b.drawRect(rect, .{ .background = scrollbar_thumb, .corner_radius = style.CornerRadius.all(bw / 2) });
+        recordScrollbar(.{ .thumb = rect, .vertical = false, .track_start = sb.cbox.x, .track_len = track, .thumb_len = thumb, .max_offset = maxoff, .offset = sb.sx, .scroll_id = sb.scroll_id });
     }
 }
 
@@ -381,7 +416,7 @@ fn renderNode(b: Backend, placements: []const Placement, i: *usize) void {
             b.pushTranslate(-sx, -sy);
             scrolling = true;
             // Show a scrollbar on an axis that pans AND overflows (#312).
-            bars = .{ .cbox = cbox, .ext = ext, .sx = sx, .sy = sy, .show_v = pan_y and over_y, .show_h = pan_x and over_x };
+            bars = .{ .cbox = cbox, .ext = ext, .sx = sx, .sy = sy, .show_v = pan_y and over_y, .show_h = pan_x and over_x, .scroll_id = el.on_scroll orelse 0 };
         }
     }
     for (el.children) |_| renderNode(b, placements, i);

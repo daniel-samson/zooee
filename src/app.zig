@@ -34,6 +34,7 @@ const dialog = @import("dialog.zig");
 /// `view(arena, scale) *Element` contract. Lets models adopt the widget API
 /// without changing the loops.
 pub fn buildTree(comptime Model: type, model: *Model, arena: std.mem.Allocator, scale: f32) !*const layout_mod.Element {
+    g_scale = scale; // for device→logical conversion in scrollbar drag (#312)
     if (@hasDecl(Model, "viewUi")) {
         var u = ui_mod.Ui.init(arena);
         u.scale = scale;
@@ -959,6 +960,56 @@ var g_scroll_target: ?u32 = null;
 pub fn scrollTarget() ?u32 {
     return g_scroll_target;
 }
+
+/// Device-pixel scale for the current frame (set in buildTree), used to convert
+/// a device-space scrollbar drag back to the app's logical scroll offset (#312).
+var g_scale: f32 = 1;
+
+/// An in-progress scrollbar thumb drag (#312).
+const BarDrag = struct {
+    scroll_id: u32,
+    vertical: bool,
+    grab: f32, // pointer-to-thumb-start offset along the axis at grab time (device)
+};
+var g_bar_drag: ?BarDrag = null;
+
+/// A primary-button press over a scrollbar thumb starts a drag (#312). Returns
+/// true if a thumb was grabbed (the press is consumed).
+fn beginBarDrag(p: geometry.Point) bool {
+    for (layout_mod.scrollbars()) |sb| {
+        if (!sb.thumb.contains(p)) continue;
+        const along = if (sb.vertical) p.y else p.x;
+        const thumb_start = if (sb.vertical) sb.thumb.y else sb.thumb.x;
+        g_bar_drag = .{ .scroll_id = sb.scroll_id, .vertical = sb.vertical, .grab = along - thumb_start };
+        return true;
+    }
+    return false;
+}
+
+/// While dragging a thumb, map the pointer to the target offset and deliver a
+/// pixel-unit scroll (in logical units) to the dragged region so it tracks the
+/// cursor (#312). The app applies it like any wheel scroll (pixel step = 1).
+fn dragBar(comptime Model: type, model: *Model, p: geometry.Point) void {
+    const drag = g_bar_drag orelse return;
+    for (layout_mod.scrollbars()) |sb| {
+        if (sb.scroll_id != drag.scroll_id or sb.vertical != drag.vertical) continue;
+        const avail = sb.track_len - sb.thumb_len;
+        if (avail <= 0) return;
+        const along = if (drag.vertical) p.y else p.x;
+        const t = std.math.clamp((along - drag.grab - sb.track_start) / avail, 0, 1);
+        const target = t * sb.max_offset; // device px
+        const delta_logical = (target - sb.offset) / (if (g_scale > 0) g_scale else 1);
+        if (delta_logical == 0) return;
+        g_scroll_target = drag.scroll_id;
+        _ = model.onEvent(.{ .scroll = .{
+            .position = p,
+            .dx = if (drag.vertical) 0 else delta_logical,
+            .dy = if (drag.vertical) delta_logical else 0,
+            .unit = .pixel,
+        } });
+        return;
+    }
+}
 pub fn resetFocus() void {
     g_focus = null;
     g_focus_visible = false;
@@ -1113,6 +1164,8 @@ fn dispatch(
         .resized => .redraw,
         .pointer_down => |p| blk: {
             if (p.buttons.primary) {
+                // Grab a scrollbar thumb if the press landed on one (#312).
+                if (beginBarDrag(p.position)) break :blk .redraw;
                 // Click-to-focus (#310, web parity): a primary click moves focus
                 // to the focusable element under the pointer — but without a ring
                 // (:focus-visible shows only for keyboard focus).
@@ -1126,7 +1179,16 @@ fn dispatch(
             }
             break :blk model.onEvent(ev);
         },
+        .pointer_up => blk: {
+            g_bar_drag = null; // end any scrollbar drag
+            break :blk model.onEvent(ev); // also let the app end a drag of its own
+        },
         .pointer_move => |p| blk: {
+            // A scrollbar drag takes precedence and scrolls the dragged region.
+            if (g_bar_drag != null) {
+                dragBar(Model, model, p.position);
+                break :blk .redraw;
+            }
             if (hitMsg(placements, p.position, .hover)) |m| {
                 break :blk model.update(@as(Msg, @enumFromInt(m)));
             }
@@ -1609,6 +1671,49 @@ test "Tab moves focus in layout order, wraps; Enter activates; Shift+Tab reverse
     _ = dispatch(M, Msg, &m, key.ev(.tab, true), &placements);
     try testing.expectEqual(@as(?usize, 1), focusedIndex());
     try testing.expect(focusedRect(&placements) != null);
+    resetFocus();
+}
+
+test "scrollbar thumb drag scrolls the region (#312)" {
+    resetFocus();
+    g_scale = 1;
+    var rb = raster_mod.RasterBackend.init(testing.allocator);
+    defer rb.deinit();
+    const b = rb.interface();
+    const Msg = enum(u32) { _ };
+    const M = struct {
+        scroll: f32 = 0,
+        pub fn update(_: *@This(), _: Msg) Command {
+            return .none;
+        }
+        pub fn onEvent(self: *@This(), ev: event_mod.Event) Command {
+            if (ev == .scroll) {
+                self.scroll += ev.scroll.dy;
+                return .redraw;
+            }
+            return .none;
+        }
+    };
+    // 50x100 scroll box over 300px of content → a vertical thumb is recorded.
+    const child: layout_mod.Element = .{ .height = 300, .rect_style = .{ .background = style_mod.Color.rgb(1, 2, 3) } };
+    const box: layout_mod.Element = .{ .width = 50, .height = 100, .direction = .column, .overflow_y = .scroll, .on_scroll = 1, .children = &.{&child} };
+    try b.beginFrame(.{ .width = 50, .height = 100 });
+    var result = try layout_mod.layout(testing.allocator, b, &box, .{ .width = 50, .height = 100 });
+    defer result.deinit(testing.allocator);
+    layout_mod.render(b, result);
+    try b.endFrame();
+    const bars = layout_mod.scrollbars();
+    try testing.expect(bars.len >= 1);
+    const thumb = bars[0].thumb;
+    const cx = thumb.x + thumb.width / 2;
+    const cy = thumb.y + thumb.height / 2;
+    var m: M = .{};
+    _ = dispatch(M, Msg, &m, .{ .pointer_down = .{ .position = .{ .x = cx, .y = cy }, .buttons = .{ .primary = true } } }, result.placements);
+    try testing.expect(g_bar_drag != null); // grabbed the thumb
+    _ = dispatch(M, Msg, &m, .{ .pointer_move = .{ .position = .{ .x = cx, .y = cy + 30 } } }, result.placements);
+    try testing.expect(m.scroll > 0); // dragging down increased the offset
+    _ = dispatch(M, Msg, &m, .{ .pointer_up = .{ .position = .{ .x = cx, .y = cy + 30 } } }, result.placements);
+    try testing.expect(g_bar_drag == null); // released
     resetFocus();
 }
 
