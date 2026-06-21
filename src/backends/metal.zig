@@ -1166,13 +1166,19 @@ pub const MetalPathRenderer = struct {
         \\    float2 px = u.quad.xy + corner[vid] * u.quad.zw;
         \\    return float4(px.x / u.vp.x * 2.0 - 1.0, 1.0 - px.y / u.vp.y * 2.0, 0, 1);
         \\}
+        \\static float segd2(float2 a, float2 b, float2 p) {
+        \\    float2 v = b - a; float2 w = p - a; float vv = dot(v, v);
+        \\    float t = (vv > 0.0) ? clamp(dot(w, v) / vv, 0.0, 1.0) : 0.0;
+        \\    float2 d = a + t * v - p; return dot(d, d);
+        \\}
         \\fragment float4 f_main(float4 fp [[position]], constant PathU& u [[buffer(0)]]) {
-        \\    float px = fp.x, py = fp.y;
-        \\    bool inside = false;
+        \\    float px = fp.x, py = fp.y; float2 p = float2(px, py);
+        \\    bool inside = false; float best = 1e30;
         \\    uint n = uint(u.meta.x);
         \\    uint j = n - 1;
         \\    for (uint i = 0; i < n; i++) {
         \\        float2 b = u.pts[i]; float2 a = u.pts[j];
+        \\        best = min(best, segd2(a, b, p)); // closed polygon edge
         \\        if ((b.y > py) != (a.y > py)) {
         \\            float lhs = (a.x - b.x) * (py - b.y);
         \\            float rhs = (px - b.x) * (a.y - b.y);
@@ -1181,8 +1187,11 @@ pub const MetalPathRenderer = struct {
         \\        }
         \\        j = i;
         \\    }
-        \\    if (!inside) discard_fragment();
-        \\    return u.color;
+        \\    // Signed distance → ~1px coverage; mirrors raster.fillPath (#316).
+        \\    float sd = inside ? sqrt(best) : -sqrt(best);
+        \\    float cov = clamp(0.5 + sd, 0.0, 1.0);
+        \\    if (cov <= 0.0) discard_fragment();
+        \\    return float4(u.color.rgb, u.color.a * cov);
         \\}
     ;
 
@@ -1209,7 +1218,8 @@ pub const MetalPathRenderer = struct {
             maxy = @max(maxy, p.y);
         }
         var u: PathUniform = .{
-            .quad = .{ minx, miny, maxx - minx, maxy - miny },
+            // +1px margin for the AA edge fringe (#316).
+            .quad = .{ minx - 1, miny - 1, (maxx - minx) + 2, (maxy - miny) + 2 },
             .color = color,
             .vp = .{ self.vw, self.vh, 0, 0 },
             .meta = .{ @floatFromInt(n), 0, 0, 0 },
@@ -1257,16 +1267,18 @@ pub const MetalStrokeRenderer = struct {
         \\}
         \\fragment float4 f_main(float4 fp [[position]], constant StrokeU& u [[buffer(0)]]) {
         \\    float2 p = fp.xy;
-        \\    int n = int(u.meta.x); float hw2 = u.meta.y; bool closed = u.meta.z > 0.5;
+        \\    int n = int(u.meta.x); float hw = u.meta.y; bool closed = u.meta.z > 0.5;
         \\    int last = closed ? n : n - 1;
-        \\    bool hit = false;
+        \\    float best = 1e30;
         \\    for (int i = 0; i < 64; i++) {
         \\        if (i >= last) break;
         \\        float2 a = u.pts[i]; float2 b = u.pts[(i + 1) % n];
-        \\        if (segd2(a, b, p) <= hw2) { hit = true; break; }
+        \\        best = min(best, segd2(a, b, p));
         \\    }
-        \\    if (!hit) discard_fragment();
-        \\    return u.color;
+        \\    // Distance to centerline → ~1px coverage at the hw edge (#316).
+        \\    float cov = clamp(hw + 0.5 - sqrt(best), 0.0, 1.0);
+        \\    if (cov <= 0.0) discard_fragment();
+        \\    return float4(u.color.rgb, u.color.a * cov);
         \\}
     ;
 
@@ -1293,10 +1305,11 @@ pub const MetalStrokeRenderer = struct {
             maxy = @max(maxy, p.y);
         }
         var u: StrokeUniform = .{
-            .quad = .{ minx - hw, miny - hw, (maxx - minx) + 2 * hw, (maxy - miny) + 2 * hw },
+            // +1px beyond the half-width for the AA edge fringe (#316).
+            .quad = .{ minx - hw - 1, miny - hw - 1, (maxx - minx) + 2 * hw + 2, (maxy - miny) + 2 * hw + 2 },
             .color = color,
             .vp = .{ self.vw, self.vh, 0, 0 },
-            .meta = .{ @floatFromInt(n), hw * hw, if (closed) 1 else 0, 0 },
+            .meta = .{ @floatFromInt(n), hw, if (closed) 1 else 0, 0 },
             .pts = undefined,
         };
         for (0..n) |i| u.pts[i] = .{ points[i].x, points[i].y };

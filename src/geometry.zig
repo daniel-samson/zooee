@@ -56,6 +56,23 @@ pub fn pointNearPolyline(pts: []const Point, closed: bool, hw: f32, px: f32, py:
     return false;
 }
 
+/// Min Euclidean distance from (px,py) to the nearest polyline/polygon edge
+/// (#316). Stroke AA (`hw + 0.5 − d`) and fill AA (signed by pointInPolygon,
+/// `0.5 ± d`) turn this into ~1px box-filter coverage. The GPU shaders mirror
+/// this exactly so GPU == raster holds.
+pub fn distToPolyline(pts: []const Point, closed: bool, px: f32, py: f32) f32 {
+    if (pts.len < 2) return std.math.inf(f32);
+    const last = if (closed) pts.len else pts.len - 1;
+    var best: f32 = std.math.inf(f32);
+    var i: usize = 0;
+    while (i < last) : (i += 1) {
+        const a = pts[i];
+        const b = pts[(i + 1) % pts.len];
+        best = @min(best, segDist2(a.x, a.y, b.x, b.y, px, py));
+    }
+    return @sqrt(best);
+}
+
 pub fn pointInPolygon(pts: []const Point, px: f32, py: f32) bool {
     if (pts.len < 3) return false;
     var inside = false;

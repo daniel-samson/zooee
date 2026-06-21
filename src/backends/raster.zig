@@ -578,7 +578,8 @@ pub const RasterBackend = struct {
             maxx = @max(maxx, p.x);
             maxy = @max(maxy, p.y);
         }
-        const bounds = IRect.fromRect(.{ .x = minx, .y = miny, .width = maxx - minx, .height = maxy - miny }).intersect(self.currentClip());
+        // +1px for the anti-aliased edge fringe (#316).
+        const bounds = IRect.fromRect(.{ .x = minx, .y = miny, .width = maxx - minx, .height = maxy - miny }).inflate(1).intersect(self.currentClip());
         if (bounds.isEmpty()) return;
         var y = bounds.y0;
         while (y < bounds.y1) : (y += 1) {
@@ -586,7 +587,11 @@ pub const RasterBackend = struct {
             while (x < bounds.x1) : (x += 1) {
                 const px = @as(f32, @floatFromInt(x)) + 0.5;
                 const py = @as(f32, @floatFromInt(y)) + 0.5;
-                if (geometry.pointInPolygon(points, px, py)) self.setPixel(x, y, color);
+                // Signed distance → ~1px coverage: +d inside, −d outside.
+                const d = geometry.distToPolyline(points, true, px, py);
+                const sd = if (geometry.pointInPolygon(points, px, py)) d else -d;
+                const cov = std.math.clamp(0.5 + sd, 0, 1);
+                if (cov > 0) self.setPixel(x, y, scaleAlpha(color, cov));
             }
         }
     }
@@ -607,7 +612,8 @@ pub const RasterBackend = struct {
             maxx = @max(maxx, p.x);
             maxy = @max(maxy, p.y);
         }
-        const bounds = IRect.fromRect(.{ .x = minx - hw, .y = miny - hw, .width = (maxx - minx) + width, .height = (maxy - miny) + width }).intersect(self.currentClip());
+        // +1px beyond the half-width for the anti-aliased edge fringe (#316).
+        const bounds = IRect.fromRect(.{ .x = minx - hw, .y = miny - hw, .width = (maxx - minx) + width, .height = (maxy - miny) + width }).inflate(1).intersect(self.currentClip());
         if (bounds.isEmpty()) return;
         var y = bounds.y0;
         while (y < bounds.y1) : (y += 1) {
@@ -615,7 +621,10 @@ pub const RasterBackend = struct {
             while (x < bounds.x1) : (x += 1) {
                 const px = @as(f32, @floatFromInt(x)) + 0.5;
                 const py = @as(f32, @floatFromInt(y)) + 0.5;
-                if (geometry.pointNearPolyline(points, closed, hw, px, py)) self.setPixel(x, y, color);
+                // Distance to the centerline → ~1px coverage at the hw edge.
+                const d = geometry.distToPolyline(points, closed, px, py);
+                const cov = std.math.clamp(hw + 0.5 - d, 0, 1);
+                if (cov > 0) self.setPixel(x, y, scaleAlpha(color, cov));
             }
         }
     }

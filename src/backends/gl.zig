@@ -773,13 +773,15 @@ const path_frag: [*:0]const u8 =
     \\uniform int count;
     \\uniform vec4 color;
     \\varying vec2 v_px;
+    \\float segd2(vec2 a, vec2 b, vec2 p){ vec2 v=b-a; vec2 w=p-a; float vv=dot(v,v); float t=(vv>0.0)?clamp(dot(w,v)/vv,0.0,1.0):0.0; vec2 d=a+t*v-p; return dot(d,d); }
     \\void main(){
-    \\  float px = v_px.x, py = v_px.y;
-    \\  bool inside = false;
+    \\  float px = v_px.x, py = v_px.y; vec2 p = vec2(px, py);
+    \\  bool inside = false; float best = 1e30;
     \\  int j = count - 1;
     \\  for (int i = 0; i < 64; i++) {
     \\    if (i >= count) break;
     \\    vec2 b = pts[i]; vec2 a = pts[j];
+    \\    best = min(best, segd2(a, b, p)); // closed polygon edge
     \\    if ((b.y > py) != (a.y > py)) {
     \\      float lhs = (a.x - b.x) * (py - b.y);
     \\      float rhs = (px - b.x) * (a.y - b.y);
@@ -788,8 +790,11 @@ const path_frag: [*:0]const u8 =
     \\    }
     \\    j = i;
     \\  }
-    \\  if (!inside) discard;
-    \\  gl_FragColor = color;
+    \\  // Signed distance → ~1px coverage; mirrors raster.fillPath (#316).
+    \\  float sd = inside ? sqrt(best) : -sqrt(best);
+    \\  float cov = clamp(0.5 + sd, 0.0, 1.0);
+    \\  if (cov <= 0.0) discard;
+    \\  gl_FragColor = vec4(color.rgb, color.a * cov);
     \\}
 ;
 
@@ -857,7 +862,8 @@ pub const PathRenderer = struct {
         gl.uniform2fv(self.u_pts, @intCast(n), &flat);
         gl.uniform1i(self.u_count, @intCast(n));
         gl.uniform4f(self.u_color, color[0], color[1], color[2], color[3]);
-        const verts = [_]f32{ minx, miny, maxx, miny, minx, maxy, maxx, maxy };
+        // +1px margin for the AA edge fringe (#316).
+        const verts = [_]f32{ minx - 1, miny - 1, maxx + 1, miny - 1, minx - 1, maxy + 1, maxx + 1, maxy + 1 };
         gl.bindVertexArray(self.vao);
         gl.bindBuffer(GL_ARRAY_BUFFER, self.vbo);
         gl.bufferData(GL_ARRAY_BUFFER, @sizeOf(@TypeOf(verts)), &verts, GL_STATIC_DRAW);
@@ -867,13 +873,13 @@ pub const PathRenderer = struct {
     }
 };
 
-// Stroked polyline (#120). Same v_px top-down pixel pos; the PS keeps a
-// fragment within hw² (squared half-width) of any segment — geometry.segDist2.
+// Stroked polyline (#120). Same v_px top-down pixel pos; the PS computes the
+// distance to the nearest segment → ~1px coverage at the hw edge (#316).
 const stroke_frag: [*:0]const u8 =
     \\#version 120
     \\uniform vec2 pts[64];
     \\uniform int count;
-    \\uniform float hw2;
+    \\uniform float hw;
     \\uniform int closed;
     \\uniform vec4 color;
     \\varying vec2 v_px;
@@ -881,14 +887,16 @@ const stroke_frag: [*:0]const u8 =
     \\void main(){
     \\  vec2 p = v_px;
     \\  int last = (closed != 0) ? count : count - 1;
-    \\  bool hit = false;
+    \\  float best = 1e30;
     \\  for (int i = 0; i < 64; i++) {
     \\    if (i >= last) break;
     \\    vec2 a = pts[i]; vec2 b = pts[int(mod(float(i + 1), float(count)))];
-    \\    if (segd2(a, b, p) <= hw2) { hit = true; break; }
+    \\    best = min(best, segd2(a, b, p));
     \\  }
-    \\  if (!hit) discard;
-    \\  gl_FragColor = color;
+    \\  // Distance to centerline → ~1px coverage at the hw edge (#316).
+    \\  float cov = clamp(hw + 0.5 - sqrt(best), 0.0, 1.0);
+    \\  if (cov <= 0.0) discard;
+    \\  gl_FragColor = vec4(color.rgb, color.a * cov);
     \\}
 ;
 
@@ -902,7 +910,7 @@ pub const StrokeRenderer = struct {
     u_viewport: GLint,
     u_pts: GLint,
     u_count: GLint,
-    u_hw2: GLint,
+    u_hw: GLint,
     u_closed: GLint,
     u_color: GLint,
     vw: f32 = 0,
@@ -932,7 +940,7 @@ pub const StrokeRenderer = struct {
             .u_viewport = gl.getUniformLocation(prog, "viewport"),
             .u_pts = gl.getUniformLocation(prog, "pts"),
             .u_count = gl.getUniformLocation(prog, "count"),
-            .u_hw2 = gl.getUniformLocation(prog, "hw2"),
+            .u_hw = gl.getUniformLocation(prog, "hw"),
             .u_closed = gl.getUniformLocation(prog, "closed"),
             .u_color = gl.getUniformLocation(prog, "color"),
         };
@@ -959,10 +967,11 @@ pub const StrokeRenderer = struct {
         gl.uniform2f(self.u_viewport, self.vw, self.vh);
         gl.uniform2fv(self.u_pts, @intCast(n), &flat);
         gl.uniform1i(self.u_count, @intCast(n));
-        gl.uniform1f(self.u_hw2, hw * hw);
+        gl.uniform1f(self.u_hw, hw);
         gl.uniform1i(self.u_closed, if (closed) 1 else 0);
         gl.uniform4f(self.u_color, color[0], color[1], color[2], color[3]);
-        const verts = [_]f32{ minx - hw, miny - hw, maxx + hw, miny - hw, minx - hw, maxy + hw, maxx + hw, maxy + hw };
+        // +1px beyond the half-width for the AA edge fringe (#316).
+        const verts = [_]f32{ minx - hw - 1, miny - hw - 1, maxx + hw + 1, miny - hw - 1, minx - hw - 1, maxy + hw + 1, maxx + hw + 1, maxy + hw + 1 };
         gl.bindVertexArray(self.vao);
         gl.bindBuffer(GL_ARRAY_BUFFER, self.vbo);
         gl.bufferData(GL_ARRAY_BUFFER, @sizeOf(@TypeOf(verts)), &verts, GL_STATIC_DRAW);

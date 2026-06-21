@@ -1088,14 +1088,16 @@ const path_hlsl =
     \\  return o;
     \\}
     \\float2 pt(int k) { float4 v = pts[k/2]; return (k % 2 == 0) ? v.xy : v.zw; }
+    \\float segd2(float2 a, float2 b, float2 p) { float2 v=b-a; float2 w=p-a; float vv=dot(v,v); float t=(vv>0.0)?clamp(dot(w,v)/vv,0.0,1.0):0.0; float2 d=a+t*v-p; return dot(d,d); }
     \\float4 PSMain(VSOut i) : SV_TARGET {
-    \\  float px = i.pos.x, py = i.pos.y;
-    \\  bool inside = false;
+    \\  float px = i.pos.x, py = i.pos.y; float2 p = float2(px, py);
+    \\  bool inside = false; float best = 1e30;
     \\  int n = (int)meta.x;
     \\  int j = n - 1;
     \\  for (int k = 0; k < 64; k++) {
     \\    if (k >= n) break;
     \\    float2 b = pt(k); float2 a = pt(j);
+    \\    best = min(best, segd2(a, b, p)); // closed polygon edge
     \\    if ((b.y > py) != (a.y > py)) {
     \\      float lhs = (a.x - b.x) * (py - b.y);
     \\      float rhs = (px - b.x) * (a.y - b.y);
@@ -1104,8 +1106,11 @@ const path_hlsl =
     \\    }
     \\    j = k;
     \\  }
-    \\  if (!inside) discard;
-    \\  return color;
+    \\  // Signed distance → ~1px coverage; mirrors raster.fillPath (#316).
+    \\  float sd = inside ? sqrt(best) : -sqrt(best);
+    \\  float cov = clamp(0.5 + sd, 0.0, 1.0);
+    \\  if (cov <= 0.0) discard;
+    \\  return float4(color.rgb, color.a * cov);
     \\}
 ;
 const PathCB = extern struct { vw: f32, vh: f32, pad0: f32 = 0, pad1: f32 = 0, color: [4]f32, meta: [4]f32, pts: [32][4]f32 };
@@ -1175,7 +1180,8 @@ pub const D3dPathRenderer = struct {
             maxx = @max(maxx, p.x);
             maxy = @max(maxy, p.y);
         }
-        const verts = [_]f32{ minx, miny, maxx, miny, minx, maxy, maxx, maxy };
+        // +1px margin for the AA edge fringe (#316).
+        const verts = [_]f32{ minx - 1, miny - 1, maxx + 1, miny - 1, minx - 1, maxy + 1, maxx + 1, maxy + 1 };
         var vb_data: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = &verts };
         var vb_desc: D3D11_BUFFER_DESC = .{ .byte_width = @sizeOf(@TypeOf(verts)), .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_VERTEX_BUFFER };
         var vb: ?*IBuffer = null;
@@ -1226,16 +1232,18 @@ const stroke_hlsl =
     \\float segd2(float2 a, float2 b, float2 p) { float2 v=b-a; float2 w=p-a; float vv=dot(v,v); float t=(vv>0.0)?clamp(dot(w,v)/vv,0.0,1.0):0.0; float2 d=a+t*v-p; return dot(d,d); }
     \\float4 PSMain(VSOut i) : SV_TARGET {
     \\  float2 p = i.pos.xy;
-    \\  int n = (int)meta.x; float hw2 = meta.y; bool closed = meta.z > 0.5;
+    \\  int n = (int)meta.x; float hw = meta.y; bool closed = meta.z > 0.5;
     \\  int last = closed ? n : n - 1;
-    \\  bool hit = false;
+    \\  float best = 1e30;
     \\  for (int k = 0; k < 64; k++) {
     \\    if (k >= last) break;
     \\    float2 a = pt(k); float2 b = pt((k + 1) % n);
-    \\    if (segd2(a, b, p) <= hw2) { hit = true; break; }
+    \\    best = min(best, segd2(a, b, p));
     \\  }
-    \\  if (!hit) discard;
-    \\  return color;
+    \\  // Distance to centerline → ~1px coverage at the hw edge (#316).
+    \\  float cov = clamp(hw + 0.5 - sqrt(best), 0.0, 1.0);
+    \\  if (cov <= 0.0) discard;
+    \\  return float4(color.rgb, color.a * cov);
     \\}
 ;
 const StrokeCB = extern struct { vw: f32, vh: f32, pad0: f32 = 0, pad1: f32 = 0, color: [4]f32, meta: [4]f32, pts: [32][4]f32 };
@@ -1290,7 +1298,7 @@ pub const D3dStrokeRenderer = struct {
         var miny = points[0].y;
         var maxx = points[0].x;
         var maxy = points[0].y;
-        var cbv: StrokeCB = .{ .vw = vw, .vh = vh, .color = color, .meta = .{ @floatFromInt(n), hw * hw, if (closed) 1 else 0, 0 }, .pts = std.mem.zeroes([32][4]f32) };
+        var cbv: StrokeCB = .{ .vw = vw, .vh = vh, .color = color, .meta = .{ @floatFromInt(n), hw, if (closed) 1 else 0, 0 }, .pts = std.mem.zeroes([32][4]f32) };
         for (0..n) |k| {
             const p = points[k];
             if (k % 2 == 0) {
@@ -1305,7 +1313,8 @@ pub const D3dStrokeRenderer = struct {
             maxx = @max(maxx, p.x);
             maxy = @max(maxy, p.y);
         }
-        const verts = [_]f32{ minx - hw, miny - hw, maxx + hw, miny - hw, minx - hw, maxy + hw, maxx + hw, maxy + hw };
+        // +1px beyond the half-width for the AA edge fringe (#316).
+        const verts = [_]f32{ minx - hw - 1, miny - hw - 1, maxx + hw + 1, miny - hw - 1, minx - hw - 1, maxy + hw + 1, maxx + hw + 1, maxy + hw + 1 };
         var vb_data: D3D11_SUBRESOURCE_DATA = .{ .p_sys_mem = &verts };
         var vb_desc: D3D11_BUFFER_DESC = .{ .byte_width = @sizeOf(@TypeOf(verts)), .usage = D3D11_USAGE_IMMUTABLE, .bind_flags = D3D11_BIND_VERTEX_BUFFER };
         var vb: ?*IBuffer = null;
