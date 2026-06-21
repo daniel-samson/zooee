@@ -928,7 +928,15 @@ pub fn keyWindowNumber() ?i64 {
 }
 
 pub fn contentPixelSize(window: *Window) struct { width: usize, height: usize, scale: f64 } {
-    const content = msg(NSRect, struct {}, window.ns_window, sel("contentLayoutRect"), .{});
+    // Use the full content-view bounds, NOT contentLayoutRect: with a custom
+    // overlay title bar the window is full_size_content_view, so contentLayoutRect
+    // is inset below the (transparent) title bar while pointer events arrive in
+    // the full content-view space. Laying out against the inset rect offsets every
+    // hit-test by the title-bar height (clicks land ~32px low). The content is
+    // meant to be full-bleed anyway — apps pad the top to clear the traffic
+    // lights — so the layout viewport must match the bounds the mouse uses.
+    const view = msg(id, struct {}, window.ns_window, sel("contentView"), .{});
+    const content = msg(NSRect, struct {}, view, sel("bounds"), .{});
     const scale = msg(f64, struct {}, window.ns_window, sel("backingScaleFactor"), .{});
     return .{
         .width = @intFromFloat(@max(1, content.w * scale)),
