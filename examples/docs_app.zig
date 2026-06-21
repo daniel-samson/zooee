@@ -16,10 +16,10 @@ const Page = struct { name: []const u8, body: []const u8, icon: ui.IconName };
 const pages = [_]Page{
     .{ .name = "Welcome", .icon = .sparkles, .body = "Welcome to zooee — a native, cross-platform UI in Zig.\n\nThis app is the component gallery: pick an item on the left to see it, with variants and examples. The look adapts per OS (macOS / WinUI / Linux) and is still being tuned." },
     .{ .name = "Layout", .icon = .layout_dashboard, .body = "Flex containers (row / column) with gap, padding, grow, and CSS-style justify-content / align-items. `spacer()` fills free space; `divider()` draws a 1px rule across the cross axis." },
-    .{ .name = "Button", .icon = .square_mouse_pointer, .body = "Buttons trigger actions. Variants: primary, secondary, danger. (Live examples land as the Button component is built, #271.)" },
+    .{ .name = "Button", .icon = .square_mouse_pointer, .body = "Buttons trigger actions. Variants: primary, secondary, danger. (Live examples land as the Button component is built.)" },
     .{ .name = "Icon", .icon = .shapes, .body = "Vector icons baked from real SVGs at build time (Lucide). Each icon flattens to stroke/fill subpaths; they tint with the current role and dim when disabled. Drop an SVG in icons/ and run `zig build gen-icons`." },
-    .{ .name = "Text", .icon = .type, .body = "Text and labels: titles, headings, body, captions — with the shaping pipeline (Latin, Arabic, BiDi). (#270)" },
-    .{ .name = "List", .icon = .list, .body = "A selectable list — the master/nav pattern. Each row dispatches on click; the selected row is highlighted. (The sidebar on the left is itself a List.) Virtualization (#29) and keyboard nav (#16) are follow-ups." },
+    .{ .name = "Text", .icon = .type, .body = "Text and labels: titles, headings, body, captions — with the shaping pipeline (Latin, Arabic, BiDi)." },
+    .{ .name = "List", .icon = .list, .body = "A selectable list — the master/nav pattern. Each row dispatches on click; the selected row is highlighted. (The sidebar on the left is itself a List.) Virtualization and keyboard nav are follow-ups." },
     .{ .name = "Scroll", .icon = .scroll_text, .body = "A scroll viewport: a fixed-size box that clips its content and pans it on wheel/trackpad. Offsets are clamped to the content extent. Scroll inside the box below." },
     .{ .name = "Card", .icon = .credit_card, .body = "Surfaces / panels: a background, rounded corners, an optional border, and an elevation shadow. The building block for content blocks." },
     .{ .name = "Selection", .icon = .square_check, .body = "Checkbox, toggle/switch, and radio group — boolean and single-choice selection. Click any control to change it. Checked state is prop-driven; clicks dispatch on_change." },
@@ -209,7 +209,7 @@ fn textExamples(u: *ui.Ui) !Widget {
             u.text("Body text — the default paragraph style.", .{ .variant = .body }),
             u.text("Caption — secondary, smaller.", .{ .variant = .caption, .role = .secondary }),
         })),
-        try example(u, "world scripts — Latin, Cyrillic, Greek + contextual shaping (#116) and RTL BiDi (#202/#203)", try u.column(.{ .gap = 8 }, &.{
+        try example(u, "world scripts — Latin, Cyrillic, Greek, plus contextual shaping and right-to-left BiDi", try u.column(.{ .gap = 8 }, &.{
             try Line.make(u, "English", "The quick brown fox jumps over the lazy dog"),
             try Line.make(u, "Français", "Portez ce vieux whisky au juge — déjà l'été"),
             try Line.make(u, "Deutsch", "Zwölf Boxkämpfer — Größe, Fußgänger"),
