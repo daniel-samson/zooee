@@ -172,6 +172,11 @@ pub const Element = struct {
     // pointer hits this element. Values are app-defined (enum ints).
     on_click: ?u32 = null,
     on_hover: ?u32 = null,
+    /// Marks this element as a scroll target (#309): the app loop hit-tests a
+    /// scroll event's pointer position and only forwards it to the model when it
+    /// lands on the topmost element carrying `on_scroll`, so scroll input over
+    /// one region doesn't drive another. The value identifies the region.
+    on_scroll: ?u32 = null,
     /// Cursor shape (#123) shown while the pointer is over this element's
     /// border-box. null = inherit (the app resolves the topmost region that
     /// sets one, defaulting to `.default`). Set `.pointer` on clickables,

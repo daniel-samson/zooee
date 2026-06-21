@@ -30,6 +30,7 @@ const Msg = enum(u32) {
     boxwrap_toggle = 13,
     overflow_cycle = 14,
     overflowx_cycle = 15,
+    scroll_region = 16,
     _,
 };
 
@@ -140,6 +141,9 @@ const Play = struct {
             .scroll_y = self.scroll_y,
             .background = u.theme.surface_variant,
             .corner_radius = 8,
+            // Only react to the wheel while the pointer is over this container,
+            // so scrolling the controls panel doesn't pan the preview (#309).
+            .on_scroll = @intFromEnum(Msg.scroll_region),
         };
         const configured = if (self.dir == .row) try u.row(cfg, boxes) else try u.column(cfg, boxes);
 
@@ -181,6 +185,7 @@ const Play = struct {
                 self.exportSnapshot();
                 return .none;
             },
+            .scroll_region => return .none, // handled in onEvent, never via update
             _ => return .none,
         }
         return .redraw;

@@ -948,6 +948,16 @@ fn dispatch(
             }
             break :blk model.onEvent(ev);
         },
+        // Scroll routing (#309): a scroll event carries a delta (not expressible
+        // as a bare Msg), so rather than dispatch through update() we forward the
+        // full event to onEvent. Scoped routing is opt-in: once any element marks
+        // itself a scroll target with `on_scroll`, scroll is delivered only when
+        // the pointer is over a target (so input doesn't leak between regions);
+        // until then scroll is global, preserving the legacy onEvent behavior.
+        .scroll => |s| if (!anyOnScroll(placements) or hitMsg(placements, s.position, .scroll) != null)
+            model.onEvent(ev)
+        else
+            .none,
         else => model.onEvent(ev),
     };
 }
@@ -1077,7 +1087,13 @@ pub fn cursorFor(placements: []const layout_mod.Placement, p: geometry.Point) cu
     return shape;
 }
 
-const Interaction = enum { click, hover };
+const Interaction = enum { click, hover, scroll };
+
+/// Whether any placed element opts into scoped scroll routing (#309).
+fn anyOnScroll(placements: []const layout_mod.Placement) bool {
+    for (placements) |pl| if (pl.element.on_scroll != null) return true;
+    return false;
+}
 
 /// Topmost (last-placed) element containing the point that carries the
 /// requested message kind.
@@ -1088,6 +1104,12 @@ fn hitMsg(placements: []const layout_mod.Placement, p: geometry.Point, kind: Int
         const msg = switch (kind) {
             .click => pl.element.on_click,
             .hover => pl.element.on_hover,
+            // A scroll target is anything with an explicit on_scroll id, or any
+            // engine scroll container (legacy `scroll` flag / non-visible
+            // overflow) so existing scroll views keep receiving the wheel. The
+            // sentinel 0 just signals "a target is here" when there's no id.
+            .scroll => pl.element.on_scroll orelse
+                (if (pl.element.scroll or pl.element.overflow_x != .visible or pl.element.overflow_y != .visible) @as(u32, 0) else null),
         };
         if (msg) |m| found = m;
     }
@@ -1128,6 +1150,35 @@ test "hitMsg picks the topmost interactive element" {
     try testing.expectEqual(@as(?u32, 2), hitMsg(&placements, .{ .x = 3, .y = 3 }, .click));
     try testing.expectEqual(@as(?u32, 1), hitMsg(&placements, .{ .x = 8, .y = 8 }, .click));
     try testing.expectEqual(@as(?u32, null), hitMsg(&placements, .{ .x = 50, .y = 50 }, .click));
+}
+
+test "scroll events route only to on_scroll regions (#309)" {
+    const Msg = enum(u32) { _ };
+    const M = struct {
+        hits: usize = 0,
+        pub fn update(self: *@This(), m: Msg) Command {
+            _ = self;
+            _ = m;
+            return .none;
+        }
+        pub fn onEvent(self: *@This(), ev: event_mod.Event) Command {
+            if (ev == .scroll) self.hits += 1;
+            return .none;
+        }
+    };
+    const plain: layout_mod.Element = .{};
+    const target: layout_mod.Element = .{ .on_scroll = 7 };
+    const placements = [_]layout_mod.Placement{
+        .{ .element = &plain, .rect = .{ .x = 0, .y = 0, .width = 100, .height = 100 } },
+        .{ .element = &target, .rect = .{ .x = 0, .y = 0, .width = 20, .height = 20 } },
+    };
+    var m: M = .{};
+    // Over the target → forwarded to onEvent.
+    _ = dispatch(M, Msg, &m, .{ .scroll = .{ .position = .{ .x = 5, .y = 5 }, .dy = 1 } }, &placements);
+    try testing.expectEqual(@as(usize, 1), m.hits);
+    // Outside the target (over a non-scroll region) → ignored.
+    _ = dispatch(M, Msg, &m, .{ .scroll = .{ .position = .{ .x = 50, .y = 50 }, .dy = 1 } }, &placements);
+    try testing.expectEqual(@as(usize, 1), m.hits);
 }
 
 test "cursorFor resolves topmost region, defaults when none" {

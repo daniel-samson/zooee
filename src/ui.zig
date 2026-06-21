@@ -73,6 +73,10 @@ pub const Box = struct {
     corner_radius: f32 = 0,
     /// Make the whole box clickable (dispatches this message id, shows a pointer).
     on_click: ?u32 = null,
+    /// Mark this box as a scroll target: scroll input is only delivered to the
+    /// model (via onEvent) while the pointer is over it (#309). Pair with
+    /// overflow scroll/auto + scroll_x/scroll_y.
+    on_scroll: ?u32 = null,
     children: []const Widget = &.{},
 };
 
@@ -509,6 +513,7 @@ pub const Ui = struct {
                     .width = if (b.width) |x| x * s else null,
                     .height = if (b.height) |x| x * s else null,
                     .on_click = b.on_click,
+                    .on_scroll = b.on_scroll,
                     .cursor = if (b.on_click != null) .pointer else null,
                     .children = kids,
                     .rect_style = .{
