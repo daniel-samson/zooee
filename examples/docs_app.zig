@@ -70,26 +70,33 @@ fn cardExamples(u: *ui.Ui) !Widget {
 const sidebar_bg = Color.rgb(40, 40, 43);
 
 /// One half of the back/forward segmented control: a chevron centered in a cell.
-fn navCell(u: *ui.Ui, name: ui.IconName, dim: bool) !Widget {
+/// When enabled it's clickable + focusable and joins the segment's roving group
+/// (#310): the two cells are a single Tab stop with arrow nav between them.
+fn navCell(u: *ui.Ui, name: ui.IconName, gid: u32, msg: u32, enabled: bool) !Widget {
     return u.column(.{
         .width = 32,
         .height = 26,
         .align_items = .center,
         .justify = .center,
-    }, &.{u.icon(.{ .name = name, .size = 11, .role = .secondary, .disabled = dim })});
+        .on_click = if (enabled) msg else null,
+        .focusable = enabled,
+        .tab_group = if (enabled) gid else null,
+    }, &.{u.icon(.{ .name = name, .size = 11, .role = .secondary, .disabled = !enabled })});
 }
 
 /// macOS-style back/forward segmented control: two joined cells, rounded outer
-/// corners, a hairline divider between. Forward is dimmed (no history).
-fn navSegment(u: *ui.Ui) !Widget {
+/// corners, a hairline divider between. A roving-tabindex group (#310) — one Tab
+/// stop, arrow between back/forward. Each side dims at the ends of the page list.
+fn navSegment(u: *ui.Ui, can_back: bool, can_fwd: bool) !Widget {
+    const gid = u.nextGroup();
     return u.row(.{
         .corner_radius = 7,
         .background = Color.rgb(50, 50, 53),
         .align_items = .center,
     }, &.{
-        try navCell(u, .chevron_left, false),
+        try navCell(u, .chevron_left, gid, nav_back, can_back),
         u.divider(.row),
-        try navCell(u, .chevron_right, true),
+        try navCell(u, .chevron_right, gid, nav_forward, can_fwd),
     });
 }
 
@@ -121,6 +128,10 @@ fn scrollExamples(u: *ui.Ui, offset: f32) !Widget {
 
 /// Base message id for the List page's demo rows (kept clear of page indices).
 const list_demo_base: u32 = 1000;
+/// Toolbar back/forward (#310 roving-group example): the two chevrons share one
+/// Tab stop and arrow between each other.
+const nav_back: u32 = 3000;
+const nav_forward: u32 = 3001;
 
 /// Live examples for the List page (#273): a selectable list with live selection.
 fn listExamples(u: *ui.Ui, selected: usize) !Widget {
@@ -278,7 +289,7 @@ const Docs = struct {
             .gap = 8,
             .padding = .{ .top = 12, .bottom = 8, .left = 16, .right = 16 },
         }, &.{
-            try navSegment(u),
+            try navSegment(u, self.selected > 0, self.selected + 1 < pages.len),
             u.text(page.name, .{ .size = 22, .bold = true }),
         });
 
@@ -321,6 +332,14 @@ const Docs = struct {
             return .redraw;
         } else if (raw >= sel_radio_base and raw < sel_radio_base + 3) {
             self.sel_radio = raw - sel_radio_base;
+            return .redraw;
+        }
+        // Toolbar back/forward (the roving-group example): step the page.
+        if (raw == nav_back) {
+            if (self.selected > 0) self.selected -= 1;
+            return .redraw;
+        } else if (raw == nav_forward) {
+            if (self.selected + 1 < pages.len) self.selected += 1;
             return .redraw;
         }
         // List-page demo rows (base 1000) vs sidebar page selection.
