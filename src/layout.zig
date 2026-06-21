@@ -354,6 +354,12 @@ const MeasureCtx = struct {
     }
 };
 
+/// Slack added to a wrap width so text laid out at its own intrinsic width
+/// doesn't wrap against the sub-pixel rounding of its snapped box (which would
+/// drop the last glyph to a new line). Genuine wrapping has far more headroom,
+/// so this only suppresses the self-wrap artifact (#304).
+const wrap_slack: f32 = 1;
+
 /// Measure wrapped/multiline text: the block width and total height for the
 /// given content width (#115). `wrap_w` null = only explicit newlines split.
 fn measureWrapped(b: Backend, el: *const Element, t: []const u8, wrap_w: ?f32) Size {
@@ -363,7 +369,7 @@ fn measureWrapped(b: Backend, el: *const Element, t: []const u8, wrap_w: ?f32) S
     const m: text_mod.Measurer = .{ .ctx = &ctx, .measure_fn = MeasureCtx.measure };
     const line_h = b.measureText("Ag", el.text_style).height;
     var lay = text_mod.layout(fba.allocator(), t, m, .{
-        .max_width = wrap_w,
+        .max_width = if (wrap_w) |w| w + wrap_slack else null,
         .@"align" = el.text_align,
         .line_height = line_h,
         .wrap = el.text_wrap,
@@ -382,7 +388,7 @@ fn drawWrappedText(b: Backend, el: *const Element, t: []const u8, inner: Rect) v
     const m: text_mod.Measurer = .{ .ctx = &ctx, .measure_fn = MeasureCtx.measure };
     const line_h = b.measureText("Ag", el.text_style).height;
     var lay = text_mod.layout(fba.allocator(), t, m, .{
-        .max_width = if (el.text_wrap != .nowrap) inner.width else null,
+        .max_width = if (el.text_wrap != .nowrap) inner.width + wrap_slack else null,
         .@"align" = el.text_align,
         .line_height = line_h,
         .wrap = el.text_wrap,

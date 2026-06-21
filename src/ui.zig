@@ -93,8 +93,11 @@ pub const Text = struct {
     /// Override the variant's default size / weight. Null = use the variant.
     size: ?f32 = null,
     bold: ?bool = null,
-    /// Wrap to the content width instead of a single truncated line (#192).
-    wrap: bool = false,
+    /// Wrap to the available content width, like a browser (#192/#304). Default
+    /// on; set false for single-line text (e.g. labels you want to truncate).
+    /// Text only wraps when an ancestor constrains its width — unconstrained
+    /// text stays a single line at its intrinsic width, matching CSS.
+    wrap: bool = true,
 };
 
 fn variantSize(v: TextVariant) f32 {
