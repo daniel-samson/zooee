@@ -1032,11 +1032,14 @@ pub fn setScrollOffset(id: u32, x: f32, y: f32) void {
 }
 
 /// Apply a wheel delta to a region's built-in offset, clamped to content (#313).
+/// The OS delta (e.g. macOS scrollingDeltaY) already carries the natural-scroll
+/// setting; we subtract it so content tracks the gesture (scrolling down reveals
+/// later content), matching native scroll views. One place, all platforms.
 fn applyWheel(id: u32, dx: f32, dy: f32, unit: event_mod.ScrollUnit) void {
     const step: f32 = if (unit == .pixel) 1 else scroll_line_px;
     const s = scrollSlot(id);
-    s.y = std.math.clamp(s.y + dy * step, 0, scrollMaxAxis(id, true));
-    s.x = std.math.clamp(s.x + dx * step, 0, scrollMaxAxis(id, false));
+    s.y = std.math.clamp(s.y - dy * step, 0, scrollMaxAxis(id, true));
+    s.x = std.math.clamp(s.x - dx * step, 0, scrollMaxAxis(id, false));
 }
 
 /// An in-progress scrollbar thumb drag (#312).
@@ -1771,12 +1774,13 @@ test "built-in scroll: wheel moves the framework offset with direction + clamp (
     try b.endFrame();
     var m: M = .{};
     const over: geometry.Point = .{ .x = 25, .y = 50 };
-    // Wheel down (dy>0 = toward later content): offset increases, clamped to 200.
-    _ = dispatch(M, Msg, &m, .{ .scroll = .{ .position = over, .dy = 2, .unit = .line } }, result.placements);
+    // The OS delta is subtracted (applyWheel), so a negative dy reveals later
+    // content: offset increases, clamped to 200.
+    _ = dispatch(M, Msg, &m, .{ .scroll = .{ .position = over, .dy = -2, .unit = .line } }, result.placements);
     try testing.expectApproxEqAbs(@as(f32, 80), scrollOffset(2).y, 0.5); // 2 lines × 40
-    _ = dispatch(M, Msg, &m, .{ .scroll = .{ .position = over, .dy = 10, .unit = .line } }, result.placements);
+    _ = dispatch(M, Msg, &m, .{ .scroll = .{ .position = over, .dy = -10, .unit = .line } }, result.placements);
     try testing.expectApproxEqAbs(@as(f32, 200), scrollOffset(2).y, 0.5); // clamped to max
-    _ = dispatch(M, Msg, &m, .{ .scroll = .{ .position = over, .dy = -100, .unit = .line } }, result.placements);
+    _ = dispatch(M, Msg, &m, .{ .scroll = .{ .position = over, .dy = 100, .unit = .line } }, result.placements);
     try testing.expectEqual(@as(f32, 0), scrollOffset(2).y); // clamped to 0
     setScrollOffset(2, 0, 0);
 }
