@@ -291,6 +291,7 @@ pub fn runWindow(
     // GPU-present by default on platforms with a GPU backend (#11/#12);
     // ZOOEE_SOFTWARE forces the CPU raster path (deterministic CI, debugging).
     const want_gpu = has_gpu_window and !opts.force_software and !init.environ_map.contains("ZOOEE_SOFTWARE");
+    clipboard_debug = init.environ_map.contains("ZOOEE_CLIPLOG"); // selection→clipboard diagnostic (#318)
 
     // Only Linux carries a GL context on the window (macOS=Metal, Windows=D3D).
     const want_gl_ctx = want_gpu and builtin.os.tag == .linux;
@@ -978,6 +979,8 @@ var g_copy_request: bool = false; // ⌘C pressed; the render pass fills the buf
 var g_copy_pending: bool = false; // buffer ready; the OS-hooks pass writes the clipboard
 var g_copy_buf: [4096]u8 = undefined;
 var g_copy_len: usize = 0;
+/// Diagnostic: log the selection→clipboard path (ZOOEE_CLIPLOG).
+pub var clipboard_debug: bool = false;
 
 /// Clear any active text selection (tests / programmatic).
 pub fn resetTextSelection() void {
@@ -1022,6 +1025,7 @@ fn renderTextSelection(b: backend_mod.Backend, placements: []const layout_mod.Pl
         g_copy_len = len;
         g_copy_request = false;
         g_copy_pending = true;
+        if (clipboard_debug) std.debug.print("CLIP fill: idx={d} a={d} f={d} sub='{s}'\n", .{ ts.idx, a, f, g_copy_buf[0..g_copy_len] });
     }
 }
 
@@ -1493,6 +1497,7 @@ fn frameOsHooks(comptime Model: type, window: anytype, model: *Model, gpa: std.m
     if (g_copy_pending) {
         var clip = systemClipboard(window, gpa);
         clip.interface().setText(g_copy_buf[0..g_copy_len]) catch {};
+        if (clipboard_debug) std.debug.print("CLIP write: '{s}'\n", .{g_copy_buf[0..g_copy_len]});
         g_copy_pending = false;
     }
     // Live OS theme change (#318): the user changed their accent / light-dark in
@@ -1809,6 +1814,20 @@ test "text selection: drag selects a range and ⌘C copies the substring (#318)"
     renderTextSelection(rb.interface(), res.placements);
     try testing.expect(g_copy_pending);
     try testing.expectEqualStrings("hello world", g_copy_buf[0..g_copy_len]);
+
+    // A SECOND copy of a different (partial) range must replace the buffer —
+    // guards against a repeat copy keeping the previous clipboard (#318).
+    var tstyle: style_mod.TextStyle = .{};
+    for (res.placements) |pl| {
+        if (pl.element.text_selectable) tstyle = pl.element.text_style;
+    }
+    const hello_w = rb.interface().measureText("hello", tstyle).width;
+    _ = dispatch(M, Msg, &m, .{ .pointer_down = .{ .position = .{ .x = t.x + 1, .y = midy }, .buttons = .{ .primary = true } } }, res.placements);
+    _ = dispatch(M, Msg, &m, .{ .pointer_move = .{ .position = .{ .x = t.x + hello_w, .y = midy } } }, res.placements);
+    _ = dispatch(M, Msg, &m, .{ .pointer_up = .{ .position = .{ .x = t.x + hello_w, .y = midy } } }, res.placements);
+    _ = dispatch(M, Msg, &m, .{ .text = .{ .codepoint = 'c', .mods = .{ .super = true } } }, res.placements);
+    renderTextSelection(rb.interface(), res.placements);
+    try testing.expectEqualStrings("hello", g_copy_buf[0..g_copy_len]);
 
     // A press off the selectable text clears the selection.
     _ = dispatch(M, Msg, &m, .{ .pointer_down = .{ .position = .{ .x = t.x + 1, .y = t.y + 80 }, .buttons = .{ .primary = true } } }, res.placements);
