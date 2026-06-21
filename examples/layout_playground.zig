@@ -55,6 +55,10 @@ const Play = struct {
     overflow_y: ui.Overflow = .scroll,
     scroll_x: f32 = 0,
     scroll_y: f32 = 0,
+    // Device scale captured from the Ui each frame, so the scroll handler can
+    // convert the engine's device-px scroll range back to the logical offsets
+    // this model stores.
+    last_scale: f32 = 1,
     gap: f32 = 8,
     pad: f32 = 12,
     count: usize = 3,
@@ -72,6 +76,7 @@ const Play = struct {
     }
 
     pub fn viewUi(self: *Play, u: *ui.Ui) !Widget {
+        self.last_scale = u.scale;
         // --- controls panel -------------------------------------------------
         const controls = try u.column(.{ .width = 280, .padding = .all(16), .gap = 10, .background = u.theme.surface }, &.{
             u.text("Layout", .{ .variant = .heading }),
@@ -234,13 +239,20 @@ const Play = struct {
                 // Wheel pans the container. Lines → ~20px each; pixels 1:1. The
                 // engine clamps the offset to content at render; we keep a
                 // generous local clamp so the stored value can't run away.
-                // Our ScrollEvent dy follows the platform's natural-scroll
-                // convention, so add it to the offset (a downward swipe reveals
-                // later content). Engine clamps to content; local clamp is a
-                // runaway guard.
+                // Our ScrollEvent dy/dx already reflects the OS natural-scroll
+                // setting (AppKit pre-inverts scrollingDelta), so add it to the
+                // offset directly — a downward swipe reveals later content.
                 const step: f32 = if (s.unit == .line) 20 else 1;
-                self.scroll_y = std.math.clamp(self.scroll_y + s.dy * step, 0, 2000);
-                self.scroll_x = std.math.clamp(self.scroll_x + s.dx * step, 0, 2000);
+                // Clamp to the engine's real scrollable range (device px → logical)
+                // so the offset can't over-scroll into dead range: once at the end,
+                // scrolling back responds immediately instead of unwinding phantom
+                // distance. Falls back to a generous bound before the first render.
+                const sc = if (self.last_scale > 0) self.last_scale else 1;
+                const rng = zooee.layout.lastScrollMax();
+                const max_x = if (rng.width > 0) rng.width / sc else 4000;
+                const max_y = if (rng.height > 0) rng.height / sc else 4000;
+                self.scroll_y = std.math.clamp(self.scroll_y + s.dy * step, 0, max_y);
+                self.scroll_x = std.math.clamp(self.scroll_x + s.dx * step, 0, max_x);
                 return .redraw;
             },
             else => {},

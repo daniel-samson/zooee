@@ -194,6 +194,18 @@ pub const LayoutResult = struct {
     }
 };
 
+/// Scrollable range (content extent − viewport, in device px, clamped ≥0) of the
+/// most recently rendered scroll/auto container. Apps read this to clamp their
+/// own stored scroll offset so it can't over-scroll into dead range (scrolling
+/// back then responds immediately instead of unwinding phantom distance). Single
+/// container per frame is assumed — the last one rendered wins; per-container
+/// state arrives with keyed widget state (#5).
+var g_last_scroll_max: Size = .{};
+
+pub fn lastScrollMax() Size {
+    return g_last_scroll_max;
+}
+
 /// Lay out `root` filling `viewport`, then optionally draw via `render`.
 pub fn layout(
     gpa: std.mem.Allocator,
@@ -292,8 +304,11 @@ fn renderNode(b: Backend, placements: []const Placement, i: *usize) void {
             // Offsets clamp against the content box (CSS: max scroll = content
             // size − content-box size), but the scrollport is the padding box,
             // so scrolled content fills the padding band up to the border.
-            const sx = if (pan_x) std.math.clamp(el.scroll_x, 0, @max(0, ext.width - cbox.width)) else 0;
-            const sy = if (pan_y) std.math.clamp(el.scroll_y, 0, @max(0, ext.height - cbox.height)) else 0;
+            const max_x = @max(0, ext.width - cbox.width);
+            const max_y = @max(0, ext.height - cbox.height);
+            if (pan_x or pan_y) g_last_scroll_max = .{ .width = max_x, .height = max_y };
+            const sx = if (pan_x) std.math.clamp(el.scroll_x, 0, max_x) else 0;
+            const sy = if (pan_y) std.math.clamp(el.scroll_y, 0, max_y) else 0;
             const pbox = paddingBox(el, p.rect);
             // Unclipped axes get a huge bound so the scissor only constrains the
             // axis that actually clips (parent clips still intersect normally).
@@ -892,6 +907,28 @@ test "overflow: auto clips+pans only when content overflows that axis (#309)" {
         try b.endFrame();
         try testing.expectEqual(blu, rb.pixelAt(10, 5)); // panned (overflows)
     }
+}
+
+test "overflow: lastScrollMax reports the scrollable range for over-scroll clamping (#309)" {
+    var rb = raster.RasterBackend.init(testing.allocator);
+    defer rb.deinit();
+    const b = rb.interface();
+
+    // 20px column box over 60px of content (three 20px rows): scrollable range
+    // is 40 on y, 0 on x.
+    const r0: Element = .{ .height = 20, .rect_style = .{ .background = style.Color.rgb(1, 0, 0) } };
+    const r1: Element = .{ .height = 20, .rect_style = .{ .background = style.Color.rgb(0, 1, 0) } };
+    const r2: Element = .{ .height = 20, .rect_style = .{ .background = style.Color.rgb(0, 0, 1) } };
+    const box: Element = .{ .width = 20, .height = 20, .direction = .column, .overflow_y = .scroll, .overflow_x = .scroll, .children = &.{ &r0, &r1, &r2 } };
+
+    try b.beginFrame(.{ .width = 20, .height = 20 });
+    var result = try layout(testing.allocator, b, &box, .{ .width = 20, .height = 20 });
+    defer result.deinit(testing.allocator);
+    render(b, result);
+    try b.endFrame();
+
+    try testing.expectEqual(@as(f32, 40), lastScrollMax().height);
+    try testing.expectEqual(@as(f32, 0), lastScrollMax().width);
 }
 
 test "overflow: flex-wrap bounds the main-axis scroll (content can't pan off) (#309)" {
