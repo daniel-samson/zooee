@@ -788,9 +788,13 @@ pub const Window = struct {
                 NSEventType.scroll_wheel => {
                     // scrollingDeltaX/Y are pixel-precise on trackpads and
                     // high-res wheels; hasPreciseScrollingDeltas distinguishes
-                    // them from coarse mouse notches. Positive AppKit deltaY is
-                    // a downward finger-push → content scrolls up, matching our
-                    // ScrollEvent dy convention.
+                    // them from coarse mouse notches. AppKit's raw deltaY is the
+                    // inverse of our canonical convention (#309: dy>0 = toward
+                    // later content / scroll down) — a downward gesture yields a
+                    // positive AppKit deltaY but should advance content — so we
+                    // negate both axes here to match Win32/X11. The user's
+                    // natural-scroll setting is already baked into the AppKit
+                    // delta, so this single negation honours it on every Mac.
                     const loc = msg(NSPoint, struct {}, ev, sel("locationInWindow"), .{});
                     const cv = msg(NSPoint, struct { NSPoint, id }, view, sel("convertPoint:fromView:"), .{ loc, null });
                     const precise = msg(bool, struct {}, ev, sel("hasPreciseScrollingDeltas"), .{});
@@ -801,8 +805,8 @@ pub const Window = struct {
                     const phase: core_event.ScrollPhase = if (ph != 0) .momentum else .continue_;
                     self.queue.append(self.gpa, .{ .scroll = .{
                         .position = .{ .x = @floatCast(cv.x * scale), .y = @floatCast((bounds.h - cv.y) * scale) },
-                        .dx = @floatCast(dx),
-                        .dy = @floatCast(dy),
+                        .dx = @floatCast(-dx),
+                        .dy = @floatCast(-dy),
                         .unit = if (precise) .pixel else .line,
                         .phase = phase,
                         .mods = modsFromFlags(sflags),
