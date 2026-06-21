@@ -610,9 +610,35 @@ fn measure(b: Backend, el: *const Element, avail_w: ?f32) Size {
         } else {
             content = b.measureText(t, el.text_style);
         }
+    } else if (el.direction == .row and (el.width orelse avail_w) != null) {
+        // Row with a known width: resolve each child's main-axis width (incl.
+        // grow), then measure its height AT that width, so a child whose content
+        // wraps reports its true multi-line height and the row grows to fit it
+        // (#304). Mirrors place()'s grow distribution so measure and placement
+        // agree. Without this, a wrapping grow-child is measured at its intrinsic
+        // single-line width here and overflows its row at placement time.
+        const content_w = (el.width orelse avail_w).? - chrome_w;
+        var fixed_main: f32 = 0;
+        var grow_sum: f32 = 0;
+        for (el.children, 0..) |child, i| {
+            if (i != 0) fixed_main += el.gap;
+            fixed_main += marginMain(.row, child.margin);
+            if (child.grow > 0) grow_sum += child.grow else fixed_main += measure(b, child, null).width;
+        }
+        const free = @max(0, content_w - fixed_main);
+        var main: f32 = 0;
+        var cross: f32 = 0;
+        for (el.children, 0..) |child, i| {
+            const cw = if (child.grow > 0 and grow_sum > 0) free * (child.grow / grow_sum) else measure(b, child, null).width;
+            const cs = measure(b, child, cw); // height resolved at the allocated width
+            if (i != 0) main += el.gap;
+            main += cw + marginMain(.row, child.margin);
+            cross = @max(cross, cs.height + marginCross(.row, child.margin));
+        }
+        content = .{ .width = main, .height = cross };
     } else if (el.children.len > 0) {
         // A column shares its (definite or inherited) content width with each
-        // child; a row divides width per flex, so don't wrap-constrain at measure.
+        // child; a row of unknown width divides per flex, so don't wrap-constrain.
         const own_w: ?f32 = el.width orelse avail_w;
         const child_avail: ?f32 = if (el.direction == .column and own_w != null) own_w.? - chrome_w else null;
         var main: f32 = 0;
@@ -1329,6 +1355,30 @@ test "text wraps to the available width; the block grows to fit (#304)" {
     var res2 = try layoutWith(&rec, &root2, 80, 400);
     defer res2.deinit(testing.allocator);
     try testing.expectEqual(line_h, res2.placements[2].rect.height);
+}
+
+test "a wrapping grow-child grows its row's height; siblings reflow below it (#304)" {
+    var rec = record.RecordBackend.init(testing.allocator);
+    defer rec.deinit();
+    const b = rec.interface();
+    const line_h = b.measureText("Ag", .{}).height;
+
+    const para = "one two three four five six seven eight nine ten eleven twelve";
+    // A label beside a grow column of wrapping text — the docs "world scripts"
+    // pattern. The text must wrap to the grow column's resolved width, and the
+    // row must grow tall enough that the following sibling sits below it.
+    const label: Element = .{ .width = 20 };
+    const wrapped: Element = .{ .text = para, .text_wrap = .wrap };
+    const grow_col: Element = .{ .direction = .column, .grow = 1, .children = &.{&wrapped} };
+    const row: Element = .{ .direction = .row, .children = &.{ &label, &grow_col } };
+    const sibling: Element = .{ .width = 10, .height = 5 };
+    const root: Element = .{ .direction = .column, .children = &.{ &row, &sibling } };
+    var res = try layoutWith(&rec, &root, 80, 400); // narrow → the grow column's text wraps
+    defer res.deinit(testing.allocator);
+    // [0]=root [1]=row [2]=label [3]=grow_col [4]=text [5]=sibling
+    try testing.expect(res.placements[1].rect.height > line_h * 1.5); // row grew to ≥2 lines
+    // The sibling sits at or below the bottom of the (now tall) row — no overlap.
+    try testing.expect(res.placements[5].rect.y >= res.placements[1].rect.y + res.placements[1].rect.height - 0.5);
 }
 
 test "flex-wrap flows items onto new lines when they overflow (#308)" {

@@ -196,9 +196,12 @@ fn textExamples(u: *ui.Ui) !Widget {
     // the shaping/BiDi result lines up in a column.
     const Line = struct {
         fn make(uu: *ui.Ui, name: []const u8, sample: []const u8) !Widget {
-            return uu.row(.{ .gap = 16, .align_items = .center }, &.{
+            return uu.row(.{ .gap = 16 }, &.{
                 try uu.column(.{ .width = 90 }, &.{uu.text(name, .{ .variant = .caption, .role = .secondary })}),
-                uu.text(sample, .{ .variant = .body }),
+                // Grow into the remaining row width so the sample has a definite
+                // width to wrap against (a flex row otherwise sizes it to its
+                // intrinsic single-line width).
+                try uu.column(.{ .grow = 1 }, &.{uu.text(sample, .{ .variant = .body })}),
             });
         }
     };
