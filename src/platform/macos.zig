@@ -126,6 +126,39 @@ const core_event = @import("../event.zig");
 const cursor_mod = @import("../cursor.zig");
 const window_mod = @import("../window.zig");
 const menu_mod = @import("../menu.zig");
+const style_mod = @import("../style.zig");
+
+/// The user's system accent color (NSColor.controlAccentColor, macOS 10.14+),
+/// converted to sRGB — so the app's theme can match the OS (#318). Null on
+/// failure (older macOS).
+pub fn systemAccent() ?style_mod.Color {
+    const accent = msg(id, struct {}, cls("NSColor"), sel("controlAccentColor"), .{});
+    if (accent == null) return null;
+    const space = msg(id, struct {}, cls("NSColorSpace"), sel("sRGBColorSpace"), .{});
+    const c = msg(id, struct { id }, accent, sel("colorUsingColorSpace:"), .{space}) orelse accent;
+    var r: f64 = 0;
+    var g: f64 = 0;
+    var bl: f64 = 0;
+    var a: f64 = 0;
+    msg(void, struct { *f64, *f64, *f64, *f64 }, c, sel("getRed:green:blue:alpha:"), .{ &r, &g, &bl, &a });
+    return style_mod.Color.rgb(
+        @intFromFloat(std.math.clamp(r, 0, 1) * 255),
+        @intFromFloat(std.math.clamp(g, 0, 1) * 255),
+        @intFromFloat(std.math.clamp(bl, 0, 1) * 255),
+    );
+}
+
+/// Whether the OS is in dark mode (NSApp.effectiveAppearance name contains
+/// "Dark"). Lets an app default its theme to the system appearance (#318).
+pub fn prefersDark() bool {
+    const app = msg(id, struct {}, cls("NSApplication"), sel("sharedApplication"), .{});
+    const ap = msg(id, struct {}, app, sel("effectiveAppearance"), .{});
+    if (ap == null) return false;
+    const name = msg(id, struct {}, ap, sel("name"), .{});
+    if (name == null) return false;
+    const utf8 = msg([*:0]const u8, struct {}, name, sel("UTF8String"), .{});
+    return std.mem.indexOf(u8, std.mem.span(utf8), "Dark") != null;
+}
 /// Native windows emit the same core events as the terminal session, so
 /// one app loop drives every surface (#5).
 pub const Event = core_event.Event;

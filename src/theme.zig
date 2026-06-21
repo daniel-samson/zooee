@@ -24,10 +24,14 @@ pub const Theme = struct {
     text: Color,
     /// Secondary / de-emphasized text.
     text_muted: Color,
-    /// Interactive accent (selection, focus, primary action).
+    /// Interactive accent (focus, primary action) — ideally the OS accent.
     accent: Color,
     /// Text/icon drawn on top of `accent`.
     on_accent: Color,
+    /// Text-selection highlight — a lighter tint of the accent.
+    selection: Color,
+    /// Color of text drawn inside a selection highlight.
+    selection_text: Color,
     /// Hairlines and container outlines.
     border: Color,
     /// Destructive / error accent.
@@ -42,6 +46,8 @@ pub const Theme = struct {
         .text_muted = Color.rgb(110, 110, 118),
         .accent = Color.rgb(0, 122, 255),
         .on_accent = Color.rgb(255, 255, 255),
+        .selection = Color.rgb(179, 212, 252), // accent lightened (pale blue)
+        .selection_text = Color.rgb(0, 0, 0),
         .border = Color.rgb(198, 198, 200),
         .danger = Color.rgb(255, 59, 48),
     };
@@ -55,9 +61,44 @@ pub const Theme = struct {
         .text_muted = Color.rgb(152, 152, 157), // secondaryLabel
         .accent = Color.rgb(10, 132, 255), // systemBlue (dark)
         .on_accent = Color.rgb(255, 255, 255),
+        .selection = Color.rgb(48, 90, 150), // muted accent for dark backdrops
+        .selection_text = Color.rgb(255, 255, 255),
         .border = Color.rgb(64, 64, 67), // separator
         .danger = Color.rgb(255, 69, 58), // systemRed (dark)
     };
+
+    /// Lighten a color toward white by `t` (0 = unchanged, 1 = white) — used to
+    /// derive the selection tint from the accent.
+    pub fn lighten(c: Color, t: f32) Color {
+        return .{
+            .r = @intFromFloat(@as(f32, @floatFromInt(c.r)) + (255 - @as(f32, @floatFromInt(c.r))) * t),
+            .g = @intFromFloat(@as(f32, @floatFromInt(c.g)) + (255 - @as(f32, @floatFromInt(c.g))) * t),
+            .b = @intFromFloat(@as(f32, @floatFromInt(c.b)) + (255 - @as(f32, @floatFromInt(c.b))) * t),
+            .a = c.a,
+        };
+    }
+
+    /// Derive a copy of `self` using the OS accent color: sets `accent` and a
+    /// lightened `selection`, so the app picks up the user's system accent
+    /// (#318). `selection_text` keeps the theme's value (readable on the tint).
+    pub fn withAccent(self: Theme, accent_color: Color) Theme {
+        var t = self;
+        t.accent = accent_color;
+        // Light themes want a pale selection; dark themes a muted-darker one.
+        const is_light = @as(u32, self.background.r) + self.background.g + self.background.b > 384;
+        t.selection = if (is_light) lighten(accent_color, 0.62) else mixToward(accent_color, self.background, 0.45);
+        return t;
+    }
+
+    /// Blend `c` toward `dst` by `t`.
+    fn mixToward(c: Color, dst: Color, t: f32) Color {
+        return .{
+            .r = @intFromFloat(@as(f32, @floatFromInt(c.r)) + (@as(f32, @floatFromInt(dst.r)) - @as(f32, @floatFromInt(c.r))) * t),
+            .g = @intFromFloat(@as(f32, @floatFromInt(c.g)) + (@as(f32, @floatFromInt(dst.g)) - @as(f32, @floatFromInt(c.g))) * t),
+            .b = @intFromFloat(@as(f32, @floatFromInt(c.b)) + (@as(f32, @floatFromInt(dst.b)) - @as(f32, @floatFromInt(c.b))) * t),
+            .a = c.a,
+        };
+    }
 
     /// The background as a premultiplied-free RGBA float quad — the form the GPU
     /// backends' clear paths want.

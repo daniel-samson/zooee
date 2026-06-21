@@ -42,6 +42,8 @@ pub fn buildTree(comptime Model: type, model: *Model, arena: std.mem.Allocator, 
         // else the dark default. (Pairs with `background()` for the clear color.)
         if (@hasDecl(Model, "theme")) u.theme = model.theme();
         focus_ring_color = u.theme.accent; // focus ring tracks the theme accent (#310)
+        selection_color = u.theme.selection; // text-selection highlight (#318)
+        selection_text_color = u.theme.selection_text;
         layout_mod.scrollbar_thumb = .{ .r = u.theme.text_muted.r, .g = u.theme.text_muted.g, .b = u.theme.text_muted.b, .a = 150 }; // muted neutral thumb (#312)
         return u.lower(try model.viewUi(&u));
     }
@@ -1007,11 +1009,9 @@ fn renderTextSelection(b: backend_mod.Backend, placements: []const layout_mod.Pl
     const inner = layout_mod.contentBoxOf(el, pl.rect);
     const a = layout_mod.textCaretAt(b, el, inner, ts.anchor_pt);
     const f = layout_mod.textCaretAt(b, el, inner, ts.focus_pt);
-    var rects: [64]geometry.Rect = undefined;
-    const n = layout_mod.textSelectionRects(b, el, inner, a, f, &rects);
-    var col = focus_ring_color; // themed accent
-    col.a = 80; // translucent highlight over the text
-    for (rects[0..n]) |r| b.drawRect(r, .{ .background = col });
+    // Highlight in the themed selection tint, with the selected glyphs redrawn
+    // in the selection text color on top (#318).
+    layout_mod.drawTextSelection(b, el, inner, a, f, selection_color, selection_text_color);
 
     if (g_copy_request) {
         const lo = @min(a, f);
@@ -1272,6 +1272,8 @@ fn changeFocus(comptime Model: type, comptime Msg: type, model: *Model, placemen
 /// first build / for raw `view` models. Width/offset/radius are still the
 /// pixel-tunable part.
 var focus_ring_color = style_mod.Color.rgb(10, 132, 255);
+var selection_color = theme_mod.Theme.dark.selection; // text-selection highlight (#318)
+var selection_text_color = theme_mod.Theme.dark.selection_text;
 
 /// Draw the focus ring around the focused element (#310): a 2px accent outline
 /// just outside its border box, matching its corner radius. Loops call this
@@ -1514,6 +1516,21 @@ fn systemClipboard(window: anytype, gpa: std.mem.Allocator) WindowPlatform.Syste
         WindowPlatform.SystemClipboard.init(window)
     else
         WindowPlatform.SystemClipboard.init(gpa);
+}
+
+/// The user's OS accent color, if the platform exposes one (#318). A Model can
+/// match the system in its `theme()` hook:
+///   `return Theme.dark.withAccent(zooee.app.systemAccent() orelse Theme.dark.accent);`
+pub fn systemAccent() ?style_mod.Color {
+    if (@hasDecl(WindowPlatform, "systemAccent")) return WindowPlatform.systemAccent();
+    return null;
+}
+
+/// Whether the OS is in dark mode, if the platform reports it (#318) — for an
+/// app that wants to default its theme to the system appearance.
+pub fn systemPrefersDark() bool {
+    if (@hasDecl(WindowPlatform, "prefersDark")) return WindowPlatform.prefersDark();
+    return false;
 }
 
 /// On a pointer_move, resolve the cursor under the pointer and apply it to the

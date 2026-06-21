@@ -437,9 +437,11 @@ const Docs = struct {
     }
 
     /// The active theme (#21): widgets + the backdrop resolve from it. Flipping
-    /// `dark` (the sidebar footer switch) swaps the whole UI light ⇆ dark.
+    /// `dark` (the sidebar footer switch) swaps the whole UI light ⇆ dark, and
+    /// the accent + selection tint follow the OS accent color when available.
     pub fn theme(self: *Docs) ui.Theme {
-        return if (self.dark) ui.Theme.dark else ui.Theme.light;
+        const base = if (self.dark) ui.Theme.dark else ui.Theme.light;
+        return base.withAccent(zooee.app.systemAccent() orelse base.accent);
     }
 
     pub fn background(self: *Docs) Color {
@@ -454,7 +456,8 @@ const Docs = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
-    var docs: Docs = .{};
+    // Start in the OS appearance; the sidebar switch can still override it.
+    var docs: Docs = .{ .dark = zooee.app.systemPrefersDark() };
     try zooee.app.runWindow(Docs, Msg, &docs, init, .{
         .title = "Zooee Docs",
         .width = 900,

@@ -629,6 +629,42 @@ pub fn contentBoxOf(el: *const Element, border_box: Rect) Rect {
     return contentBox(el, border_box);
 }
 
+/// Draw the selection highlight for byte range [a,b) over `el`'s wrapped text:
+/// a `hl`-filled rect per covered line, with the selected substring redrawn in
+/// `fg` on top so highlighted text gets its own color (#318).
+pub fn drawTextSelection(b: Backend, el: *const Element, inner: Rect, sel_a: usize, sel_b: usize, hl: style.Color, fg: style.Color) void {
+    const t = el.text orelse return;
+    const lo = @min(sel_a, sel_b);
+    const hi = @max(sel_a, sel_b);
+    if (hi <= lo) return;
+    var buf: [16 * 1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    var ctx: MeasureCtx = .{ .b = b, .style = el.text_style };
+    const m: text_mod.Measurer = .{ .ctx = &ctx, .measure_fn = MeasureCtx.measure };
+    const line_h = b.measureText("Ag", el.text_style).height;
+    var lay = text_mod.layout(fba.allocator(), t, m, .{
+        .max_width = if (el.text_wrap != .nowrap) inner.width + wrap_slack else null,
+        .@"align" = el.text_align,
+        .line_height = line_h,
+        .wrap = el.text_wrap,
+    }) catch return;
+    defer lay.deinit(fba.allocator());
+    var sel_style = el.text_style;
+    sel_style.color = fg;
+    var abuf: [3072]u8 = undefined;
+    var vbuf: [3072]u8 = undefined;
+    for (lay.lines) |ln| {
+        const a = std.math.clamp(lo, ln.start, ln.end);
+        const c = std.math.clamp(hi, ln.start, ln.end);
+        if (c <= a) continue;
+        const pa = text_mod.caretToPoint(lay, t, m, a);
+        const pc = text_mod.caretToPoint(lay, t, m, c);
+        const rect: Rect = .{ .x = inner.x + pa.x, .y = inner.y + ln.y, .width = pc.x - pa.x, .height = line_h };
+        b.drawRect(rect, .{ .background = hl });
+        b.drawText(.{ .x = rect.x, .y = inner.y + ln.y }, shapeForDisplay(t[a..c], &abuf, &vbuf), sel_style);
+    }
+}
+
 /// The padding box: border-box minus border widths only (padding included).
 /// A scroll container's scrollport is its padding box — when scrolled, content
 /// fills the padding band up to the border, matching CSS overflow.
