@@ -1079,7 +1079,7 @@ pub const D3dShadowRenderer = struct {
 // so points are packed two-per-float4 (pts[32]); point k = even ? .xy : .zw.
 
 const path_hlsl =
-    \\cbuffer CB : register(b0) { float2 viewport; float2 pad; float4 color; float4 meta; float4 pts[32]; };
+    \\cbuffer CB : register(b0) { float2 viewport; float2 pad; float4 color; float4 meta; float4 pts[128]; };
     \\struct VSIn  { float2 pos : POSITION; };
     \\struct VSOut { float4 pos : SV_POSITION; };
     \\VSOut VSMain(VSIn i) {
@@ -1094,7 +1094,7 @@ const path_hlsl =
     \\  bool inside = false; float best = 1e30;
     \\  int n = (int)meta.x;
     \\  int j = n - 1;
-    \\  for (int k = 0; k < 64; k++) {
+    \\  for (int k = 0; k < 256; k++) {
     \\    if (k >= n) break;
     \\    float2 b = pt(k); float2 a = pt(j);
     \\    best = min(best, segd2(a, b, p)); // closed polygon edge
@@ -1113,7 +1113,7 @@ const path_hlsl =
     \\  return float4(color.rgb, color.a * cov);
     \\}
 ;
-const PathCB = extern struct { vw: f32, vh: f32, pad0: f32 = 0, pad1: f32 = 0, color: [4]f32, meta: [4]f32, pts: [32][4]f32 };
+const PathCB = extern struct { vw: f32, vh: f32, pad0: f32 = 0, pad1: f32 = 0, color: [4]f32, meta: [4]f32, pts: [128][4]f32 };
 
 pub const D3dPathRenderer = struct {
     device: *IDevice,
@@ -1160,12 +1160,12 @@ pub const D3dPathRenderer = struct {
         if (points.len < 3) return;
         const dev = self.device;
         const ctx = self.context;
-        const n = @min(points.len, 64);
+        const n = @min(points.len, 256);
         var minx = points[0].x;
         var miny = points[0].y;
         var maxx = points[0].x;
         var maxy = points[0].y;
-        var cbv: PathCB = .{ .vw = vw, .vh = vh, .color = color, .meta = .{ @floatFromInt(n), 0, 0, 0 }, .pts = std.mem.zeroes([32][4]f32) };
+        var cbv: PathCB = .{ .vw = vw, .vh = vh, .color = color, .meta = .{ @floatFromInt(n), 0, 0, 0 }, .pts = std.mem.zeroes([128][4]f32) };
         for (0..n) |k| {
             const p = points[k];
             if (k % 2 == 0) {
@@ -1220,7 +1220,7 @@ pub const D3dPathRenderer = struct {
 // two-per-float4 per the HLSL cbuffer-stride rule. meta = {count, hw2, closed}.
 
 const stroke_hlsl =
-    \\cbuffer CB : register(b0) { float2 viewport; float2 pad; float4 color; float4 meta; float4 pts[32]; };
+    \\cbuffer CB : register(b0) { float2 viewport; float2 pad; float4 color; float4 meta; float4 pts[128]; };
     \\struct VSIn  { float2 pos : POSITION; };
     \\struct VSOut { float4 pos : SV_POSITION; };
     \\VSOut VSMain(VSIn i) {
@@ -1235,7 +1235,7 @@ const stroke_hlsl =
     \\  int n = (int)meta.x; float hw = meta.y; bool closed = meta.z > 0.5;
     \\  int last = closed ? n : n - 1;
     \\  float best = 1e30;
-    \\  for (int k = 0; k < 64; k++) {
+    \\  for (int k = 0; k < 256; k++) {
     \\    if (k >= last) break;
     \\    float2 a = pt(k); float2 b = pt((k + 1) % n);
     \\    best = min(best, segd2(a, b, p));
@@ -1246,7 +1246,7 @@ const stroke_hlsl =
     \\  return float4(color.rgb, color.a * cov);
     \\}
 ;
-const StrokeCB = extern struct { vw: f32, vh: f32, pad0: f32 = 0, pad1: f32 = 0, color: [4]f32, meta: [4]f32, pts: [32][4]f32 };
+const StrokeCB = extern struct { vw: f32, vh: f32, pad0: f32 = 0, pad1: f32 = 0, color: [4]f32, meta: [4]f32, pts: [128][4]f32 };
 
 pub const D3dStrokeRenderer = struct {
     device: *IDevice,
@@ -1293,12 +1293,12 @@ pub const D3dStrokeRenderer = struct {
         if (points.len < 2) return;
         const dev = self.device;
         const ctx = self.context;
-        const n = @min(points.len, 64);
+        const n = @min(points.len, 256);
         var minx = points[0].x;
         var miny = points[0].y;
         var maxx = points[0].x;
         var maxy = points[0].y;
-        var cbv: StrokeCB = .{ .vw = vw, .vh = vh, .color = color, .meta = .{ @floatFromInt(n), hw, if (closed) 1 else 0, 0 }, .pts = std.mem.zeroes([32][4]f32) };
+        var cbv: StrokeCB = .{ .vw = vw, .vh = vh, .color = color, .meta = .{ @floatFromInt(n), hw, if (closed) 1 else 0, 0 }, .pts = std.mem.zeroes([128][4]f32) };
         for (0..n) |k| {
             const p = points[k];
             if (k % 2 == 0) {

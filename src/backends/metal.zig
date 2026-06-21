@@ -1138,7 +1138,7 @@ pub const MetalShadowRenderer = struct {
 // Filled-path uniform (#120). quad = bbox to rasterize; count = point count
 // (≤64); pts = polygon points (pixel space). The PS runs the same even-odd
 // test as geometry.pointInPolygon, so the fill matches raster pixel-exact.
-const max_path_pts = 64;
+const max_path_pts = 256;
 // meta.x = point count (as float). A float4 (not uint+uint3) so the MSL and Zig
 // layouts agree — an int-3 vector aligns to 16 in MSL and would shift `pts`.
 const PathUniform = extern struct {
@@ -1160,7 +1160,7 @@ pub const MetalPathRenderer = struct {
     const shader =
         \\#include <metal_stdlib>
         \\using namespace metal;
-        \\struct PathU { float4 quad; float4 color; float4 vp; float4 meta; float2 pts[64]; };
+        \\struct PathU { float4 quad; float4 color; float4 vp; float4 meta; float2 pts[256]; };
         \\vertex float4 v_main(uint vid [[vertex_id]], constant PathU& u [[buffer(0)]]) {
         \\    float2 corner[4] = { float2(0,0), float2(1,0), float2(0,1), float2(1,1) };
         \\    float2 px = u.quad.xy + corner[vid] * u.quad.zw;
@@ -1254,7 +1254,7 @@ pub const MetalStrokeRenderer = struct {
     const shader =
         \\#include <metal_stdlib>
         \\using namespace metal;
-        \\struct StrokeU { float4 quad; float4 color; float4 vp; float4 meta; float2 pts[64]; };
+        \\struct StrokeU { float4 quad; float4 color; float4 vp; float4 meta; float2 pts[256]; };
         \\vertex float4 v_main(uint vid [[vertex_id]], constant StrokeU& u [[buffer(0)]]) {
         \\    float2 corner[4] = { float2(0,0), float2(1,0), float2(0,1), float2(1,1) };
         \\    float2 px = u.quad.xy + corner[vid] * u.quad.zw;
@@ -1270,7 +1270,7 @@ pub const MetalStrokeRenderer = struct {
         \\    int n = int(u.meta.x); float hw = u.meta.y; bool closed = u.meta.z > 0.5;
         \\    int last = closed ? n : n - 1;
         \\    float best = 1e30;
-        \\    for (int i = 0; i < 64; i++) {
+        \\    for (int i = 0; i < 256; i++) {
         \\        if (i >= last) break;
         \\        float2 a = u.pts[i]; float2 b = u.pts[(i + 1) % n];
         \\        best = min(best, segd2(a, b, p));

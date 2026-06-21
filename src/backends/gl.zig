@@ -769,7 +769,7 @@ const path_vert: [*:0]const u8 =
 ;
 const path_frag: [*:0]const u8 =
     \\#version 120
-    \\uniform vec2 pts[64];
+    \\uniform vec2 pts[256];
     \\uniform int count;
     \\uniform vec4 color;
     \\varying vec2 v_px;
@@ -778,7 +778,7 @@ const path_frag: [*:0]const u8 =
     \\  float px = v_px.x, py = v_px.y; vec2 p = vec2(px, py);
     \\  bool inside = false; float best = 1e30;
     \\  int j = count - 1;
-    \\  for (int i = 0; i < 64; i++) {
+    \\  for (int i = 0; i < 256; i++) {
     \\    if (i >= count) break;
     \\    vec2 b = pts[i]; vec2 a = pts[j];
     \\    best = min(best, segd2(a, b, p)); // closed polygon edge
@@ -843,8 +843,8 @@ pub const PathRenderer = struct {
     pub fn fill(self: *PathRenderer, points: []const geometry.Point, color: [4]f32) void {
         if (points.len < 3) return;
         const gl = self.gl;
-        const n = @min(points.len, 64);
-        var flat: [128]f32 = undefined;
+        const n = @min(points.len, 256);
+        var flat: [512]f32 = undefined;
         var minx = points[0].x;
         var miny = points[0].y;
         var maxx = points[0].x;
@@ -877,7 +877,7 @@ pub const PathRenderer = struct {
 // distance to the nearest segment → ~1px coverage at the hw edge (#316).
 const stroke_frag: [*:0]const u8 =
     \\#version 120
-    \\uniform vec2 pts[64];
+    \\uniform vec2 pts[256];
     \\uniform int count;
     \\uniform float hw;
     \\uniform int closed;
@@ -888,7 +888,7 @@ const stroke_frag: [*:0]const u8 =
     \\  vec2 p = v_px;
     \\  int last = (closed != 0) ? count : count - 1;
     \\  float best = 1e30;
-    \\  for (int i = 0; i < 64; i++) {
+    \\  for (int i = 0; i < 256; i++) {
     \\    if (i >= last) break;
     \\    vec2 a = pts[i]; vec2 b = pts[int(mod(float(i + 1), float(count)))];
     \\    best = min(best, segd2(a, b, p));
@@ -949,8 +949,8 @@ pub const StrokeRenderer = struct {
     pub fn stroke(self: *StrokeRenderer, points: []const geometry.Point, hw: f32, color: [4]f32, closed: bool) void {
         if (points.len < 2) return;
         const gl = self.gl;
-        const n = @min(points.len, 64);
-        var flat: [128]f32 = undefined;
+        const n = @min(points.len, 256);
+        var flat: [512]f32 = undefined;
         var minx = points[0].x;
         var miny = points[0].y;
         var maxx = points[0].x;
