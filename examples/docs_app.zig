@@ -123,6 +123,7 @@ fn scrollExamples(u: *ui.Ui, offset: f32) !Widget {
         .padding = .all(12),
         .scroll_y = offset,
         .background = u.theme.background,
+        .on_scroll = demo_scroll_id,
     }, lines));
 }
 
@@ -132,6 +133,10 @@ const list_demo_base: u32 = 1000;
 /// Tab stop and arrow between each other.
 const nav_back: u32 = 3000;
 const nav_forward: u32 = 3001;
+/// Scroll-region ids (#312): the wheel routes to whichever the pointer is over.
+const sidebar_scroll_id: u32 = 5000;
+const content_scroll_id: u32 = 5001;
+const demo_scroll_id: u32 = 5002;
 
 /// Live examples for the List page (#273): a selectable list with live selection.
 fn listExamples(u: *ui.Ui, selected: usize) !Widget {
@@ -240,6 +245,8 @@ const Docs = struct {
     selected: usize = 0,
     list_demo: usize = 1, // selected row on the List page's demo
     scroll_y: f32 = 0, // offset for the Scroll page's viewport
+    sidebar_scroll: f32 = 0, // sidebar list scroll offset (#312)
+    content_scroll: f32 = 0, // content area scroll offset (#312)
     sel_check: bool = false, // Selection page: checkbox
     sel_toggle: bool = true, // Selection page: toggle
     sel_radio: usize = 1, // Selection page: radio choice
@@ -271,8 +278,13 @@ const Docs = struct {
             .background = sidebar_bg,
             .padding = .{ .top = 34, .left = 10, .right = 10, .bottom = 10 },
         }, &.{
-            try u.list(.{ .selected = sel_row }, rowlist.items),
-            u.spacer(), // pin the footer to the bottom
+            // The list scrolls within the sidebar when it's taller than the pane.
+            try u.column(.{
+                .grow = 1,
+                .overflow_y = .auto,
+                .scroll_y = self.sidebar_scroll,
+                .on_scroll = sidebar_scroll_id,
+            }, &.{try u.list(.{ .selected = sel_row }, rowlist.items)}),
             u.divider(.column),
             try u.row(.{ .align_items = .center, .gap = 8, .padding = .all(6) }, &.{
                 u.icon(.{ .name = .circle, .size = 16, .role = .secondary }),
@@ -313,7 +325,14 @@ const Docs = struct {
         } else if (std.mem.eql(u8, page.name, "Selection")) {
             try blocks.append(u.arena, try selectionExamples(u, self.sel_check, self.sel_toggle, self.sel_radio));
         }
-        const detail = try u.column(.{ .grow = 1, .padding = .{ .top = 4, .left = 28, .right = 28, .bottom = 28 }, .gap = 14 }, blocks.items);
+        const detail = try u.column(.{
+            .grow = 1,
+            .padding = .{ .top = 4, .left = 28, .right = 28, .bottom = 28 },
+            .gap = 14,
+            .overflow_y = .auto, // the content area scrolls when it overflows (#312)
+            .scroll_y = self.content_scroll,
+            .on_scroll = content_scroll_id,
+        }, blocks.items);
         const content = try u.column(.{ .grow = 1 }, &.{ toolbar, detail });
 
         // Resizable split (no visible hairline — the rounded panel separates the
@@ -362,9 +381,15 @@ const Docs = struct {
     pub fn onEvent(self: *Docs, ev: zooee.event.Event) zooee.app.Command {
         switch (ev) {
             .text => |t| if (t.codepoint == 'q') return .quit,
-            // Drive the Scroll page's viewport (engine clamps to content extent).
+            // Route the wheel to whichever scroll region the pointer is over
+            // (#312); the engine clamps each to its content extent at render.
             .scroll => |s| {
-                self.scroll_y = @max(0, self.scroll_y + s.dy * 12);
+                const d = s.dy * (if (s.unit == .line) @as(f32, 40) else 1);
+                switch (zooee.app.scrollTarget() orelse demo_scroll_id) {
+                    sidebar_scroll_id => self.sidebar_scroll = @max(0, self.sidebar_scroll + d),
+                    content_scroll_id => self.content_scroll = @max(0, self.content_scroll + d),
+                    else => self.scroll_y = @max(0, self.scroll_y + d), // Scroll-page demo
+                }
                 return .redraw;
             },
             // Divider drag: grab near the sidebar's trailing edge, then track the

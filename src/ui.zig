@@ -259,6 +259,9 @@ pub const ScrollView = struct {
     gap: f32 = 0,
     padding: layout.EdgeInsets = .{},
     background: ?Color = null,
+    /// Scroll-target id so the wheel routes here even amid other scroll regions
+    /// (#309/#312); read it back in onEvent via app.scrollTarget().
+    on_scroll: ?u32 = null,
     children: []const Widget = &.{},
 };
 
@@ -662,6 +665,7 @@ pub const Ui = struct {
                     .scroll = true,
                     .scroll_x = sv.scroll_x * s,
                     .scroll_y = sv.scroll_y * s,
+                    .on_scroll = sv.on_scroll,
                     .children = kids,
                     .rect_style = .{ .background = sv.background },
                 };

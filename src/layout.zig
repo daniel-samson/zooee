@@ -250,6 +250,44 @@ pub fn render(b: Backend, result: LayoutResult) void {
     if (result.placements.len > 0) renderNode(b, result.placements, &i);
 }
 
+/// Scrollbar thumb color (#312): a translucent overlay. Provisional — width,
+/// inset, and color are the pixel-tunable bits.
+const scrollbar_thumb = style.Color{ .r = 145, .g = 145, .b = 152, .a = 150 };
+
+/// Metrics for drawing a scroll container's scrollbar(s) after its children.
+const ScrollBars = struct {
+    cbox: Rect,
+    ext: Size,
+    sx: f32,
+    sy: f32,
+    show_v: bool,
+    show_h: bool,
+};
+
+/// Draw the scrollbar thumb(s) for a scroll container (#312): a rounded bar along
+/// the overflowing axis, sized to the viewport/content ratio and positioned by
+/// the scroll offset. Drawn in unscrolled container space, on top of content.
+fn drawScrollbars(b: Backend, sb: ScrollBars) void {
+    const bw: f32 = 6; // bar thickness
+    const min_thumb: f32 = 18;
+    if (sb.show_v and sb.ext.height > sb.cbox.height) {
+        const track = sb.cbox.height;
+        const thumb = @max(min_thumb, @min(track, track * sb.cbox.height / sb.ext.height));
+        const maxoff = sb.ext.height - sb.cbox.height;
+        const t = if (maxoff > 0) std.math.clamp(sb.sy / maxoff, 0, 1) else 0;
+        const ty = sb.cbox.y + t * (track - thumb);
+        b.drawRect(.{ .x = sb.cbox.x + sb.cbox.width - bw, .y = ty, .width = bw, .height = thumb }, .{ .background = scrollbar_thumb, .corner_radius = style.CornerRadius.all(bw / 2) });
+    }
+    if (sb.show_h and sb.ext.width > sb.cbox.width) {
+        const track = sb.cbox.width;
+        const thumb = @max(min_thumb, @min(track, track * sb.cbox.width / sb.ext.width));
+        const maxoff = sb.ext.width - sb.cbox.width;
+        const t = if (maxoff > 0) std.math.clamp(sb.sx / maxoff, 0, 1) else 0;
+        const tx = sb.cbox.x + t * (track - thumb);
+        b.drawRect(.{ .x = tx, .y = sb.cbox.y + sb.cbox.height - bw, .width = thumb, .height = bw }, .{ .background = scrollbar_thumb, .corner_radius = style.CornerRadius.all(bw / 2) });
+    }
+}
+
 fn renderNode(b: Backend, placements: []const Placement, i: *usize) void {
     const p = placements[i.*];
     i.* += 1;
@@ -308,6 +346,7 @@ fn renderNode(b: Backend, placements: []const Placement, i: *usize) void {
     // stay unconstrained — we expand the clip rect to the canvas there so content
     // spills (matching visible) while the other axis still clips.
     var scrolling = false;
+    var bars: ?ScrollBars = null;
     if (el.scroll or el.overflow_x != .visible or el.overflow_y != .visible) {
         const cbox = contentBox(el, p.rect);
         // Clamp the scroll offset to the content extent so the viewport can't
@@ -341,12 +380,15 @@ fn renderNode(b: Backend, placements: []const Placement, i: *usize) void {
             b.pushClip(clip_rect);
             b.pushTranslate(-sx, -sy);
             scrolling = true;
+            // Show a scrollbar on an axis that pans AND overflows (#312).
+            bars = .{ .cbox = cbox, .ext = ext, .sx = sx, .sy = sy, .show_v = pan_y and over_y, .show_h = pan_x and over_x };
         }
     }
     for (el.children) |_| renderNode(b, placements, i);
     if (scrolling) {
         b.popTranslate();
         b.popClip();
+        if (bars) |sb| drawScrollbars(b, sb);
     }
 
     if (clipped) b.popClip();
@@ -796,8 +838,9 @@ test "scroll viewport clamps the offset to content, never panning into empty spa
     render(b, result);
     try b.endFrame();
 
-    // Clamped: the box shows the third (blue) row, not empty white.
-    try testing.expectEqual(style.Color.rgb(0, 0, 255), rb.pixelAt(5, 5));
+    // Clamped: the box shows the third (blue) row, not empty white. Check the
+    // left edge (x=2) — the right edge now carries the scrollbar thumb (#312).
+    try testing.expectEqual(style.Color.rgb(0, 0, 255), rb.pixelAt(2, 5));
 }
 
 test "overflow: hidden clips but does not pan; scroll/auto do pan (#309)" {
@@ -932,6 +975,30 @@ test "overflow: auto clips+pans only when content overflows that axis (#309)" {
         try b.endFrame();
         try testing.expectEqual(blu, rb.pixelAt(10, 5)); // panned (overflows)
     }
+}
+
+test "scrollbar: a thumb draws on the overflowing axis only (#312)" {
+    const red = style.Color.rgb(255, 0, 0);
+    // 30x20 box; bar lives at the right edge (x≈24..30).
+    const mk = struct {
+        fn run(content_h: f32) u8 {
+            var rb = raster.RasterBackend.init(testing.allocator);
+            defer rb.deinit();
+            const b = rb.interface();
+            const child: Element = .{ .width = 30, .height = content_h, .rect_style = .{ .background = style.Color.rgb(255, 0, 0) } };
+            const box: Element = .{ .width = 30, .height = 20, .direction = .column, .overflow_y = .scroll, .children = &.{&child} };
+            b.beginFrame(.{ .width = 30, .height = 20 }) catch unreachable;
+            var result = layout(testing.allocator, b, &box, .{ .width = 30, .height = 20 }) catch unreachable;
+            defer result.deinit(testing.allocator);
+            render(b, result);
+            b.endFrame() catch {};
+            return rb.pixelAt(27, 6).r; // inside the bar track, over red content
+        }
+    };
+    // Content taller than the box → the translucent thumb dims the red (r<255).
+    try testing.expect(mk.run(60) < 255);
+    // Content that fits → no overflow, no thumb → pure red.
+    try testing.expectEqual(red.r, mk.run(12));
 }
 
 test "overflow: lastScrollMax reports the scrollable range for over-scroll clamping (#309)" {

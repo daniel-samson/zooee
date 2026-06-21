@@ -951,6 +951,14 @@ pub fn focusedIndex() ?usize {
 pub fn focusVisible() bool {
     return g_focus_visible;
 }
+
+/// The `on_scroll` id of the region the last scroll event was delivered to
+/// (#312). Lets a model with several scroll regions route the wheel to the right
+/// one from `onEvent` (which otherwise only sees the event, not which region).
+var g_scroll_target: ?u32 = null;
+pub fn scrollTarget() ?u32 {
+    return g_scroll_target;
+}
 pub fn resetFocus() void {
     g_focus = null;
     g_focus_visible = false;
@@ -1130,10 +1138,17 @@ fn dispatch(
         // itself a scroll target with `on_scroll`, scroll is delivered only when
         // the pointer is over a target (so input doesn't leak between regions);
         // until then scroll is global, preserving the legacy onEvent behavior.
-        .scroll => |s| if (!anyOnScroll(placements) or hitMsg(placements, s.position, .scroll) != null)
-            model.onEvent(ev)
-        else
-            .none,
+        .scroll => |s| blk: {
+            if (!anyOnScroll(placements)) {
+                g_scroll_target = null;
+                break :blk model.onEvent(ev);
+            }
+            if (hitMsg(placements, s.position, .scroll)) |id| {
+                g_scroll_target = id; // which region the wheel is over (#312)
+                break :blk model.onEvent(ev);
+            }
+            break :blk .none;
+        },
         // Keyboard navigation (#310), web-parity: Tab / Shift+Tab move focus
         // through focusable elements in layout order (wrap-around); Enter
         // activates the focused element's `on_click`. Any other key, and keys
