@@ -609,6 +609,7 @@ pub const Ui = struct {
                             .align_items = .center,
                             .gap = 8 * s,
                             .on_click = r.on_click,
+                            .focusable = r.on_click != null, // arrow/Tab nav (#310/#16)
                             .cursor = if (r.on_click != null) .pointer else null,
                             .padding = .symmetric(8 * s, 6 * s),
                             .children = kids,

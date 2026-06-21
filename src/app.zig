@@ -1104,6 +1104,17 @@ fn dispatch(
                 g_focus_visible = true; // keyboard focus → show the ring
                 break :blk .redraw;
             }
+            // Arrow keys move focus to the prev/next focusable element (#310/#16,
+            // list & menu nav) — but only while already keyboard-navigating, so
+            // apps keep arrow keys when nothing is focused.
+            if ((k.key == .up or k.key == .down) and g_focus != null) {
+                const n = focusableCount(placements);
+                if (n > 0) {
+                    changeFocus(Model, Msg, model, placements, moveFocus(g_focus, n, k.key == .up));
+                    g_focus_visible = true;
+                    break :blk .redraw;
+                }
+            }
             if (k.key == .enter) {
                 if (activateFocused(Model, Msg, model, placements)) |cmd| break :blk cmd;
             }
@@ -1391,6 +1402,45 @@ test "Space activates the focused control; :focus-visible only on keyboard focus
     // Then Tab reveals the ring again.
     _ = dispatch(M, Msg, &m, .{ .key_down = .{ .key = .tab } }, &placements);
     try testing.expect(focusVisible());
+    resetFocus();
+}
+
+test "arrow keys move focus while navigating; pass through when unfocused (#310/#16)" {
+    resetFocus();
+    const Msg = enum(u32) { _ };
+    const M = struct {
+        keys: usize = 0,
+        pub fn update(_: *@This(), _: Msg) Command {
+            return .none;
+        }
+        pub fn onEvent(self: *@This(), ev: event_mod.Event) Command {
+            if (ev == .key_down) self.keys += 1;
+            return .none;
+        }
+    };
+    const r: geometry.Rect = .{ .x = 0, .y = 0, .width = 10, .height = 10 };
+    const a: layout_mod.Element = .{ .focusable = true };
+    const b: layout_mod.Element = .{ .focusable = true };
+    const c: layout_mod.Element = .{ .focusable = true };
+    const placements = [_]layout_mod.Placement{ .{ .element = &a, .rect = r }, .{ .element = &b, .rect = r }, .{ .element = &c, .rect = r } };
+    var m: M = .{};
+    const down: event_mod.Event = .{ .key_down = .{ .key = .down } };
+    const up: event_mod.Event = .{ .key_down = .{ .key = .up } };
+    // Nothing focused: Down passes through to onEvent.
+    _ = dispatch(M, Msg, &m, down, &placements);
+    try testing.expectEqual(@as(?usize, null), focusedIndex());
+    try testing.expectEqual(@as(usize, 1), m.keys);
+    // Tab → a(0); Down → b(1) → c(2) → wrap a(0); Up → c(2).
+    _ = dispatch(M, Msg, &m, .{ .key_down = .{ .key = .tab } }, &placements);
+    _ = dispatch(M, Msg, &m, down, &placements);
+    try testing.expectEqual(@as(?usize, 1), focusedIndex());
+    _ = dispatch(M, Msg, &m, down, &placements);
+    _ = dispatch(M, Msg, &m, down, &placements);
+    try testing.expectEqual(@as(?usize, 0), focusedIndex());
+    _ = dispatch(M, Msg, &m, up, &placements);
+    try testing.expectEqual(@as(?usize, 2), focusedIndex());
+    // Arrows while focused were consumed (onEvent count unchanged from the first).
+    try testing.expectEqual(@as(usize, 1), m.keys);
     resetFocus();
 }
 
