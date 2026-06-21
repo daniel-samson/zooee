@@ -40,6 +40,7 @@ pub fn buildTree(comptime Model: type, model: *Model, arena: std.mem.Allocator, 
         // Widgets resolve colors from the theme (#21): the model's `theme()` hook,
         // else the dark default. (Pairs with `background()` for the clear color.)
         if (@hasDecl(Model, "theme")) u.theme = model.theme();
+        focus_ring_color = u.theme.accent; // focus ring tracks the theme accent (#310)
         return u.lower(try model.viewUi(&u));
     }
     return model.view(arena, scale);
@@ -999,10 +1000,11 @@ fn activateFocused(comptime Model: type, comptime Msg: type, model: *Model, plac
     return null;
 }
 
-/// Default focus-ring color (#310): the system accent blue. Provisional — the
-/// look (color/width/offset/radius) is the pixel-tunable part, and will resolve
-/// from the theme accent once focus rendering is themed.
-const focus_ring_color = style_mod.Color.rgb(10, 132, 255);
+/// Focus-ring color (#310): the theme accent, refreshed each frame from the
+/// model's theme in `buildTree`. Falls back to the system accent blue before the
+/// first build / for raw `view` models. Width/offset/radius are still the
+/// pixel-tunable part.
+var focus_ring_color = style_mod.Color.rgb(10, 132, 255);
 
 /// Draw the focus ring around the focused element (#310): a 2px accent outline
 /// just outside its border box, matching its corner radius. Loops call this
