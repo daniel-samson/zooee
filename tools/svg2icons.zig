@@ -133,6 +133,13 @@ fn parseSvg(a: std.mem.Allocator, ident: []const u8, svg: []const u8) !Icon {
         const gt = std.mem.indexOfScalarPos(u8, svg, lt, '>') orelse break;
         const tag = svg[lt + 1 .. gt];
         i = gt + 1;
+        // Each element's coordinates are independent: reset the current point so
+        // a leading *relative* moveto (e.g. a `<path d="m9 12 …">` after a
+        // `<rect>`) starts from the origin, not where the previous element ended.
+        st.cur = .{ .x = 0, .y = 0 };
+        st.start = .{ .x = 0, .y = 0 };
+        st.prev_cubic_ctrl = null;
+        st.prev_quad_ctrl = null;
         if (std.mem.startsWith(u8, tag, "path")) {
             if (attrStr(tag, "d")) |d| try parsePath(&st, d);
         } else if (std.mem.startsWith(u8, tag, "circle")) {

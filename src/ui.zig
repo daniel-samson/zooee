@@ -849,6 +849,19 @@ test "lower: button size scales padding/text; disabled drops click+cursor (#271)
     try testing.expectEqual(@as(?@import("cursor.zig").Cursor, null), off.cursor);
 }
 
+test "generated icon: a relative-moveto subpath after another element is positioned absolutely (#272)" {
+    // square-check = <rect rx=2> then <path d="m9 12 2 2 4-4">. The check's
+    // leading relative moveto must start from the origin, NOT where the rect
+    // ended — guards the svg2icons per-element current-point reset.
+    const d = gen_icons.get(.square_check);
+    try testing.expectEqual(@as(usize, 2), d.subpaths.len);
+    const check = d.subpaths[1]; // the checkmark, not the rect
+    try testing.expectEqual(@as(usize, 3), check.pts.len);
+    // First vertex is (9,12) in the 24-unit viewBox → 0.375, 0.5 normalized.
+    try testing.expectApproxEqAbs(@as(f32, 0.375), check.pts[0].x, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), check.pts[0].y, 0.001);
+}
+
 test "lower: icon → sized filled path; disabled dims the tint (#272)" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
