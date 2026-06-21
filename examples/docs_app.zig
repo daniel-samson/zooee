@@ -201,7 +201,7 @@ fn textExamples(u: *ui.Ui) !Widget {
                 // Grow into the remaining row width so the sample has a definite
                 // width to wrap against (a flex row otherwise sizes it to its
                 // intrinsic single-line width).
-                try uu.column(.{ .grow = 1 }, &.{uu.text(sample, .{ .variant = .body })}),
+                try uu.column(.{ .grow = 1 }, &.{uu.text(sample, .{ .variant = .body, .selectable = true })}),
             });
         }
     };
@@ -328,7 +328,7 @@ const Docs = struct {
 
         // Detail: description + live examples (the title lives in the toolbar now).
         var blocks: std.ArrayList(Widget) = .empty;
-        try blocks.append(u.arena, u.text(page.body, .{ .variant = .body }));
+        try blocks.append(u.arena, u.text(page.body, .{ .variant = .body, .selectable = true }));
         if (std.mem.eql(u8, page.name, "Layout")) {
             try blocks.append(u.arena, try layoutExamples(u));
         } else if (std.mem.eql(u8, page.name, "Text")) {

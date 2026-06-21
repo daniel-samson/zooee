@@ -213,6 +213,7 @@ pub fn run(
         try b.beginFrame(.{ .width = 60, .height = 14 });
         layout_mod.render(b, result);
         renderFocusRing(b, result.placements); // focus ring (#310)
+        renderTextSelection(b, result.placements); // text selection (#318)
         try b.endFrame();
         result.deinit(frame_arena.allocator());
         const text = try term.renderToText(gpa);
@@ -247,6 +248,7 @@ pub fn run(
             try b.beginFrame(viewport);
             layout_mod.render(b, result);
             renderFocusRing(b, result.placements); // focus ring (#310)
+            renderTextSelection(b, result.placements); // text selection (#318)
             try b.endFrame();
             try term.present(out);
             try out.flush();
@@ -364,6 +366,7 @@ pub fn runWindow(
             self.backend.beginFrame(viewport) catch return;
             layout_mod.render(self.backend, result);
             renderFocusRing(self.backend, result.placements); // focus ring (#310)
+            renderTextSelection(self.backend, result.placements); // text selection (#318)
             self.backend.endFrame() catch return;
             platform.blit(self.win, self.raster.pixels, self.raster.width, self.raster.height);
         }
@@ -471,6 +474,7 @@ fn runWindowGl(
             self.backend.beginFrame(viewport) catch return;
             layout_mod.render(self.backend, result);
             renderFocusRing(self.backend, result.placements); // focus ring (#310)
+            renderTextSelection(self.backend, result.placements); // text selection (#318)
             self.backend.endFrame() catch return;
             self.win.glSwap();
         }
@@ -521,6 +525,7 @@ fn runWindowGl(
                 try b.beginFrame(viewport);
                 layout_mod.render(b, result);
                 renderFocusRing(b, result.placements); // focus ring (#310)
+                renderTextSelection(b, result.placements); // text selection (#318)
                 try b.endFrame();
                 const pixels = try glb.readPixels();
                 defer gpa.free(pixels);
@@ -631,6 +636,7 @@ fn runWindowMetal(
             const t_begin = lap(prof, self.io, &t);
             layout_mod.render(self.backend, result);
             renderFocusRing(self.backend, result.placements); // focus ring (#310)
+            renderTextSelection(self.backend, result.placements); // text selection (#318)
             const t_walk = lap(prof, self.io, &t);
             self.backend.endFrame() catch return;
             const t_end = lap(prof, self.io, &t);
@@ -688,6 +694,7 @@ fn runWindowMetal(
                 try b.beginFrame(viewport);
                 layout_mod.render(b, result);
                 renderFocusRing(b, result.placements); // focus ring (#310)
+                renderTextSelection(b, result.placements); // text selection (#318)
                 try b.endFrame();
                 const pixels = try mb.readPixels();
                 defer gpa.free(pixels);
@@ -767,6 +774,7 @@ fn runWindowD3d(
             self.backend.beginFrame(viewport) catch return;
             layout_mod.render(self.backend, result);
             renderFocusRing(self.backend, result.placements); // focus ring (#310)
+            renderTextSelection(self.backend, result.placements); // text selection (#318)
             self.backend.endFrame() catch return;
             self.db.presentTo(self.swapchain);
         }
@@ -816,6 +824,7 @@ fn runWindowD3d(
                 try b.beginFrame(viewport);
                 layout_mod.render(b, result);
                 renderFocusRing(b, result.placements); // focus ring (#310)
+                renderTextSelection(b, result.placements); // text selection (#318)
                 try b.endFrame();
                 const pixels = try db.readPixels();
                 defer gpa.free(pixels);
@@ -923,6 +932,7 @@ pub fn renderOffscreen(
     try b.beginFrame(viewport);
     layout_mod.render(b, result);
     renderFocusRing(b, result.placements); // focus ring (#310)
+    renderTextSelection(b, result.placements); // text selection (#318)
     try b.endFrame();
     return result;
 }
@@ -949,6 +959,71 @@ var g_focus: ?usize = null;
 /// focus last moved by keyboard (Tab), false when it moved by a pointer click —
 /// so clicking a control focuses it without a ring, but Tabbing shows one.
 var g_focus_visible: bool = false;
+
+/// Read-only text selection (#318): the selectable text being dragged (its
+/// placement index) and the raw drag endpoints in absolute coords. The render
+/// pass resolves these points to byte offsets (it has the backend for caret
+/// math) and draws the highlight; copy slices the source by those offsets.
+/// Single active selection, like g_focus.
+const TextSelection = struct {
+    idx: usize,
+    anchor_pt: geometry.Point,
+    focus_pt: geometry.Point,
+    dragging: bool = false,
+};
+var g_textsel: ?TextSelection = null;
+var g_copy_request: bool = false; // ⌘C pressed; the render pass fills the buffer
+var g_copy_pending: bool = false; // buffer ready; the OS-hooks pass writes the clipboard
+var g_copy_buf: [4096]u8 = undefined;
+var g_copy_len: usize = 0;
+
+/// Clear any active text selection (tests / programmatic).
+pub fn resetTextSelection() void {
+    g_textsel = null;
+    g_copy_request = false;
+    g_copy_pending = false;
+}
+
+/// Topmost selectable text element under `p` (last in paint order wins).
+fn selectableAt(placements: []const layout_mod.Placement, p: geometry.Point) ?usize {
+    var found: ?usize = null;
+    for (placements, 0..) |pl, i| {
+        if (pl.element.text_selectable and pl.element.text != null and pl.rect.contains(p)) found = i;
+    }
+    return found;
+}
+
+/// Draw the active text selection's highlight, resolving the drag points to
+/// byte offsets via the backend (#318). On a pending ⌘C, copy the selected
+/// substring into g_copy_buf for the OS-hooks pass to put on the clipboard.
+/// Called by every present loop right after `render`.
+fn renderTextSelection(b: backend_mod.Backend, placements: []const layout_mod.Placement) void {
+    const ts = g_textsel orelse return;
+    if (ts.idx >= placements.len) return;
+    const pl = placements[ts.idx];
+    const el = pl.element;
+    const t = el.text orelse return;
+    if (!el.text_selectable) return;
+    const inner = layout_mod.contentBoxOf(el, pl.rect);
+    const a = layout_mod.textCaretAt(b, el, inner, ts.anchor_pt);
+    const f = layout_mod.textCaretAt(b, el, inner, ts.focus_pt);
+    var rects: [64]geometry.Rect = undefined;
+    const n = layout_mod.textSelectionRects(b, el, inner, a, f, &rects);
+    var col = focus_ring_color; // themed accent
+    col.a = 80; // translucent highlight over the text
+    for (rects[0..n]) |r| b.drawRect(r, .{ .background = col });
+
+    if (g_copy_request) {
+        const lo = @min(a, f);
+        const hi = @min(@max(a, f), t.len);
+        const start = @min(lo, hi);
+        const len = @min(hi - start, g_copy_buf.len);
+        @memcpy(g_copy_buf[0..len], t[start .. start + len]);
+        g_copy_len = len;
+        g_copy_request = false;
+        g_copy_pending = true;
+    }
+}
 
 pub fn focusedIndex() ?usize {
     return g_focus;
@@ -1243,6 +1318,13 @@ fn dispatch(
             if (p.buttons.primary) {
                 // Grab a scrollbar thumb if the press landed on one (#312).
                 if (beginBarDrag(p.position)) break :blk .redraw;
+                // Text selection (#318): pressing on selectable text starts a
+                // drag-select; pressing elsewhere clears any existing selection.
+                if (selectableAt(placements, p.position)) |sidx| {
+                    g_textsel = .{ .idx = sidx, .anchor_pt = p.position, .focus_pt = p.position, .dragging = true };
+                    break :blk .redraw;
+                }
+                if (g_textsel != null) g_textsel = null;
                 // Click-to-focus (#310, web parity): a primary click moves focus
                 // to the focusable element under the pointer — but without a ring
                 // (:focus-visible shows only for keyboard focus).
@@ -1258,9 +1340,15 @@ fn dispatch(
         },
         .pointer_up => blk: {
             g_bar_drag = null; // end any scrollbar drag
+            if (g_textsel) |*ts| ts.dragging = false; // end a text drag-select (#318)
             break :blk model.onEvent(ev); // also let the app end a drag of its own
         },
         .pointer_move => |p| blk: {
+            // Extending a text selection (#318) takes precedence while dragging.
+            if (g_textsel) |*ts| if (ts.dragging) {
+                ts.focus_pt = p.position;
+                break :blk .redraw;
+            };
             // A scrollbar drag takes precedence and scrolls the dragged region.
             if (g_bar_drag != null) {
                 dragBar(p.position);
@@ -1333,6 +1421,12 @@ fn dispatch(
         // plain Space — otherwise it's ordinary text. (Once focusable text fields
         // exist, the focused element's kind decides type-vs-activate.)
         .text => |t| blk: {
+            // Copy the active text selection (#318): ⌘C / Ctrl+C. The render pass
+            // resolves the selected substring and the OS-hooks pass writes it.
+            if ((t.mods.super or t.mods.ctrl) and (t.codepoint == 'c' or t.codepoint == 'C') and g_textsel != null) {
+                g_copy_request = true;
+                break :blk .redraw;
+            }
             if (t.codepoint == ' ' and !t.mods.ctrl and !t.mods.alt and !t.mods.super) {
                 if (activateFocused(Model, Msg, model, placements)) |cmd| break :blk cmd;
             }
@@ -1392,6 +1486,12 @@ fn frameOsHooks(comptime Model: type, window: anytype, model: *Model, gpa: std.m
             var clip = systemClipboard(window, gpa);
             clip.interface().setText(text) catch {};
         }
+    }
+    // Text-selection copy (#318): the render pass filled the buffer on ⌘C.
+    if (g_copy_pending) {
+        var clip = systemClipboard(window, gpa);
+        clip.interface().setText(g_copy_buf[0..g_copy_len]) catch {};
+        g_copy_pending = false;
     }
     if (@hasDecl(Model, "requestPaste") and @hasDecl(Model, "onPaste")) {
         if (model.requestPaste()) {
@@ -1645,6 +1745,55 @@ test "click hits a list row at Retina scale (2x) through the real buildTree path
     const c = target.?;
     _ = dispatch(M, Msg, &m, .{ .pointer_down = .{ .position = .{ .x = c.x + c.width / 2, .y = c.y + c.height / 2 }, .buttons = .{ .primary = true } } }, res.placements);
     try testing.expectEqual(@as(usize, 2), m.selected);
+}
+
+test "text selection: drag selects a range and ⌘C copies the substring (#318)" {
+    resetTextSelection();
+    resetFocus();
+    const Msg = enum(u32) { _ };
+    const M = struct {
+        pub fn viewUi(_: *@This(), u: *ui_mod.Ui) !ui_mod.Widget {
+            return u.column(.{ .width = 400 }, &.{u.text("hello world", .{ .selectable = true })});
+        }
+        pub fn update(_: *@This(), _: Msg) Command {
+            return .none;
+        }
+        pub fn onEvent(_: *@This(), _: event_mod.Event) Command {
+            return .none;
+        }
+    };
+    var rb = raster_mod.RasterBackend.init(testing.allocator);
+    defer rb.deinit();
+    try rb.setFont(@embedFile("poppins"));
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var m: M = .{};
+    const root = try buildTree(M, &m, arena.allocator(), 1);
+    var res = try layout_mod.layout(arena.allocator(), rb.interface(), root, .{ .width = 400, .height = 100 });
+    defer res.deinit(arena.allocator());
+    var r: ?geometry.Rect = null;
+    for (res.placements) |pl| {
+        if (pl.element.text_selectable) r = pl.rect;
+    }
+    try testing.expect(r != null);
+    const t = r.?;
+    const midy = t.y + t.height / 2;
+    // Press at the left edge, drag past the right edge → select the whole string.
+    _ = dispatch(M, Msg, &m, .{ .pointer_down = .{ .position = .{ .x = t.x + 1, .y = midy }, .buttons = .{ .primary = true } } }, res.placements);
+    try testing.expect(g_textsel != null);
+    _ = dispatch(M, Msg, &m, .{ .pointer_move = .{ .position = .{ .x = t.x + t.width + 50, .y = midy } } }, res.placements);
+    _ = dispatch(M, Msg, &m, .{ .pointer_up = .{ .position = .{ .x = t.x + t.width + 50, .y = midy } } }, res.placements);
+    // ⌘C, then the render pass fills the copy buffer.
+    _ = dispatch(M, Msg, &m, .{ .text = .{ .codepoint = 'c', .mods = .{ .super = true } } }, res.placements);
+    try testing.expect(g_copy_request);
+    renderTextSelection(rb.interface(), res.placements);
+    try testing.expect(g_copy_pending);
+    try testing.expectEqualStrings("hello world", g_copy_buf[0..g_copy_len]);
+
+    // A press off the selectable text clears the selection.
+    _ = dispatch(M, Msg, &m, .{ .pointer_down = .{ .position = .{ .x = t.x + 1, .y = t.y + 80 }, .buttons = .{ .primary = true } } }, res.placements);
+    try testing.expect(g_textsel == null);
+    resetTextSelection();
 }
 
 test "roving tabindex: a group is one Tab stop; arrows move within it (#310/#16)" {

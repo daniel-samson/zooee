@@ -132,6 +132,9 @@ pub const Element = struct {
     /// `.wrap`/`.balance`/`.pretty` wrap to the width. Honors `text_align`.
     text_wrap: text_mod.TextWrap = .nowrap,
     text_align: text_mod.Align = .left,
+    /// Read-only text selection (#318): drag to select, ⌘C/Ctrl+C to copy.
+    /// Only meaningful on a text leaf.
+    text_selectable: bool = false,
 
     // Filled path (#120): a closed polygon in the element's LOCAL coords
     // (relative to its border-box origin), filled with `path_color` (even-odd).
@@ -564,6 +567,66 @@ fn drawWrappedText(b: Backend, el: *const Element, t: []const u8, inner: Rect) v
         const vis = shapeForDisplay(ln.slice(t), &abuf, &vbuf);
         b.drawText(.{ .x = inner.x + ln.x, .y = inner.y + ln.y }, vis, el.text_style);
     }
+}
+
+/// Byte offset in `el.text` nearest the absolute point `p`, using the same
+/// wrapped layout the renderer draws (#318 text selection). `inner` is the
+/// element's content box. LTR-accurate; RTL is approximate (logical order).
+pub fn textCaretAt(b: Backend, el: *const Element, inner: Rect, p: geometry.Point) usize {
+    const t = el.text orelse return 0;
+    var buf: [16 * 1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    var ctx: MeasureCtx = .{ .b = b, .style = el.text_style };
+    const m: text_mod.Measurer = .{ .ctx = &ctx, .measure_fn = MeasureCtx.measure };
+    const line_h = b.measureText("Ag", el.text_style).height;
+    var lay = text_mod.layout(fba.allocator(), t, m, .{
+        .max_width = if (el.text_wrap != .nowrap) inner.width + wrap_slack else null,
+        .@"align" = el.text_align,
+        .line_height = line_h,
+        .wrap = el.text_wrap,
+    }) catch return 0;
+    defer lay.deinit(fba.allocator());
+    return text_mod.pointToCaret(lay, t, m, .{ .x = p.x - inner.x, .y = p.y - inner.y });
+}
+
+/// Fill `out` with highlight rectangles (absolute coords) for the selected byte
+/// range over `el`'s wrapped text — one rect per covered line. Returns the count
+/// written (capped at `out.len`). #318.
+pub fn textSelectionRects(b: Backend, el: *const Element, inner: Rect, sel_a: usize, sel_b: usize, out: []Rect) usize {
+    const t = el.text orelse return 0;
+    const lo = @min(sel_a, sel_b);
+    const hi = @max(sel_a, sel_b);
+    if (hi <= lo) return 0;
+    var buf: [16 * 1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    var ctx: MeasureCtx = .{ .b = b, .style = el.text_style };
+    const m: text_mod.Measurer = .{ .ctx = &ctx, .measure_fn = MeasureCtx.measure };
+    const line_h = b.measureText("Ag", el.text_style).height;
+    var lay = text_mod.layout(fba.allocator(), t, m, .{
+        .max_width = if (el.text_wrap != .nowrap) inner.width + wrap_slack else null,
+        .@"align" = el.text_align,
+        .line_height = line_h,
+        .wrap = el.text_wrap,
+    }) catch return 0;
+    defer lay.deinit(fba.allocator());
+    var n: usize = 0;
+    for (lay.lines) |ln| {
+        if (n >= out.len) break;
+        const a = std.math.clamp(lo, ln.start, ln.end);
+        const c = std.math.clamp(hi, ln.start, ln.end);
+        if (c <= a) continue; // this line isn't in the selection
+        const pa = text_mod.caretToPoint(lay, t, m, a);
+        const pc = text_mod.caretToPoint(lay, t, m, c);
+        out[n] = .{ .x = inner.x + pa.x, .y = inner.y + ln.y, .width = pc.x - pa.x, .height = line_h };
+        n += 1;
+    }
+    return n;
+}
+
+/// The content box of a placed element (border + padding inset) — public so the
+/// selection/caret helpers can be driven from a Placement (#318).
+pub fn contentBoxOf(el: *const Element, border_box: Rect) Rect {
+    return contentBox(el, border_box);
 }
 
 /// The padding box: border-box minus border widths only (padding included).

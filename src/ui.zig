@@ -107,6 +107,9 @@ pub const Text = struct {
     /// Text only wraps when an ancestor constrains its width — unconstrained
     /// text stays a single line at its intrinsic width, matching CSS.
     wrap: bool = true,
+    /// Allow the user to drag-select this text and copy it (#318). Off by
+    /// default — opt in on body copy / paragraphs the user may want to lift.
+    selectable: bool = false,
 };
 
 fn variantSize(v: TextVariant) f32 {
@@ -511,6 +514,8 @@ pub const Ui = struct {
             .text => |t| el.* = .{
                 .text = t.text,
                 .text_wrap = if (t.wrap) .wrap else .nowrap,
+                .text_selectable = t.selectable,
+                .cursor = if (t.selectable) .text else null, // I-beam affordance (#318)
                 .text_style = .{
                     .size = (t.size orelse variantSize(t.variant)) * s,
                     .bold = t.bold orelse variantBold(t.variant),

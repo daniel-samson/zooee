@@ -763,6 +763,22 @@ pub const Window = struct {
                         const kflags = msg(u64, struct {}, ev, sel("modifierFlags"), .{});
                         self.queue.append(self.gpa, .{ .key_down = .{ .key = k, .mods = modsFromFlags(kflags) } }) catch {};
                     } else {
+                        const kflags = msg(u64, struct {}, ev, sel("modifierFlags"), .{});
+                        const kmods = modsFromFlags(kflags);
+                        if (kmods.super or kmods.ctrl) {
+                            // Command/Ctrl shortcut (e.g. ⌘C/⌘A): deliver the base
+                            // letter as a .text event WITH mods so the app can act
+                            // on the shortcut. Skip IME — combos aren't composition.
+                            const base = msg(id, struct {}, ev, sel("charactersIgnoringModifiers"), .{});
+                            if (base != null) {
+                                const u8s = msg([*:0]const u8, struct {}, base, sel("UTF8String"), .{});
+                                var it2 = std.unicode.Utf8View.initUnchecked(std.mem.span(u8s)).iterator();
+                                while (it2.nextCodepoint()) |cp| {
+                                    self.queue.append(self.gpa, .{ .text = .{ .codepoint = cp, .mods = kmods } }) catch {};
+                                }
+                            }
+                            continue;
+                        }
                         // Route through the view's input context so IME
                         // composition works (#213); insertText:/setMarkedText:
                         // enqueue the resulting .text / .composition. Fall back to
