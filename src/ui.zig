@@ -77,6 +77,8 @@ pub const Box = struct {
     /// model (via onEvent) while the pointer is over it (#309). Pair with
     /// overflow scroll/auto + scroll_x/scroll_y.
     on_scroll: ?u32 = null,
+    /// Join the keyboard Tab order (#310); Enter activates `on_click`.
+    focusable: bool = false,
     children: []const Widget = &.{},
 };
 
@@ -413,6 +415,7 @@ pub const Ui = struct {
         return self.row(.{
             .gap = 8,
             .on_click = if (opts.disabled) null else opts.on_change,
+            .focusable = !opts.disabled, // joins the Tab order (#310)
         }, children);
     }
 
@@ -517,6 +520,7 @@ pub const Ui = struct {
                     .height = if (b.height) |x| x * s else null,
                     .on_click = b.on_click,
                     .on_scroll = b.on_scroll,
+                    .focusable = b.focusable,
                     .cursor = if (b.on_click != null) .pointer else null,
                     .children = kids,
                     .rect_style = .{
@@ -540,6 +544,7 @@ pub const Ui = struct {
                     .text = bt.label,
                     // Disabled: dispatch nothing, no pointer affordance.
                     .on_click = if (bt.disabled) null else bt.on_click,
+                    .focusable = !bt.disabled, // joins the Tab order (#310)
                     .cursor = if (bt.disabled) null else .pointer,
                     .padding = .symmetric(pad.x * s, pad.y * s),
                     .text_style = .{

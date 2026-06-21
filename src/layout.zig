@@ -177,6 +177,11 @@ pub const Element = struct {
     /// lands on the topmost element carrying `on_scroll`, so scroll input over
     /// one region doesn't drive another. The value identifies the region.
     on_scroll: ?u32 = null,
+    /// Keyboard focus (#310): the element joins the Tab order. Set automatically
+    /// by interactive widgets (buttons, selection controls). Tab/Shift+Tab move
+    /// focus through focusable elements in layout order; Enter activates the
+    /// focused element's `on_click` — web-parity keyboard navigation.
+    focusable: bool = false,
     /// Cursor shape (#123) shown while the pointer is over this element's
     /// border-box. null = inherit (the app resolves the topmost region that
     /// sets one, defaulting to `.default`). Set `.pointer` on clickables,

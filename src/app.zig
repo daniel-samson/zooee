@@ -209,6 +209,7 @@ pub fn run(
         var result = try layout_mod.layout(frame_arena.allocator(), b, root, .{ .width = 60, .height = 14 });
         try b.beginFrame(.{ .width = 60, .height = 14 });
         layout_mod.render(b, result);
+        renderFocusRing(b, result.placements); // focus ring (#310)
         try b.endFrame();
         result.deinit(frame_arena.allocator());
         const text = try term.renderToText(gpa);
@@ -242,6 +243,7 @@ pub fn run(
             placements = result.placements;
             try b.beginFrame(viewport);
             layout_mod.render(b, result);
+            renderFocusRing(b, result.placements); // focus ring (#310)
             try b.endFrame();
             try term.present(out);
             try out.flush();
@@ -357,6 +359,7 @@ pub fn runWindow(
             self.placements.* = result.placements;
             self.backend.beginFrame(viewport) catch return;
             layout_mod.render(self.backend, result);
+            renderFocusRing(self.backend, result.placements); // focus ring (#310)
             self.backend.endFrame() catch return;
             platform.blit(self.win, self.raster.pixels, self.raster.width, self.raster.height);
         }
@@ -462,6 +465,7 @@ fn runWindowGl(
             self.placements.* = result.placements;
             self.backend.beginFrame(viewport) catch return;
             layout_mod.render(self.backend, result);
+            renderFocusRing(self.backend, result.placements); // focus ring (#310)
             self.backend.endFrame() catch return;
             self.win.glSwap();
         }
@@ -510,6 +514,7 @@ fn runWindowGl(
                 placements = result.placements;
                 try b.beginFrame(viewport);
                 layout_mod.render(b, result);
+                renderFocusRing(b, result.placements); // focus ring (#310)
                 try b.endFrame();
                 const pixels = try glb.readPixels();
                 defer gpa.free(pixels);
@@ -619,6 +624,7 @@ fn runWindowMetal(
             self.backend.beginFrame(viewport) catch return;
             const t_begin = lap(prof, self.io, &t);
             layout_mod.render(self.backend, result);
+            renderFocusRing(self.backend, result.placements); // focus ring (#310)
             const t_walk = lap(prof, self.io, &t);
             self.backend.endFrame() catch return;
             const t_end = lap(prof, self.io, &t);
@@ -674,6 +680,7 @@ fn runWindowMetal(
                 placements = result.placements;
                 try b.beginFrame(viewport);
                 layout_mod.render(b, result);
+                renderFocusRing(b, result.placements); // focus ring (#310)
                 try b.endFrame();
                 const pixels = try mb.readPixels();
                 defer gpa.free(pixels);
@@ -752,6 +759,7 @@ fn runWindowD3d(
             self.placements.* = result.placements;
             self.backend.beginFrame(viewport) catch return;
             layout_mod.render(self.backend, result);
+            renderFocusRing(self.backend, result.placements); // focus ring (#310)
             self.backend.endFrame() catch return;
             self.db.presentTo(self.swapchain);
         }
@@ -799,6 +807,7 @@ fn runWindowD3d(
                 placements = result.placements;
                 try b.beginFrame(viewport);
                 layout_mod.render(b, result);
+                renderFocusRing(b, result.placements); // focus ring (#310)
                 try b.endFrame();
                 const pixels = try db.readPixels();
                 defer gpa.free(pixels);
@@ -905,6 +914,7 @@ pub fn renderOffscreen(
     const result = try layout_mod.layout(arena, b, root, viewport);
     try b.beginFrame(viewport);
     layout_mod.render(b, result);
+    renderFocusRing(b, result.placements); // focus ring (#310)
     try b.endFrame();
     return result;
 }
@@ -922,6 +932,87 @@ pub fn dispatchEvent(
     return dispatch(Model, Msg, model, ev, placements);
 }
 
+/// Keyboard focus (#310). The index of the focused element among the focusable
+/// placements, in layout (Tab) order; null = nothing focused. Module-global like
+/// the scroll range — single primary window assumed (per-window/keyed state is
+/// the #5 follow-up). Apps/tests can read or reset it.
+var g_focus: ?usize = null;
+
+pub fn focusedIndex() ?usize {
+    return g_focus;
+}
+pub fn resetFocus() void {
+    g_focus = null;
+}
+
+/// Number of focusable elements in the frame (the Tab order length).
+fn focusableCount(placements: []const layout_mod.Placement) usize {
+    var n: usize = 0;
+    for (placements) |pl| {
+        if (pl.element.focusable) n += 1;
+    }
+    return n;
+}
+
+/// Advance the focus index by one in Tab order (wrap-around); `shift` reverses.
+/// From nothing focused, Tab focuses the first element and Shift+Tab the last.
+fn moveFocus(cur: ?usize, n: usize, shift: bool) ?usize {
+    if (n == 0) return null;
+    if (cur) |c| return if (shift) (c + n - 1) % n else (c + 1) % n;
+    return if (shift) n - 1 else 0;
+}
+
+/// The placement of the currently-focused element, or null. Drives Enter
+/// activation and the focus ring.
+fn focusedPlacement(placements: []const layout_mod.Placement) ?layout_mod.Placement {
+    const target = g_focus orelse return null;
+    var i: usize = 0;
+    for (placements) |pl| {
+        if (!pl.element.focusable) continue;
+        if (i == target) return pl;
+        i += 1;
+    }
+    return null;
+}
+
+/// The focused element's border-box rect (for drawing the focus ring), or null.
+pub fn focusedRect(placements: []const layout_mod.Placement) ?geometry.Rect {
+    return if (focusedPlacement(placements)) |pl| pl.rect else null;
+}
+
+/// Default focus-ring color (#310): the system accent blue. Provisional — the
+/// look (color/width/offset/radius) is the pixel-tunable part, and will resolve
+/// from the theme accent once focus rendering is themed.
+const focus_ring_color = style_mod.Color.rgb(10, 132, 255);
+
+/// Draw the focus ring around the focused element (#310): a 2px accent outline
+/// just outside its border box, matching its corner radius. Loops call this
+/// after `render`. No-op when nothing is focused.
+pub fn renderFocusRing(b: backend_mod.Backend, placements: []const layout_mod.Placement) void {
+    const pl = focusedPlacement(placements) orelse return;
+    const o: f32 = 2; // outset from the border box
+    const ring: geometry.Rect = .{
+        .x = pl.rect.x - o,
+        .y = pl.rect.y - o,
+        .width = pl.rect.width + 2 * o,
+        .height = pl.rect.height + 2 * o,
+    };
+    b.drawRect(ring, .{ .border = style_mod.Border.all(2, focus_ring_color), .corner_radius = pl.element.rect_style.corner_radius });
+}
+
+/// The focusable index of the topmost focusable element under `p` (for
+/// click-to-focus), or null if the click missed every focusable element.
+fn focusIndexAt(placements: []const layout_mod.Placement, p: geometry.Point) ?usize {
+    var found: ?usize = null;
+    var i: usize = 0;
+    for (placements) |pl| {
+        if (!pl.element.focusable) continue;
+        if (pl.rect.contains(p)) found = i; // last (topmost) wins
+        i += 1;
+    }
+    return found;
+}
+
 /// Map one event to a Command, dispatching interaction messages through
 /// the model. Shared by the terminal and GUI loops.
 fn dispatch(
@@ -936,6 +1027,9 @@ fn dispatch(
         .resized => .redraw,
         .pointer_down => |p| blk: {
             if (p.buttons.primary) {
+                // Click-to-focus (#310, web parity): a primary click moves focus
+                // to the focusable element under the pointer (if any).
+                if (focusIndexAt(placements, p.position)) |fi| g_focus = fi;
                 if (hitMsg(placements, p.position, .click)) |m| {
                     break :blk model.update(@as(Msg, @enumFromInt(m)));
                 }
@@ -958,6 +1052,24 @@ fn dispatch(
             model.onEvent(ev)
         else
             .none,
+        // Keyboard navigation (#310), web-parity: Tab / Shift+Tab move focus
+        // through focusable elements in layout order (wrap-around); Enter
+        // activates the focused element's `on_click`. Any other key, and keys
+        // when nothing focusable exists, still fall through to onEvent.
+        .key_down => |k| blk: {
+            if (k.key == .tab) {
+                const n = focusableCount(placements);
+                if (n == 0) break :blk model.onEvent(ev);
+                g_focus = moveFocus(g_focus, n, k.mods.shift);
+                break :blk .redraw;
+            }
+            if (k.key == .enter) {
+                if (focusedPlacement(placements)) |pl| {
+                    if (pl.element.on_click) |m| break :blk model.update(@as(Msg, @enumFromInt(m)));
+                }
+            }
+            break :blk model.onEvent(ev);
+        },
         else => model.onEvent(ev),
     };
 }
@@ -1121,6 +1233,44 @@ fn hitMsg(placements: []const layout_mod.Placement, p: geometry.Point, kind: Int
 const testing = std.testing;
 const record = @import("backends/record.zig");
 
+test "focus ring draws an accent outline around the focused element (#310)" {
+    resetFocus();
+    var rb = raster_mod.RasterBackend.init(testing.allocator);
+    defer rb.deinit();
+    const b = rb.interface();
+
+    // A focusable 40x20 box at (10,10); the ring outsets 2px → spans (8,8)-(52,32).
+    const btn: layout_mod.Element = .{ .width = 40, .height = 20, .focusable = true, .on_click = 1 };
+    const root: layout_mod.Element = .{ .padding = .{ .left = 10, .top = 10, .right = 10, .bottom = 10 }, .children = &.{&btn} };
+
+    try b.beginFrame(.{ .width = 64, .height = 44 });
+    var result = try layout_mod.layout(testing.allocator, b, &root, .{ .width = 64, .height = 44 });
+    defer result.deinit(testing.allocator);
+
+    // Nothing focused → no ring (the pixel just outside the box stays clear).
+    layout_mod.render(b, result);
+    renderFocusRing(b, result.placements);
+    try testing.expectEqual(style_mod.Color.rgb(255, 255, 255), rb.pixelAt(9, 20));
+
+    // Tab focuses the box → the ring paints accent blue just outside it.
+    const Msg = enum(u32) { _ };
+    const M = struct {
+        pub fn update(_: *@This(), _: Msg) Command {
+            return .none;
+        }
+        pub fn onEvent(_: *@This(), _: event_mod.Event) Command {
+            return .none;
+        }
+    };
+    var m: M = .{};
+    _ = dispatch(M, Msg, &m, .{ .key_down = .{ .key = .tab } }, result.placements);
+    layout_mod.render(b, result);
+    renderFocusRing(b, result.placements);
+    try b.endFrame();
+    try testing.expectEqual(focus_ring_color, rb.pixelAt(9, 20)); // ring present at the outset edge
+    resetFocus();
+}
+
 test "buildTree prefers viewUi and lowers it to an Element tree (#4)" {
     const M = struct {
         pub fn viewUi(self: *@This(), u: *ui_mod.Ui) !ui_mod.Widget {
@@ -1150,6 +1300,53 @@ test "hitMsg picks the topmost interactive element" {
     try testing.expectEqual(@as(?u32, 2), hitMsg(&placements, .{ .x = 3, .y = 3 }, .click));
     try testing.expectEqual(@as(?u32, 1), hitMsg(&placements, .{ .x = 8, .y = 8 }, .click));
     try testing.expectEqual(@as(?u32, null), hitMsg(&placements, .{ .x = 50, .y = 50 }, .click));
+}
+
+test "Tab moves focus in layout order, wraps; Enter activates; Shift+Tab reverses (#310)" {
+    resetFocus();
+    const Msg = enum(u32) { _ };
+    const M = struct {
+        activated: ?u32 = null,
+        pub fn update(self: *@This(), m: Msg) Command {
+            self.activated = @intFromEnum(m);
+            return .redraw;
+        }
+        pub fn onEvent(_: *@This(), _: event_mod.Event) Command {
+            return .none;
+        }
+    };
+    const r: geometry.Rect = .{ .x = 0, .y = 0, .width = 10, .height = 10 };
+    const a: layout_mod.Element = .{ .focusable = true, .on_click = 10 };
+    const mid: layout_mod.Element = .{}; // not focusable — skipped in Tab order
+    const b: layout_mod.Element = .{ .focusable = true, .on_click = 20 };
+    const placements = [_]layout_mod.Placement{
+        .{ .element = &a, .rect = r },
+        .{ .element = &mid, .rect = r },
+        .{ .element = &b, .rect = r },
+    };
+    var m: M = .{};
+    const key = struct {
+        fn ev(k: event_mod.Key, shift: bool) event_mod.Event {
+            return .{ .key_down = .{ .key = k, .mods = .{ .shift = shift } } };
+        }
+    };
+    // Tab → first focusable (a); Enter activates its on_click.
+    _ = dispatch(M, Msg, &m, key.ev(.tab, false), &placements);
+    try testing.expectEqual(@as(?usize, 0), focusedIndex());
+    _ = dispatch(M, Msg, &m, key.ev(.enter, false), &placements);
+    try testing.expectEqual(@as(?u32, 10), m.activated);
+    // Tab → next focusable (b, skipping the non-focusable middle); Enter activates.
+    _ = dispatch(M, Msg, &m, key.ev(.tab, false), &placements);
+    try testing.expectEqual(@as(?usize, 1), focusedIndex());
+    _ = dispatch(M, Msg, &m, key.ev(.enter, false), &placements);
+    try testing.expectEqual(@as(?u32, 20), m.activated);
+    // Tab wraps back to the first; Shift+Tab reverses to the last.
+    _ = dispatch(M, Msg, &m, key.ev(.tab, false), &placements);
+    try testing.expectEqual(@as(?usize, 0), focusedIndex());
+    _ = dispatch(M, Msg, &m, key.ev(.tab, true), &placements);
+    try testing.expectEqual(@as(?usize, 1), focusedIndex());
+    try testing.expect(focusedRect(&placements) != null);
+    resetFocus();
 }
 
 test "scroll events route only to on_scroll regions (#309)" {
