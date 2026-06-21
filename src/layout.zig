@@ -79,6 +79,17 @@ pub const Justify = enum { start, center, end, space_between };
 /// and place it at the start/center/end.
 pub const AlignItems = enum { stretch, start, center, end };
 
+/// Whether items flow onto new lines when they overflow the main axis (CSS
+/// `flex-wrap`, #308). `nowrap` (default) = single line (may overflow); `wrap` =
+/// break into lines, advancing on the cross axis.
+pub const FlexWrap = enum { nowrap, wrap };
+
+/// How content larger than the box is handled per axis (CSS `overflow`, #309).
+/// `visible` (default) spills; `hidden` clips with no pan; `scroll`/`auto` clip
+/// and pan by the scroll offset (clamped to content). `auto` vs `scroll` differ
+/// only in scrollbar visibility, which is a separate rendering follow-up.
+pub const Overflow = enum { visible, hidden, scroll, auto };
+
 /// A layout element. This is the layout engine's input tree; the widget
 /// API (#4) will build these. Lifetime: caller-owned, layout never
 /// mutates the element tree.
@@ -103,6 +114,12 @@ pub const Element = struct {
     /// Cross-axis child placement (#268). Default `.stretch` — the historical
     /// behavior (children fill the cross extent unless they set an explicit size).
     align_items: AlignItems = .stretch,
+    /// Flex wrapping (#308). Default `.nowrap` (single line) — the historical
+    /// behavior. `.wrap` flows items onto new lines along the cross axis.
+    wrap: FlexWrap = .nowrap,
+    /// Per-axis overflow handling (#309). Default `.visible` (content spills).
+    overflow_x: Overflow = .visible,
+    overflow_y: Overflow = .visible,
     children: []const *const Element = &.{},
     text: ?[]const u8 = null,
     text_style: style.TextStyle = .{},
@@ -155,6 +172,11 @@ pub const Element = struct {
     // pointer hits this element. Values are app-defined (enum ints).
     on_click: ?u32 = null,
     on_hover: ?u32 = null,
+    /// Marks this element as a scroll target (#309): the app loop hit-tests a
+    /// scroll event's pointer position and only forwards it to the model when it
+    /// lands on the topmost element carrying `on_scroll`, so scroll input over
+    /// one region doesn't drive another. The value identifies the region.
+    on_scroll: ?u32 = null,
     /// Cursor shape (#123) shown while the pointer is over this element's
     /// border-box. null = inherit (the app resolves the topmost region that
     /// sets one, defaulting to `.default`). Set `.pointer` on clickables,
@@ -176,6 +198,18 @@ pub const LayoutResult = struct {
         gpa.free(self.placements);
     }
 };
+
+/// Scrollable range (content extent − viewport, in device px, clamped ≥0) of the
+/// most recently rendered scroll/auto container. Apps read this to clamp their
+/// own stored scroll offset so it can't over-scroll into dead range (scrolling
+/// back then responds immediately instead of unwinding phantom distance). Single
+/// container per frame is assumed — the last one rendered wins; per-container
+/// state arrives with keyed widget state (#5).
+var g_last_scroll_max: Size = .{};
+
+pub fn lastScrollMax() Size {
+    return g_last_scroll_max;
+}
 
 /// Lay out `root` filling `viewport`, then optionally draw via `render`.
 pub fn layout(
@@ -250,18 +284,50 @@ fn renderNode(b: Backend, placements: []const Placement, i: *usize) void {
         }
     }
 
-    // Scroll viewport (#96): clip children to the content box and pan them by
-    // the scroll offset. The element's own frame above is drawn unscrolled.
-    const scrolling = el.scroll or el.scroll_x != 0 or el.scroll_y != 0;
-    if (scrolling) {
+    // Overflow (#96/#309): clip + pan per axis.
+    //   visible — never clip/pan (content spills);
+    //   hidden  — always clip, never pan;
+    //   scroll  — always clip, pan by the offset;
+    //   auto    — clip + pan only on an axis whose content overflows.
+    // `el.scroll` is the legacy scroll-viewport flag (≡ scroll on both axes).
+    // Because a scissor rect bounds both axes at once, a non-clipping axis must
+    // stay unconstrained — we expand the clip rect to the canvas there so content
+    // spills (matching visible) while the other axis still clips.
+    var scrolling = false;
+    if (el.scroll or el.overflow_x != .visible or el.overflow_y != .visible) {
         const cbox = contentBox(el, p.rect);
         // Clamp the scroll offset to the content extent so the viewport can't
         // pan past its content into empty space (#96).
-        const ext = contentExtent(b, el);
-        const sx = std.math.clamp(el.scroll_x, 0, @max(0, ext.width - cbox.width));
-        const sy = std.math.clamp(el.scroll_y, 0, @max(0, ext.height - cbox.height));
-        b.pushClip(cbox);
-        b.pushTranslate(-sx, -sy);
+        const ext = contentExtent(b, el, cbox);
+        const over_x = ext.width > cbox.width + 0.5;
+        const over_y = ext.height > cbox.height + 0.5;
+        const clip_x = el.scroll or el.overflow_x == .hidden or el.overflow_x == .scroll or (el.overflow_x == .auto and over_x);
+        const clip_y = el.scroll or el.overflow_y == .hidden or el.overflow_y == .scroll or (el.overflow_y == .auto and over_y);
+        const pan_x = el.scroll or el.overflow_x == .scroll or (el.overflow_x == .auto and over_x);
+        const pan_y = el.scroll or el.overflow_y == .scroll or (el.overflow_y == .auto and over_y);
+        if (clip_x or clip_y) {
+            // Offsets clamp against the content box (CSS: max scroll = content
+            // size − content-box size), but the scrollport is the padding box,
+            // so scrolled content fills the padding band up to the border.
+            const max_x = @max(0, ext.width - cbox.width);
+            const max_y = @max(0, ext.height - cbox.height);
+            if (pan_x or pan_y) g_last_scroll_max = .{ .width = max_x, .height = max_y };
+            const sx = if (pan_x) std.math.clamp(el.scroll_x, 0, max_x) else 0;
+            const sy = if (pan_y) std.math.clamp(el.scroll_y, 0, max_y) else 0;
+            const pbox = paddingBox(el, p.rect);
+            // Unclipped axes get a huge bound so the scissor only constrains the
+            // axis that actually clips (parent clips still intersect normally).
+            const big: f32 = 1 << 24;
+            const clip_rect: geometry.Rect = .{
+                .x = if (clip_x) pbox.x else pbox.x - big,
+                .y = if (clip_y) pbox.y else pbox.y - big,
+                .width = if (clip_x) pbox.width else big * 2,
+                .height = if (clip_y) pbox.height else big * 2,
+            };
+            b.pushClip(clip_rect);
+            b.pushTranslate(-sx, -sy);
+            scrolling = true;
+        }
     }
     for (el.children) |_| renderNode(b, placements, i);
     if (scrolling) {
@@ -288,6 +354,12 @@ const MeasureCtx = struct {
     }
 };
 
+/// Slack added to a wrap width so text laid out at its own intrinsic width
+/// doesn't wrap against the sub-pixel rounding of its snapped box (which would
+/// drop the last glyph to a new line). Genuine wrapping has far more headroom,
+/// so this only suppresses the self-wrap artifact (#304).
+const wrap_slack: f32 = 1;
+
 /// Measure wrapped/multiline text: the block width and total height for the
 /// given content width (#115). `wrap_w` null = only explicit newlines split.
 fn measureWrapped(b: Backend, el: *const Element, t: []const u8, wrap_w: ?f32) Size {
@@ -297,7 +369,7 @@ fn measureWrapped(b: Backend, el: *const Element, t: []const u8, wrap_w: ?f32) S
     const m: text_mod.Measurer = .{ .ctx = &ctx, .measure_fn = MeasureCtx.measure };
     const line_h = b.measureText("Ag", el.text_style).height;
     var lay = text_mod.layout(fba.allocator(), t, m, .{
-        .max_width = wrap_w,
+        .max_width = if (wrap_w) |w| w + wrap_slack else null,
         .@"align" = el.text_align,
         .line_height = line_h,
         .wrap = el.text_wrap,
@@ -316,7 +388,7 @@ fn drawWrappedText(b: Backend, el: *const Element, t: []const u8, inner: Rect) v
     const m: text_mod.Measurer = .{ .ctx = &ctx, .measure_fn = MeasureCtx.measure };
     const line_h = b.measureText("Ag", el.text_style).height;
     var lay = text_mod.layout(fba.allocator(), t, m, .{
-        .max_width = if (el.text_wrap != .nowrap) inner.width else null,
+        .max_width = if (el.text_wrap != .nowrap) inner.width + wrap_slack else null,
         .@"align" = el.text_align,
         .line_height = line_h,
         .wrap = el.text_wrap,
@@ -336,6 +408,19 @@ fn drawWrappedText(b: Backend, el: *const Element, t: []const u8, inner: Rect) v
     }
 }
 
+/// The padding box: border-box minus border widths only (padding included).
+/// A scroll container's scrollport is its padding box — when scrolled, content
+/// fills the padding band up to the border, matching CSS overflow.
+fn paddingBox(el: *const Element, border_box: Rect) Rect {
+    const bw = el.rect_style.border;
+    return .{
+        .x = border_box.x + bw.left.width,
+        .y = border_box.y + bw.top.width,
+        .width = @max(0, border_box.width - bw.left.width - bw.right.width),
+        .height = @max(0, border_box.height - bw.top.width - bw.bottom.width),
+    };
+}
+
 /// The content box: border-box minus border widths and padding.
 fn contentBox(el: *const Element, border_box: Rect) Rect {
     const bw = el.rect_style.border;
@@ -348,26 +433,34 @@ fn contentBox(el: *const Element, border_box: Rect) Rect {
 }
 
 /// Measure pass: the element's preferred border-box size (margin excluded).
-fn measure(b: Backend, el: *const Element) Size {
+/// `avail_w` is the content width an ancestor with a definite width imposes
+/// (browser block behavior, #304): text wraps to it and the block grows in
+/// height to fit, even without an explicit `width` on the text element.
+fn measure(b: Backend, el: *const Element, avail_w: ?f32) Size {
     const bw = el.rect_style.border;
     const chrome_w = bw.left.width + bw.right.width + el.padding.horizontalSum();
     const chrome_h = bw.top.width + bw.bottom.width + el.padding.verticalSum();
 
     var content: Size = .{};
     if (el.text) |t| {
-        if ((el.text_wrap != .nowrap and el.width != null) or hasNewline(t)) {
-            // Wrapped/multiline text reserves the full block height so siblings
-            // flow below it (#115).
-            const wrap_w: ?f32 = if (el.text_wrap != .nowrap and el.width != null) el.width.? - chrome_w else null;
+        // Wrap to the element's own width, else the width an ancestor gives it.
+        const wrap_avail: ?f32 = el.width orelse avail_w;
+        const do_wrap = el.text_wrap != .nowrap and wrap_avail != null;
+        if (do_wrap or hasNewline(t)) {
+            const wrap_w: ?f32 = if (do_wrap) wrap_avail.? - chrome_w else null;
             content = measureWrapped(b, el, t, wrap_w);
         } else {
             content = b.measureText(t, el.text_style);
         }
     } else if (el.children.len > 0) {
+        // A column shares its (definite or inherited) content width with each
+        // child; a row divides width per flex, so don't wrap-constrain at measure.
+        const own_w: ?f32 = el.width orelse avail_w;
+        const child_avail: ?f32 = if (el.direction == .column and own_w != null) own_w.? - chrome_w else null;
         var main: f32 = 0;
         var cross: f32 = 0;
         for (el.children, 0..) |child, i| {
-            const cs = measure(b, child);
+            const cs = measure(b, child, child_avail);
             const child_main = mainOf(el.direction, cs) + marginMain(el.direction, child.margin);
             const child_cross = crossOf(el.direction, cs) + marginCross(el.direction, child.margin);
             main += child_main;
@@ -386,17 +479,53 @@ fn measure(b: Backend, el: *const Element) Size {
 /// Natural size of an element's children laid out in its direction, ignoring
 /// the element's own fixed width/height. Used to clamp scroll offsets to the
 /// content extent (#96), so a scroll viewport can't pan past its content into
-/// empty space.
-fn contentExtent(b: Backend, el: *const Element) Size {
+/// empty space. `cbox` is the container's content box, needed to break lines
+/// when the element flex-wraps.
+fn contentExtent(b: Backend, el: *const Element, cbox: Rect) Size {
+    const dir = el.direction;
+    const avail_w: ?f32 = if (dir == .column) cbox.width else null;
+
+    // flex-wrap (#308/#309): items flow onto lines within the main extent, so
+    // the main extent stays bounded by the container and the cross extent grows
+    // by the stacked line sizes. Mirror placeWrapped's line-breaking so the
+    // scroll clamp matches where content is actually placed (a non-wrapped sum
+    // would invent a huge main-axis range and pan everything off-screen).
+    if (el.wrap == .wrap) {
+        const avail_main = mainOf(dir, cbox.size());
+        var max_line_main: f32 = 0;
+        var total_cross: f32 = 0;
+        var i: usize = 0;
+        var first_line = true;
+        while (i < el.children.len) {
+            var line_main: f32 = 0;
+            var line_cross: f32 = 0;
+            var j = i;
+            while (j < el.children.len) : (j += 1) {
+                const cs = measure(b, el.children[j], avail_w);
+                const cm = mainOf(dir, cs) + marginMain(dir, el.children[j].margin);
+                const add = cm + (if (j > i) el.gap else 0);
+                if (j > i and line_main + add > avail_main) break;
+                line_main += add;
+                line_cross = @max(line_cross, crossOf(dir, cs) + marginCross(dir, el.children[j].margin));
+            }
+            max_line_main = @max(max_line_main, line_main);
+            if (!first_line) total_cross += el.gap;
+            total_cross += line_cross;
+            first_line = false;
+            i = j;
+        }
+        return sizeFrom(dir, max_line_main, total_cross);
+    }
+
     var main: f32 = 0;
     var cross: f32 = 0;
     for (el.children, 0..) |child, i| {
-        const cs = measure(b, child);
-        main += mainOf(el.direction, cs) + marginMain(el.direction, child.margin);
+        const cs = measure(b, child, avail_w);
+        main += mainOf(dir, cs) + marginMain(dir, child.margin);
         if (i != 0) main += el.gap;
-        cross = @max(cross, crossOf(el.direction, cs) + marginCross(el.direction, child.margin));
+        cross = @max(cross, crossOf(dir, cs) + marginCross(dir, child.margin));
     }
-    return sizeFrom(el.direction, main, cross);
+    return sizeFrom(dir, main, cross);
 }
 
 /// Place pass: position `el`'s border-box inside `slot` (already
@@ -420,6 +549,15 @@ fn place(
 
     const inner = contentBox(el, box);
     const dir = el.direction;
+    // Content width a column shares with each child, for browser-style text wrap
+    // (#304); a row divides width per flex, so no measure-time wrap constraint.
+    const child_avail: ?f32 = if (dir == .column) inner.width else null;
+
+    // flex-wrap (#308): items flow onto new lines along the cross axis.
+    if (el.wrap == .wrap) {
+        try placeWrapped(gpa, b, el, inner, child_avail, out);
+        return;
+    }
 
     // How much main-axis space do fixed children + gaps need; sum grows.
     var fixed_main: f32 = 0;
@@ -430,7 +568,7 @@ fn place(
         if (child.grow > 0) {
             grow_sum += child.grow;
         } else {
-            fixed_main += mainOf(dir, measure(b, child));
+            fixed_main += mainOf(dir, measure(b, child, child_avail));
         }
     }
     const free_main = @max(0, mainOf(dir, inner.size()) - fixed_main);
@@ -461,7 +599,7 @@ fn place(
         if (i != 0) cursor += el.gap + between_extra;
         cursor += marginMainStart(dir, child.margin);
 
-        const child_size = measure(b, child);
+        const child_size = measure(b, child, child_avail);
         var child_main = mainOf(dir, child_size);
         if (child.grow > 0) {
             child_main = free_main * (child.grow / grow_sum);
@@ -473,7 +611,7 @@ fn place(
                     trailing += el.gap;
                     _ = j;
                     trailing += marginMain(dir, after.margin);
-                    if (after.grow == 0) trailing += mainOf(dir, measure(b, after));
+                    if (after.grow == 0) trailing += mainOf(dir, measure(b, after, child_avail));
                 }
                 child_main = (mainStart(dir, inner) + mainOf(dir, inner.size())) - trailing - cursor - marginMainEnd(dir, child.margin);
             }
@@ -496,6 +634,72 @@ fn place(
         try place(gpa, b, child, child_slot, out);
 
         cursor += child_main + marginMainEnd(dir, child.margin);
+    }
+}
+
+/// flex-wrap (#308): break children into lines along the main axis (each line
+/// fits within the container's main extent), advancing on the cross axis by each
+/// line's tallest item. `justify`/`align_items` apply per line. v1: grow is
+/// ignored under wrap (items keep their measured main size).
+fn placeWrapped(
+    gpa: std.mem.Allocator,
+    b: Backend,
+    el: *const Element,
+    inner: Rect,
+    child_avail: ?f32,
+    out: *std.ArrayList(Placement),
+) std.mem.Allocator.Error!void {
+    const dir = el.direction;
+    const avail_main = mainOf(dir, inner.size());
+    var cross_cursor = crossStart(dir, inner);
+    var i: usize = 0;
+    while (i < el.children.len) {
+        // Gather the children that fit on this line ([i, j)).
+        var line_main: f32 = 0;
+        var line_cross: f32 = 0;
+        var j = i;
+        while (j < el.children.len) : (j += 1) {
+            const cs = measure(b, el.children[j], child_avail);
+            const cm = mainOf(dir, cs) + marginMain(dir, el.children[j].margin);
+            const add = cm + (if (j > i) el.gap else 0);
+            if (j > i and line_main + add > avail_main) break; // overflow → next line
+            line_main += add;
+            line_cross = @max(line_cross, crossOf(dir, cs) + marginCross(dir, el.children[j].margin));
+        }
+        // Distribute the line's free main space per justify-content.
+        const n = j - i;
+        const free = @max(0, avail_main - line_main);
+        var lead: f32 = 0;
+        var between: f32 = 0;
+        switch (el.justify) {
+            .start => {},
+            .center => lead = free / 2,
+            .end => lead = free,
+            .space_between => if (n > 1) {
+                between = free / @as(f32, @floatFromInt(n - 1));
+            },
+        }
+        // Place the line's children.
+        var cursor = mainStart(dir, inner) + lead;
+        var k = i;
+        while (k < j) : (k += 1) {
+            const child = el.children[k];
+            if (k != i) cursor += el.gap + between;
+            cursor += marginMainStart(dir, child.margin);
+            const cs = measure(b, child, child_avail);
+            const cmain = mainOf(dir, cs);
+            const ccross = crossOf(dir, cs);
+            const cross_start = cross_cursor + marginCrossStart(dir, child.margin);
+            const align_off: f32 = switch (el.align_items) {
+                .start, .stretch => 0,
+                .center => (line_cross - ccross) / 2,
+                .end => line_cross - ccross,
+            };
+            try place(gpa, b, child, rectFrom(dir, cursor, cross_start + align_off, cmain, ccross), out);
+            cursor += cmain + marginMainEnd(dir, child.margin);
+        }
+        cross_cursor += line_cross + el.gap;
+        i = j;
     }
 }
 
@@ -582,6 +786,250 @@ test "scroll viewport clamps the offset to content, never panning into empty spa
     try testing.expectEqual(style.Color.rgb(0, 0, 255), rb.pixelAt(5, 5));
 }
 
+test "overflow: hidden clips but does not pan; scroll/auto do pan (#309)" {
+    var rb = raster.RasterBackend.init(testing.allocator);
+    defer rb.deinit();
+    const b = rb.interface();
+
+    const r0: Element = .{ .height = 10, .rect_style = .{ .background = style.Color.rgb(255, 0, 0) } };
+    const r1: Element = .{ .height = 10, .rect_style = .{ .background = style.Color.rgb(0, 255, 0) } };
+    const r2: Element = .{ .height = 10, .rect_style = .{ .background = style.Color.rgb(0, 0, 255) } };
+    const content: Element = .{ .direction = .column, .children = &.{ &r0, &r1, &r2 } };
+    // overflow_y=hidden: clips to the 10px box but ignores the offset → the FIRST
+    // (red) row stays at the top, no panning.
+    const box: Element = .{ .width = 10, .height = 10, .overflow_y = .hidden, .scroll_y = 1000, .children = &.{&content} };
+
+    try b.beginFrame(.{ .width = 10, .height = 10 });
+    var result = try layout(testing.allocator, b, &box, .{ .width = 10, .height = 10 });
+    defer result.deinit(testing.allocator);
+    render(b, result);
+    try b.endFrame();
+    try testing.expectEqual(style.Color.rgb(255, 0, 0), rb.pixelAt(5, 5)); // red (not panned)
+}
+
+test "overflow: scroll/hidden clip content below the box; visible spills (#309)" {
+    var rb = raster.RasterBackend.init(testing.allocator);
+    defer rb.deinit();
+    const b = rb.interface();
+
+    // 3 rows of 20px in a 20px-tall box on a 60px canvas: 40px of content lies
+    // below the box. With scroll/hidden it must be clipped (canvas stays white
+    // below y=20); with visible it spills.
+    const r0: Element = .{ .height = 20, .rect_style = .{ .background = style.Color.rgb(255, 0, 0) } };
+    const r1: Element = .{ .height = 20, .rect_style = .{ .background = style.Color.rgb(0, 255, 0) } };
+    const r2: Element = .{ .height = 20, .rect_style = .{ .background = style.Color.rgb(0, 0, 255) } };
+
+    // Nest the box (like the playground) so it keeps its 20px height instead of
+    // being stretched as the root; a tall spacer follows it on the canvas.
+    inline for (.{ Overflow.scroll, Overflow.hidden, Overflow.visible }) |ov| {
+        const content: Element = .{ .direction = .column, .children = &.{ &r0, &r1, &r2 } };
+        const boxel: Element = .{ .width = 20, .height = 20, .overflow_y = ov, .children = &.{&content} };
+        const spacer: Element = .{ .grow = 1 };
+        const root: Element = .{ .direction = .column, .children = &.{ &boxel, &spacer } };
+        try b.beginFrame(.{ .width = 20, .height = 60 });
+        var result = try layout(testing.allocator, b, &root, .{ .width = 20, .height = 60 });
+        defer result.deinit(testing.allocator);
+        render(b, result);
+        try b.endFrame();
+        // y=40 is below the 20px box: scroll/hidden clip it (white); visible spills (blue).
+        const expect = if (ov == .visible) style.Color.rgb(0, 0, 255) else style.Color.rgb(255, 255, 255);
+        try testing.expectEqual(expect, rb.pixelAt(10, 40));
+    }
+}
+
+test "overflow: scroll pans along the main axis per direction; cross axis unaffected (#309)" {
+    const red = style.Color.rgb(255, 0, 0);
+    const grn = style.Color.rgb(0, 255, 0);
+    const blu = style.Color.rgb(0, 0, 255);
+
+    // COLUMN: three 20px rows stacked in a 20px box. scroll_y pans vertically
+    // (row 2/green shows after panning one row); scroll_x must do nothing.
+    {
+        var rb = raster.RasterBackend.init(testing.allocator);
+        defer rb.deinit();
+        const b = rb.interface();
+        const r0: Element = .{ .height = 20, .rect_style = .{ .background = red } };
+        const r1: Element = .{ .height = 20, .rect_style = .{ .background = grn } };
+        const r2: Element = .{ .height = 20, .rect_style = .{ .background = blu } };
+        // scroll_y=20 pans down one row → green at top; scroll_x ignored (no x overflow).
+        const box: Element = .{ .width = 20, .height = 20, .direction = .column, .overflow_y = .scroll, .overflow_x = .scroll, .scroll_y = 20, .scroll_x = 999, .children = &.{ &r0, &r1, &r2 } };
+        try b.beginFrame(.{ .width = 20, .height = 20 });
+        var result = try layout(testing.allocator, b, &box, .{ .width = 20, .height = 20 });
+        defer result.deinit(testing.allocator);
+        render(b, result);
+        try b.endFrame();
+        try testing.expectEqual(grn, rb.pixelAt(10, 5)); // panned to row 2 vertically
+    }
+
+    // ROW: three 20px columns in a 20px box. scroll_x pans horizontally
+    // (col 2/green shows after panning one column); scroll_y must do nothing.
+    {
+        var rb = raster.RasterBackend.init(testing.allocator);
+        defer rb.deinit();
+        const b = rb.interface();
+        const c0: Element = .{ .width = 20, .rect_style = .{ .background = red } };
+        const c1: Element = .{ .width = 20, .rect_style = .{ .background = grn } };
+        const c2: Element = .{ .width = 20, .rect_style = .{ .background = blu } };
+        const box: Element = .{ .width = 20, .height = 20, .direction = .row, .overflow_x = .scroll, .overflow_y = .scroll, .scroll_x = 20, .scroll_y = 999, .children = &.{ &c0, &c1, &c2 } };
+        try b.beginFrame(.{ .width = 20, .height = 20 });
+        var result = try layout(testing.allocator, b, &box, .{ .width = 20, .height = 20 });
+        defer result.deinit(testing.allocator);
+        render(b, result);
+        try b.endFrame();
+        try testing.expectEqual(grn, rb.pixelAt(5, 10)); // panned to col 2 horizontally
+    }
+}
+
+test "overflow: auto clips+pans only when content overflows that axis (#309)" {
+    const red = style.Color.rgb(255, 0, 0);
+    const blu = style.Color.rgb(0, 0, 255);
+
+    // auto, content FITS: a 20px child in a 60px box. No overflow → auto must not
+    // clip and must ignore the offset; the child sits at the top unchanged.
+    {
+        var rb = raster.RasterBackend.init(testing.allocator);
+        defer rb.deinit();
+        const b = rb.interface();
+        const child: Element = .{ .height = 20, .rect_style = .{ .background = red } };
+        const col: Element = .{ .direction = .column, .children = &.{&child} };
+        const box: Element = .{ .width = 20, .height = 60, .overflow_y = .auto, .scroll_y = 30, .children = &.{&col} };
+        try b.beginFrame(.{ .width = 20, .height = 60 });
+        var result = try layout(testing.allocator, b, &box, .{ .width = 20, .height = 60 });
+        defer result.deinit(testing.allocator);
+        render(b, result);
+        try b.endFrame();
+        try testing.expectEqual(red, rb.pixelAt(10, 5)); // not panned (fits)
+    }
+
+    // auto, content OVERFLOWS: three 20px rows in a 20px box, scroll_y=20 → auto
+    // behaves like scroll, panning to the 2nd row.
+    {
+        var rb = raster.RasterBackend.init(testing.allocator);
+        defer rb.deinit();
+        const b = rb.interface();
+        const r0: Element = .{ .height = 20, .rect_style = .{ .background = red } };
+        const r1: Element = .{ .height = 20, .rect_style = .{ .background = blu } };
+        const col: Element = .{ .direction = .column, .children = &.{ &r0, &r1 } };
+        const box: Element = .{ .width = 20, .height = 20, .overflow_y = .auto, .scroll_y = 20, .children = &.{&col} };
+        try b.beginFrame(.{ .width = 20, .height = 20 });
+        var result = try layout(testing.allocator, b, &box, .{ .width = 20, .height = 20 });
+        defer result.deinit(testing.allocator);
+        render(b, result);
+        try b.endFrame();
+        try testing.expectEqual(blu, rb.pixelAt(10, 5)); // panned (overflows)
+    }
+}
+
+test "overflow: lastScrollMax reports the scrollable range for over-scroll clamping (#309)" {
+    var rb = raster.RasterBackend.init(testing.allocator);
+    defer rb.deinit();
+    const b = rb.interface();
+
+    // 20px column box over 60px of content (three 20px rows): scrollable range
+    // is 40 on y, 0 on x.
+    const r0: Element = .{ .height = 20, .rect_style = .{ .background = style.Color.rgb(1, 0, 0) } };
+    const r1: Element = .{ .height = 20, .rect_style = .{ .background = style.Color.rgb(0, 1, 0) } };
+    const r2: Element = .{ .height = 20, .rect_style = .{ .background = style.Color.rgb(0, 0, 1) } };
+    const box: Element = .{ .width = 20, .height = 20, .direction = .column, .overflow_y = .scroll, .overflow_x = .scroll, .children = &.{ &r0, &r1, &r2 } };
+
+    try b.beginFrame(.{ .width = 20, .height = 20 });
+    var result = try layout(testing.allocator, b, &box, .{ .width = 20, .height = 20 });
+    defer result.deinit(testing.allocator);
+    render(b, result);
+    try b.endFrame();
+
+    try testing.expectEqual(@as(f32, 40), lastScrollMax().height);
+    try testing.expectEqual(@as(f32, 0), lastScrollMax().width);
+}
+
+test "overflow: flex-wrap bounds the main-axis scroll (content can't pan off) (#309)" {
+    var rb = raster.RasterBackend.init(testing.allocator);
+    defer rb.deinit();
+    const b = rb.interface();
+
+    // A 100px-wide wrapping row of five 40px cells: they wrap (2 per line), so
+    // the main (x) extent is one line (~80px) < 100 — there's no horizontal
+    // overflow. A huge scroll_x must clamp to 0, leaving the first (red) cell at
+    // the top-left, NOT panned off into empty space.
+    const red = style.Color.rgb(255, 0, 0);
+    const c0: Element = .{ .width = 40, .height = 20, .rect_style = .{ .background = red } };
+    const c: Element = .{ .width = 40, .height = 20, .rect_style = .{ .background = style.Color.rgb(0, 0, 255) } };
+    const box: Element = .{
+        .width = 100,
+        .height = 80,
+        .direction = .row,
+        .wrap = .wrap,
+        .overflow_x = .scroll,
+        .overflow_y = .scroll,
+        .scroll_x = 999,
+        .children = &.{ &c0, &c, &c, &c, &c },
+    };
+
+    try b.beginFrame(.{ .width = 100, .height = 80 });
+    var result = try layout(testing.allocator, b, &box, .{ .width = 100, .height = 80 });
+    defer result.deinit(testing.allocator);
+    render(b, result);
+    try b.endFrame();
+
+    try testing.expectEqual(red, rb.pixelAt(5, 5)); // first cell still at top-left
+}
+
+test "overflow: a scroll container clips to its padding box, not content box (#309)" {
+    var rb = raster.RasterBackend.init(testing.allocator);
+    defer rb.deinit();
+    const b = rb.interface();
+
+    // 40x40 box, padding 10 (content box 20 wide at x 10..30, padding box 0..40),
+    // holding a row of two 20px cells (red, green). Scrolled to the end, the red
+    // cell must fill the leading padding band (x<10) up to the border — matching
+    // a browser's padding-box scrollport — instead of being cut at x=10.
+    const red = style.Color.rgb(255, 0, 0);
+    const grn = style.Color.rgb(0, 255, 0);
+    const c0: Element = .{ .width = 20, .rect_style = .{ .background = red } };
+    const c1: Element = .{ .width = 20, .rect_style = .{ .background = grn } };
+    const box: Element = .{
+        .width = 40,
+        .height = 40,
+        .direction = .row,
+        .padding = .{ .left = 10, .right = 10, .top = 10, .bottom = 10 },
+        .overflow_x = .scroll,
+        .scroll_x = 20, // max (content 40 − content-box 20)
+        .children = &.{ &c0, &c1 },
+    };
+
+    try b.beginFrame(.{ .width = 40, .height = 40 });
+    var result = try layout(testing.allocator, b, &box, .{ .width = 40, .height = 40 });
+    defer result.deinit(testing.allocator);
+    render(b, result);
+    try b.endFrame();
+
+    try testing.expectEqual(red, rb.pixelAt(5, 20)); // content fills the leading padding band
+    try testing.expectEqual(grn, rb.pixelAt(25, 20)); // 2nd cell occupies the rest
+}
+
+test "overflow: a visible axis spills while the other axis clips (#309)" {
+    var rb = raster.RasterBackend.init(testing.allocator);
+    defer rb.deinit();
+    const b = rb.interface();
+
+    // A 20x20 box whose single child is 40x40 (overflows both axes). With
+    // overflow_x=hidden, overflow_y=visible the child must be clipped on x
+    // (nothing past x=20) but spill on y (painted below y=20).
+    const child: Element = .{ .width = 40, .height = 40, .rect_style = .{ .background = style.Color.rgb(0, 0, 255) } };
+    const boxel: Element = .{ .width = 20, .height = 20, .overflow_x = .hidden, .overflow_y = .visible, .children = &.{&child} };
+    const spacer: Element = .{ .grow = 1 };
+    const root: Element = .{ .direction = .column, .children = &.{ &boxel, &spacer } };
+
+    try b.beginFrame(.{ .width = 60, .height = 60 });
+    var result = try layout(testing.allocator, b, &root, .{ .width = 60, .height = 60 });
+    defer result.deinit(testing.allocator);
+    render(b, result);
+    try b.endFrame();
+
+    try testing.expectEqual(style.Color.rgb(0, 0, 255), rb.pixelAt(10, 30)); // y spills (below box)
+    try testing.expectEqual(style.Color.rgb(255, 255, 255), rb.pixelAt(30, 10)); // x clipped (right of box)
+}
+
 test "fixed-size children stack in a column with gap" {
     var rec = record.RecordBackend.init(testing.allocator);
     defer rec.deinit();
@@ -653,6 +1101,51 @@ test "align-items places children on the cross axis (#268)" {
         try testing.expectEqual(@as(f32, 0), res.placements[1].rect.y);
         try testing.expectEqual(@as(f32, 20), res.placements[1].rect.height);
     }
+}
+
+test "text wraps to the available width; the block grows to fit (#304)" {
+    var rec = record.RecordBackend.init(testing.allocator);
+    defer rec.deinit();
+    const b = rec.interface();
+    const line_h = b.measureText("Ag", .{}).height;
+
+    const para = "one two three four five six seven eight nine ten eleven twelve";
+    // A content-sized card (no explicit size) inside a narrow column. The card's
+    // text has no width of its own — it must wrap to the column's width, and the
+    // card's height must grow to contain the wrapped lines.
+    const wrapped: Element = .{ .text = para, .text_wrap = .wrap };
+    const card: Element = .{ .direction = .column, .children = &.{&wrapped} };
+    const root: Element = .{ .direction = .column, .children = &.{&card} };
+    var res = try layoutWith(&rec, &root, 80, 400); // 80-wide viewport → narrow column
+    defer res.deinit(testing.allocator);
+    // [0]=root, [1]=card, [2]=text
+    try testing.expect(res.placements[2].rect.height > line_h * 1.5); // wrapped to ≥2 lines
+    try testing.expectEqual(res.placements[2].rect.height, res.placements[1].rect.height); // card grew to fit
+
+    // Control: nowrap stays a single line (and overflows horizontally).
+    const flat: Element = .{ .text = para, .text_wrap = .nowrap };
+    const card2: Element = .{ .direction = .column, .children = &.{&flat} };
+    const root2: Element = .{ .direction = .column, .children = &.{&card2} };
+    var res2 = try layoutWith(&rec, &root2, 80, 400);
+    defer res2.deinit(testing.allocator);
+    try testing.expectEqual(line_h, res2.placements[2].rect.height);
+}
+
+test "flex-wrap flows items onto new lines when they overflow (#308)" {
+    var rec = record.RecordBackend.init(testing.allocator);
+    defer rec.deinit();
+    // 5 boxes of 70×40 in a 200-wide wrapping row, gap 0 → 2 per line (140 fits,
+    // 210 doesn't), so lines are [0,1] [2,3] [4].
+    const a: Element = .{ .width = 70, .height = 40 };
+    const root: Element = .{ .direction = .row, .wrap = .wrap, .children = &.{ &a, &a, &a, &a, &a } };
+    var res = try layoutWith(&rec, &root, 200, 200);
+    defer res.deinit(testing.allocator);
+    // [0]=root, [1..6]=boxes
+    try testing.expectEqual(@as(f32, 0), res.placements[1].rect.y); // box0 line 1
+    try testing.expectEqual(@as(f32, 70), res.placements[2].rect.x); // box1 beside it
+    try testing.expectEqual(@as(f32, 0), res.placements[3].rect.x); // box2 wraps to line 2
+    try testing.expectEqual(@as(f32, 40), res.placements[3].rect.y);
+    try testing.expectEqual(@as(f32, 80), res.placements[5].rect.y); // box4 on line 3
 }
 
 test "grow children tile the parent exactly (no rounding seams)" {

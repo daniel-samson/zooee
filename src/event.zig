@@ -93,11 +93,17 @@ pub const ResizeEvent = struct {
     size: geometry.Size,
 };
 
-/// Scroll / wheel input (#126). A pointer-anchored delta: `dx`/`dy` are the
-/// scroll amount (positive `dy` scrolls content toward its start / the view
-/// downward, after platform normalization). `unit` distinguishes discrete
-/// wheel lines from smooth pixel deltas (trackpads), and `phase` exposes the
-/// trackpad gesture lifecycle (incl. momentum) for inertial scrolling later.
+/// Scroll / wheel input (#126). A pointer-anchored delta normalized to one
+/// cross-platform convention (#309):
+///   `dy > 0` scrolls toward *later* content — the viewport moves down / content
+///           moves up on screen — i.e. the scroll offset increases.
+///   `dx > 0` scrolls toward content on the *right* (offset increases).
+/// Platform layers map raw hardware deltas to this *after* the OS applies the
+/// user's natural-scroll preference (macOS AppKit and Windows do this for us;
+/// X11 gets it from XInput2 scroll valuators). So an app just adds the delta to
+/// its scroll offset and the direction is correct everywhere, on either setting.
+/// `unit` distinguishes discrete wheel lines from smooth pixel deltas
+/// (trackpads); `phase` exposes the trackpad gesture lifecycle (incl. momentum).
 pub const ScrollEvent = struct {
     window: WindowId = main_window,
     /// Pointer position when the scroll occurred (for hit-testing the target).

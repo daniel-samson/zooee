@@ -27,6 +27,8 @@ pub const Theme = theme_mod.Theme;
 pub const Direction = layout.Direction;
 pub const Justify = layout.Justify;
 pub const AlignItems = layout.AlignItems;
+pub const FlexWrap = layout.FlexWrap;
+pub const Overflow = layout.Overflow;
 
 /// Semantic style intent (#265): widgets carry a role, the theme resolves it to
 /// concrete styling per platform. Provisional palette here until #21.
@@ -53,6 +55,15 @@ pub const Box = struct {
     /// Main-axis distribution (#268) and cross-axis placement of children.
     justify: layout.Justify = .start,
     align_items: layout.AlignItems = .stretch,
+    /// Flow children onto new lines when they overflow the main axis (#308).
+    wrap: layout.FlexWrap = .nowrap,
+    /// Per-axis overflow handling (#309): visible spills, hidden clips,
+    /// scroll/auto clip + pan to scroll_x/scroll_y.
+    overflow_x: layout.Overflow = .visible,
+    overflow_y: layout.Overflow = .visible,
+    /// Scroll offset applied when an axis clips (scroll/auto); clamped to content.
+    scroll_x: f32 = 0,
+    scroll_y: f32 = 0,
     padding: layout.EdgeInsets = .{},
     margin: layout.EdgeInsets = .{},
     grow: f32 = 0,
@@ -62,6 +73,10 @@ pub const Box = struct {
     corner_radius: f32 = 0,
     /// Make the whole box clickable (dispatches this message id, shows a pointer).
     on_click: ?u32 = null,
+    /// Mark this box as a scroll target: scroll input is only delivered to the
+    /// model (via onEvent) while the pointer is over it (#309). Pair with
+    /// overflow scroll/auto + scroll_x/scroll_y.
+    on_scroll: ?u32 = null,
     children: []const Widget = &.{},
 };
 
@@ -78,8 +93,11 @@ pub const Text = struct {
     /// Override the variant's default size / weight. Null = use the variant.
     size: ?f32 = null,
     bold: ?bool = null,
-    /// Wrap to the content width instead of a single truncated line (#192).
-    wrap: bool = false,
+    /// Wrap to the available content width, like a browser (#192/#304). Default
+    /// on; set false for single-line text (e.g. labels you want to truncate).
+    /// Text only wraps when an ancestor constrains its width — unconstrained
+    /// text stays a single line at its intrinsic width, matching CSS.
+    wrap: bool = true,
 };
 
 fn variantSize(v: TextVariant) f32 {
@@ -487,12 +505,18 @@ pub const Ui = struct {
                     .gap = b.gap * s,
                     .justify = b.justify,
                     .align_items = b.align_items,
+                    .wrap = b.wrap,
+                    .overflow_x = b.overflow_x,
+                    .overflow_y = b.overflow_y,
+                    .scroll_x = b.scroll_x * s,
+                    .scroll_y = b.scroll_y * s,
                     .padding = scaleInsets(b.padding, s),
                     .margin = scaleInsets(b.margin, s),
                     .grow = b.grow,
                     .width = if (b.width) |x| x * s else null,
                     .height = if (b.height) |x| x * s else null,
                     .on_click = b.on_click,
+                    .on_scroll = b.on_scroll,
                     .cursor = if (b.on_click != null) .pointer else null,
                     .children = kids,
                     .rect_style = .{

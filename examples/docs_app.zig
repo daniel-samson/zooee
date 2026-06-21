@@ -284,7 +284,7 @@ const Docs = struct {
 
         // Detail: description + live examples (the title lives in the toolbar now).
         var blocks: std.ArrayList(Widget) = .empty;
-        try blocks.append(u.arena, u.text(page.body, .{ .variant = .body }));
+        try blocks.append(u.arena, u.text(page.body, .{ .variant = .body, .wrap = true }));
         if (std.mem.eql(u8, page.name, "Layout")) {
             try blocks.append(u.arena, try layoutExamples(u));
         } else if (std.mem.eql(u8, page.name, "Text")) {

@@ -15,3 +15,6 @@ Thumbs.db
 # GL demo debug dump
 /gl_text.ppm
 /gl_card.ppm
+
+# Playground debug-export scratch (#306)
+zooee-debug/

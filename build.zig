@@ -33,6 +33,7 @@ pub fn build(b: *std.Build) void {
         .linux => {
             mod.link_libc = true;
             mod.linkSystemLibrary("X11", .{});
+            mod.linkSystemLibrary("Xi", .{}); // XInput2 smooth/natural scrolling (#309)
             mod.linkSystemLibrary("GL", .{}); // GLX (#11)
         },
         .windows => {
