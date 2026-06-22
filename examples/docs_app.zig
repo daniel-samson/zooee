@@ -195,9 +195,11 @@ fn inputExamples(u: *ui.Ui) !Widget {
             u.textInput(.{ .id = 6001, .value = "edit me", .width = 280 }),
             u.textInput(.{ .id = 6002, .placeholder = "placeholder…", .width = 280 }),
         })),
-        try example(u, "live value (read via app.textInputValue)", try u.row(.{ .gap = 8, .align_items = .center }, &.{
+        try example(u, "live value (read via app.textInputValue)", try u.row(.{ .gap = 8, .align_items = .start }, &.{
             u.text("first field:", .{ .role = .secondary }),
-            u.text(zooee.app.textInputValue(6001), .{}),
+            // Grow into the row's free width so the value has a definite width to
+            // wrap against (text only wraps under a width-constrained ancestor).
+            try u.column(.{ .grow = 1 }, &.{u.text(zooee.app.textInputValue(6001), .{})}),
         })),
     });
 }
