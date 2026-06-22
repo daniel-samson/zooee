@@ -985,7 +985,10 @@ var g_focus_visible: bool = false;
 /// math) and draws the highlight; copy slices the source by those offsets.
 /// Single active selection, like g_focus.
 const TextSelection = struct {
-    idx: usize,
+    /// Placement index of the selectable element under each drag endpoint. They
+    /// differ once the drag crosses into another paragraph (#319 multi-element).
+    anchor_idx: usize,
+    focus_idx: usize,
     anchor_pt: geometry.Point,
     focus_pt: geometry.Point,
     dragging: bool = false,
@@ -1026,34 +1029,76 @@ fn selectableAt(placements: []const layout_mod.Placement, p: geometry.Point) ?us
     return found;
 }
 
-/// Draw the active text selection's highlight, resolving the drag points to
-/// byte offsets via the backend (#318). On a pending ⌘C, copy the selected
-/// substring into g_copy_buf for the OS-hooks pass to put on the clipboard.
-/// Called by every present loop right after `render`.
+/// Append `text` to the copy buffer (clamped), advancing `len`.
+fn appendCopy(len: *usize, text: []const u8) void {
+    const room = g_copy_buf.len - len.*;
+    const n = @min(text.len, room);
+    @memcpy(g_copy_buf[len.*..][0..n], text[0..n]);
+    len.* += n;
+}
+
+/// Draw the active text selection's highlight, resolving the drag points to byte
+/// offsets via the backend (#318/#319). A selection may span multiple paragraphs:
+/// the first element is highlighted from the start point to its end, whole middle
+/// elements fully, and the last element from its start to the end point. On a
+/// pending ⌘C the selected text (elements joined by newlines) is copied for the
+/// OS-hooks pass. Called by every present loop right after `render`.
 fn renderTextSelection(b: backend_mod.Backend, placements: []const layout_mod.Placement) void {
     const ts = g_textsel orelse return;
-    if (ts.idx >= placements.len) return;
-    const pl = placements[ts.idx];
-    const el = pl.element;
-    const t = el.text orelse return;
-    if (!el.text_selectable) return;
-    const inner = layout_mod.contentBoxOf(el, pl.rect);
-    const a = layout_mod.textCaretAt(b, el, inner, ts.anchor_pt);
-    const f = layout_mod.textCaretAt(b, el, inner, ts.focus_pt);
-    // Highlight in the themed selection tint, with the selected glyphs redrawn
-    // in the selection text color on top (#318).
-    layout_mod.drawTextSelection(b, el, inner, a, f, selection_color, selection_text_color);
+    if (ts.anchor_idx >= placements.len or ts.focus_idx >= placements.len) return;
+    // Order the endpoints by document (placement) position.
+    var s_idx = ts.anchor_idx;
+    var e_idx = ts.focus_idx;
+    var s_pt = ts.anchor_pt;
+    var e_pt = ts.focus_pt;
+    if (e_idx < s_idx) {
+        std.mem.swap(usize, &s_idx, &e_idx);
+        std.mem.swap(geometry.Point, &s_pt, &e_pt);
+    }
+    const want_copy = g_copy_request;
+    var copy_len: usize = 0;
 
-    if (g_copy_request) {
+    if (s_idx == e_idx) {
+        // Single element: order by offset (the drag direction within it).
+        const pl = placements[s_idx];
+        const el = pl.element;
+        const t = el.text orelse return;
+        if (!el.text_selectable) return;
+        const inner = layout_mod.contentBoxOf(el, pl.rect);
+        const a = layout_mod.textCaretAt(b, el, inner, s_pt);
+        const f = layout_mod.textCaretAt(b, el, inner, e_pt);
         const lo = @min(a, f);
         const hi = @min(@max(a, f), t.len);
-        const start = @min(lo, hi);
-        const len = @min(hi - start, g_copy_buf.len);
-        @memcpy(g_copy_buf[0..len], t[start .. start + len]);
-        g_copy_len = len;
+        layout_mod.drawTextSelection(b, el, inner, lo, hi, selection_color, selection_text_color);
+        if (want_copy) appendCopy(&copy_len, t[lo..hi]);
+    } else {
+        // Span: first element start→end, whole middles, last element start→end.
+        var i = s_idx;
+        while (i <= e_idx) : (i += 1) {
+            const pl = placements[i];
+            const el = pl.element;
+            if (!el.text_selectable or el.text == null) continue;
+            const t = el.text.?;
+            const inner = layout_mod.contentBoxOf(el, pl.rect);
+            var lo: usize = 0;
+            var hi: usize = t.len;
+            if (i == s_idx) lo = @min(layout_mod.textCaretAt(b, el, inner, s_pt), t.len);
+            if (i == e_idx) hi = @min(layout_mod.textCaretAt(b, el, inner, e_pt), t.len);
+            if (hi <= lo and i != s_idx and i != e_idx) {} // full middle already 0..len
+            if (hi < lo) continue;
+            layout_mod.drawTextSelection(b, el, inner, lo, hi, selection_color, selection_text_color);
+            if (want_copy) {
+                if (copy_len > 0) appendCopy(&copy_len, "\n");
+                appendCopy(&copy_len, t[lo..hi]);
+            }
+        }
+    }
+
+    if (want_copy) {
+        g_copy_len = copy_len;
         g_copy_request = false;
         g_copy_pending = true;
-        if (clipboard_debug) std.debug.print("CLIP fill: idx={d} a={d} f={d} sub='{s}'\n", .{ ts.idx, a, f, g_copy_buf[0..g_copy_len] });
+        if (clipboard_debug) std.debug.print("CLIP fill: [{d}..{d}] sub='{s}'\n", .{ s_idx, e_idx, g_copy_buf[0..g_copy_len] });
     }
 }
 
@@ -1409,7 +1454,7 @@ fn dispatch(
                 // drag-select; pressing elsewhere clears any existing selection.
                 if (selectableAt(placements, p.position)) |sidx| {
                     if (clipboard_debug) std.debug.print("CLIP press: selectable idx={d} at ({d},{d})\n", .{ sidx, p.position.x, p.position.y });
-                    g_textsel = .{ .idx = sidx, .anchor_pt = p.position, .focus_pt = p.position, .dragging = true };
+                    g_textsel = .{ .anchor_idx = sidx, .focus_idx = sidx, .anchor_pt = p.position, .focus_pt = p.position, .dragging = true };
                     break :blk .redraw;
                 }
                 if (clipboard_debug) std.debug.print("CLIP press: NOT selectable at ({d},{d})\n", .{ p.position.x, p.position.y });
@@ -1436,6 +1481,8 @@ fn dispatch(
             // Extending a text selection (#318) takes precedence while dragging.
             if (g_textsel) |*ts| if (ts.dragging) {
                 ts.focus_pt = p.position;
+                // Crossed into another selectable paragraph → extend to it (#319).
+                if (selectableAt(placements, p.position)) |fi| ts.focus_idx = fi;
                 break :blk .redraw;
             };
             // A scrollbar drag takes precedence and scrolls the dragged region.
