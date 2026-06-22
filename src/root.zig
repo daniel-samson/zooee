@@ -7,6 +7,13 @@ pub const geometry = @import("geometry.zig");
 pub const layout = @import("layout.zig");
 /// Widget layer (#4): semantic widgets that lower to the layout tree.
 pub const ui = @import("ui.zig");
+/// Full Lucide icon set baked from assets/lucide/icons/, gitignored (`zig build gen-lucide`).
+/// Each icon is its own `pub const`, so cherry-pick what you use and only those
+/// compile in: `ui.Ui.iconData(.{ .data = lucide.house })`. `lucide.get(.star)`
+/// switches over the whole set — handy for a gallery, but it drags every icon in,
+/// so prefer the named decls in real UI. The whole module is lazy: builds that
+/// touch nothing in it pay nothing.
+pub const lucide = @import("lucide.zig");
 pub const app = @import("app.zig");
 pub const style = @import("style.zig");
 pub const backend = @import("backend.zig");

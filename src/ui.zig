@@ -42,6 +42,7 @@ pub const Widget = union(enum) {
     text: Text,
     button: Button,
     icon: Icon,
+    icon_data: IconRaw,
     list: List,
     scroll: ScrollView,
     card: Card,
@@ -177,6 +178,16 @@ pub const IconName = gen_icons.Name;
 
 pub const Icon = struct {
     name: IconName,
+    size: f32 = 16,
+    role: Role = .normal,
+    disabled: bool = false,
+};
+
+/// Like `Icon`, but carries already-baked geometry rather than a name from the
+/// curated set — lets callers render any generated icon module (e.g. the full
+/// `lucide` set) without growing `IconName`. See `Ui.iconData`.
+pub const IconRaw = struct {
+    data: geometry.IconData,
     size: f32 = 16,
     role: Role = .normal,
     disabled: bool = false,
@@ -420,6 +431,12 @@ pub const Ui = struct {
         return .{ .icon = opts };
     }
 
+    /// Render pre-baked icon geometry (any generated set, e.g. `lucide.get(...)`).
+    pub fn iconData(self: *Ui, opts: IconRaw) Widget {
+        _ = self;
+        return .{ .icon_data = opts };
+    }
+
     /// Selectable list. `rows` is copied into the arena (same dangling-slice
     /// reason as the container builders).
     pub fn list(self: *Ui, opts: List, rows: []const ListRow) !Widget {
@@ -475,6 +492,29 @@ pub const Ui = struct {
     /// hand the result to `layout.layout`/`render`. Widgets author in **logical
     /// units**; lowering multiplies sizes by `scale` so the device-pixel layout
     /// renders at the right physical size on HiDPI.
+    /// Shared icon lowering: scale normalized subpaths to a `size`×`size` pixel
+    /// box and tint by role. Used by both `.icon` (curated set) and `.icon_data`
+    /// (arbitrary baked geometry).
+    fn lowerIcon(self: *Ui, el: *Element, s: f32, d: geometry.IconData, size: f32, role: Role, disabled: bool) !void {
+        const px = size * s;
+        const sps = try self.arena.alloc(layout.IconSubPath, d.subpaths.len);
+        for (d.subpaths, 0..) |sp, k| {
+            const pts = try self.arena.alloc(geometry.Point, sp.pts.len);
+            for (sp.pts, 0..) |p, j| pts[j] = .{ .x = p.x * px, .y = p.y * px };
+            sps[k] = .{ .pts = pts, .closed = sp.closed };
+        }
+        el.* = .{
+            .width = px,
+            .height = px,
+            .icon_paths = sps,
+            .icon_stroke = d.stroke,
+            // Stroke width scales with the icon (Lucide authors at 24px);
+            // floor at ~1px so small icons stay visible.
+            .stroke_width = @max(1, d.stroke_width * px),
+            .path_color = if (disabled) self.theme.text_muted else iconTint(self.theme, role),
+        };
+    }
+
     pub fn lower(self: *Ui, w: Widget) !*const Element {
         const s = self.scale;
         const el = try self.arena.create(Element);
@@ -541,26 +581,8 @@ pub const Ui = struct {
                     },
                 };
             },
-            .icon => |ic| {
-                const px = ic.size * s;
-                const d = gen_icons.get(ic.name);
-                const sps = try self.arena.alloc(layout.IconSubPath, d.subpaths.len);
-                for (d.subpaths, 0..) |sp, k| {
-                    const pts = try self.arena.alloc(geometry.Point, sp.pts.len);
-                    for (sp.pts, 0..) |p, j| pts[j] = .{ .x = p.x * px, .y = p.y * px };
-                    sps[k] = .{ .pts = pts, .closed = sp.closed };
-                }
-                el.* = .{
-                    .width = px,
-                    .height = px,
-                    .icon_paths = sps,
-                    .icon_stroke = d.stroke,
-                    // Stroke width scales with the icon (Lucide authors at 24px);
-                    // floor at ~1px so small icons stay visible.
-                    .stroke_width = @max(1, d.stroke_width * px),
-                    .path_color = if (ic.disabled) self.theme.text_muted else iconTint(self.theme, ic.role),
-                };
-            },
+            .icon => |ic| try self.lowerIcon(el, s, gen_icons.get(ic.name), ic.size, ic.role, ic.disabled),
+            .icon_data => |ic| try self.lowerIcon(el, s, ic.data, ic.size, ic.role, ic.disabled),
             .list => |l| {
                 // One roving-tabindex group for the whole list (#310/#16): the
                 // list is a single Tab stop, arrows move between its rows.

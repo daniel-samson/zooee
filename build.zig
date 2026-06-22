@@ -71,7 +71,19 @@ pub fn build(b: *std.Build) void {
     const gen_icons = b.addRunArtifact(svg2icons);
     gen_icons.addArgs(&.{ "icons", "src/generated_icons.zig" });
     gen_icons.has_side_effects = true; // writes into the source tree
-    b.step("gen-icons", "Regenerate src/generated_icons.zig from icons/*.svg").dependOn(&gen_icons.step);
+    const gen_icons_step = b.step("gen-icons", "Regenerate src/generated_icons.zig from icons/*.svg");
+    gen_icons_step.dependOn(&gen_icons.step);
+
+    // The full Lucide set (src/lucide.zig) is the committed artifact; it's baked
+    // from the SVG pool in assets/lucide/icons/, which is gitignored and fetched
+    // on demand (tools/fetch-lucide.sh) — so this step only runs after a fetch.
+    // Only the docs demo references src/lucide.zig, so Zig's lazy compilation
+    // keeps its ~1.7k point tables out of the size-budgeted builds.
+    const gen_lucide = b.addRunArtifact(svg2icons);
+    gen_lucide.addArgs(&.{ "assets/lucide/icons", "src/lucide.zig" });
+    gen_lucide.has_side_effects = true;
+    b.step("gen-lucide", "Regenerate src/lucide.zig from the full Lucide pool").dependOn(&gen_lucide.step);
+    gen_icons_step.dependOn(&gen_lucide.step);
 
     // --- test --------------------------------------------------------------
     const test_step = b.step("test", "Run unit tests");

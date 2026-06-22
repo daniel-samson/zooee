@@ -18,3 +18,7 @@ Thumbs.db
 
 # Playground debug-export scratch (#306)
 zooee-debug/
+
+# Vendored Lucide SVG pool — not committed; src/lucide.zig is the baked
+# artifact. Repopulate with tools/fetch-lucide.sh to regenerate.
+/assets/lucide/icons/

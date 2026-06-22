@@ -19,6 +19,15 @@ pub const Size = struct {
     height: f32 = 0,
 };
 
+/// Baked vector-icon geometry (#272): the build-time output shape of
+/// tools/svg2icons.zig. Subpath points live in a normalized 0..1 unit square;
+/// the widget layer scales them to the target pixel box. Defined here so every
+/// generated icon module shares one nominal type — the curated set
+/// (src/generated_icons.zig) and the full Lucide set (src/lucide.zig) are then
+/// interchangeable through `Ui.iconData`.
+pub const IconSubPath = struct { pts: []const Point, closed: bool };
+pub const IconData = struct { subpaths: []const IconSubPath, stroke_width: f32, stroke: bool };
+
 /// Even-odd point-in-polygon test (#120): a horizontal ray to the right of
 /// (px,py) toggles `inside` at each crossed edge. This is THE canonical
 /// definition of a filled path's interior — every backend (raster reference +

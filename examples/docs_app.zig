@@ -169,6 +169,20 @@ fn iconExamples(u: *ui.Ui) !Widget {
     });
 }
 
+/// The complete Lucide set (src/lucide.zig), baked at build time and rendered
+/// through `Ui.iconData` — a wrapped grid the content pane scrolls. Proves the
+/// full library is usable without growing the curated `IconName` enum.
+fn lucideGallery(u: *ui.Ui) !Widget {
+    const names = comptime std.enums.values(zooee.lucide.Name);
+    const cells = try u.arena.alloc(Widget, names.len);
+    for (names, 0..) |name, i| {
+        cells[i] = try u.column(.{ .width = 34, .height = 34, .justify = .center, .align_items = .center }, &.{
+            u.iconData(.{ .data = zooee.lucide.get(name), .size = 20, .role = .secondary }),
+        });
+    }
+    return example(u, u.fmt("the full Lucide set — {d} icons baked at build time", .{names.len}), try u.row(.{ .gap = 4, .wrap = .wrap }, cells));
+}
+
 /// Live examples for the Button page (#271): role variants, sizes, disabled.
 fn buttonExamples(u: *ui.Ui) !Widget {
     return u.column(.{ .gap = 18 }, &.{
@@ -337,6 +351,7 @@ const Docs = struct {
             try blocks.append(u.arena, try buttonExamples(u));
         } else if (std.mem.eql(u8, page.name, "Icon")) {
             try blocks.append(u.arena, try iconExamples(u));
+            try blocks.append(u.arena, try lucideGallery(u));
         } else if (std.mem.eql(u8, page.name, "List")) {
             try blocks.append(u.arena, try listExamples(u, self.list_demo));
         } else if (std.mem.eql(u8, page.name, "Scroll")) {
