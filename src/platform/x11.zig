@@ -648,9 +648,9 @@ fn gsettingsGet(gpa: std.mem.Allocator, io: std.Io, key: []const u8) ?[]u8 {
 /// same way when the theme grows hooks for them.
 fn portalRead(gpa: std.mem.Allocator, io: std.Io, key: []const u8) ?[]u8 {
     const res = std.process.run(gpa, io, .{ .argv = &.{
-        "gdbus",          "call",                                  "--session",
-        "--dest",         "org.freedesktop.portal.Desktop",        "--object-path",
-        "/org/freedesktop/portal/desktop", "--method",             "org.freedesktop.portal.Settings.Read",
+        "gdbus",                           "call",                           "--session",
+        "--dest",                          "org.freedesktop.portal.Desktop", "--object-path",
+        "/org/freedesktop/portal/desktop", "--method",                       "org.freedesktop.portal.Settings.Read",
         "org.freedesktop.appearance",      key,
     } }) catch return null;
     defer gpa.free(res.stderr);
