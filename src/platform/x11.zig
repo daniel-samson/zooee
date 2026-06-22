@@ -246,6 +246,7 @@ extern "X11" fn XDefaultScreen(*Display) c_int;
 extern "X11" fn XRootWindow(*Display, c_int) Window_;
 extern "X11" fn XDefaultVisual(*Display, c_int) ?*Visual;
 extern "X11" fn XDefaultDepth(*Display, c_int) c_int;
+extern "X11" fn XDefaultColormap(*Display, c_int) Colormap;
 extern "X11" fn XWhitePixel(*Display, c_int) c_ulong;
 extern "X11" fn XCreateSimpleWindow(*Display, Window_, c_int, c_int, c_uint, c_uint, c_uint, c_ulong, c_ulong) Window_;
 extern "X11" fn XDestroyWindow(*Display, Window_) c_int;
@@ -1697,24 +1698,34 @@ pub const PopupSurface = struct {
     /// back to the in-window overlay). The visual/depth are inherited from the
     /// main window so the existing depth-32 ZPixmap blit path applies unchanged.
     fn create(win: *Window, gx: c_int, gy: c_int, w: u32, h: u32) ?PopupSurface {
-        const root = XRootWindow(win.display, XDefaultScreen(win.display));
+        const screen = XDefaultScreen(win.display);
+        const root = XRootWindow(win.display, screen);
+        // Use the screen's DEFAULT visual/depth/colormap — NOT the main window's
+        // (which may be a GLX visual whose colormap we don't have; creating a
+        // window with a non-default visual and no matching colormap is a
+        // BadMatch and the window never really exists). The raster popup doesn't
+        // need the GL visual anyway.
+        const visual = XDefaultVisual(win.display, screen);
+        const depth: c_uint = @intCast(XDefaultDepth(win.display, screen));
         var swa: XSetWindowAttributes = .{
             .override_redirect = 1, // WM leaves it undecorated/unmanaged
-            .background_pixel = XWhitePixel(win.display, XDefaultScreen(win.display)),
+            .background_pixel = XWhitePixel(win.display, screen),
+            .border_pixel = 0,
+            .colormap = XDefaultColormap(win.display, screen),
             .event_mask = ExposureMask | ButtonPressMask | ButtonReleaseMask | PointerMotionMask | KeyPressMask,
         };
-        const handle = XCreateWindow(win.display, root, gx, gy, w, h, 0, @intCast(win.depth), InputOutput, win.visual, CWOverrideRedirect | CWBackPixel | CWEventMask, &swa);
+        const handle = XCreateWindow(win.display, root, gx, gy, w, h, 0, @intCast(depth), InputOutput, visual, CWOverrideRedirect | CWBackPixel | CWBorderPixel | CWColormap | CWEventMask, &swa);
         if (handle == 0) return null;
         const gc = XCreateGC(win.display, handle, 0, null) orelse {
             _ = XDestroyWindow(win.display, handle);
             return null;
         };
         _ = XMapRaised(win.display, handle);
+        _ = XSync(win.display, 0); // ensure the window is viewable before grabbing
         // owner_events = False so EVERY pointer event is reported relative to the
         // popup (grab) window — exactly the popup-local coords menuItemAt wants,
         // including clicks outside the panel (which dismiss).
         const ok = XGrabPointer(win.display, handle, 0, @intCast(ButtonPressMask | ButtonReleaseMask | PointerMotionMask), GrabModeAsync, GrabModeAsync, 0, 0, win.last_event_time);
-        std.debug.print("[popup] create handle={} grab={}\n", .{ handle, ok });
         if (ok != GrabSuccess) {
             _ = XFreeGC(win.display, gc);
             _ = XDestroyWindow(win.display, handle);
@@ -1730,8 +1741,8 @@ pub const PopupSurface = struct {
             .display = win.display,
             .handle = handle,
             .gc = gc,
-            .visual = win.visual,
-            .depth = win.depth,
+            .visual = visual,
+            .depth = depth,
             .gpa = win.gpa,
             .width = w,
             .height = h,
