@@ -223,6 +223,19 @@ pub const ListRow = struct {
     /// A non-interactive group header (gray caption, extra top space) rather than
     /// a selectable row — for sectioned source lists.
     header: bool = false,
+
+    // Box model — a ListRow lowers to a flex box, so it carries the same
+    // padding/margin/background/border/corner-radius knobs as `Box`. Defaults
+    // reproduce the stock row look; override per row to restyle. The selection
+    // highlight (when the row is `selected`) overrides `background`.
+    padding: layout.EdgeInsets = .symmetric(8, 6),
+    margin: layout.EdgeInsets = .{},
+    /// Resting fill (selection still wins). null = transparent.
+    background: ?Color = null,
+    corner_radius: f32 = 6,
+    border_width: f32 = 0,
+    /// null with a non-zero `border_width` falls back to the theme separator.
+    border_color: ?Color = null,
 };
 
 pub const List = struct {
@@ -674,6 +687,10 @@ pub const Ui = struct {
                             one[0] = label_el;
                             kids = one;
                         }
+                        const border: style.Border = if (r.border_width > 0)
+                            .all(r.border_width * s, r.border_color orelse self.theme.border)
+                        else
+                            .none;
                         row_el.* = .{
                             .direction = .row,
                             .align_items = .center,
@@ -682,11 +699,13 @@ pub const Ui = struct {
                             .focusable = r.on_click != null, // arrow/Tab nav (#310/#16)
                             .tab_group = if (r.on_click != null) gid else null, // one tab stop
                             .cursor = if (r.on_click != null) .pointer else null,
-                            .padding = .symmetric(8 * s, 6 * s),
+                            .padding = scaleInsets(r.padding, s),
+                            .margin = scaleInsets(r.margin, s),
                             .children = kids,
                             .rect_style = .{
-                                .background = if (sel) self.theme.accent else null,
-                                .corner_radius = .all(6 * s),
+                                .background = if (sel) self.theme.accent else r.background,
+                                .corner_radius = .all(r.corner_radius * s),
+                                .border = border,
                             },
                         };
                     }
@@ -989,6 +1008,29 @@ test "lower: list rows are clickable; selected row is highlighted (#273)" {
     // Only the selected row paints a background.
     try testing.expect(el.children[0].rect_style.background == null);
     try testing.expect(el.children[1].rect_style.background != null);
+}
+
+test "lower: list row carries the box model (padding/bg/border/radius)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ui = Ui.init(arena.allocator());
+    const el = try ui.lower(try ui.list(.{}, &.{
+        .{
+            .label = "Styled",
+            .on_click = 1,
+            .padding = .all(12),
+            .margin = .{ .bottom = 4 },
+            .background = Color.rgb(10, 20, 30),
+            .corner_radius = 14,
+            .border_width = 2,
+        },
+    }));
+    const row = el.children[0];
+    try testing.expectEqual(@as(f32, 12), row.padding.left);
+    try testing.expectEqual(@as(f32, 4), row.margin.bottom);
+    try testing.expect(row.rect_style.background != null);
+    try testing.expectEqual(@as(f32, 14), row.rect_style.corner_radius.top_left);
+    try testing.expect(!row.rect_style.border.isNone());
 }
 
 test "lower: list row with icon + a header (#268)" {
