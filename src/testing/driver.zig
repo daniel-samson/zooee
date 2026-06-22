@@ -176,6 +176,13 @@ pub fn Driver(comptime Model: type, comptime Msg: type) type {
             return self.send(.{ .pointer_down = .{ .position = .{ .x = x, .y = y }, .buttons = .{ .primary = true }, .click_count = count } });
         }
 
+        /// A double click: down with click_count=2, then up (#319 word-select).
+        pub fn doubleClick(self: *Self, x: f32, y: f32) !Command {
+            const cmd = try self.send(.{ .pointer_down = .{ .position = .{ .x = x, .y = y }, .buttons = .{ .primary = true }, .click_count = 2 } });
+            _ = try self.pointerUp(x, y);
+            return cmd;
+        }
+
         pub fn pointerEnter(self: *Self, x: f32, y: f32) !Command {
             return self.send(.{ .pointer_enter = .{ .position = .{ .x = x, .y = y } } });
         }
@@ -1015,4 +1022,27 @@ test "#319 mouse drag-selects text within a field" {
     // The selection is now copyable.
     _ = try d.textMods('c', .{ .super = true });
     try testing.expectEqualStrings("abc", d.copiedText());
+}
+
+test "#319 clicking a field redraws so the caret shows immediately" {
+    var m: EditApp = .{};
+    var d = try editDriver(&m);
+    defer d.deinit();
+    const fr = d.placements()[d.findText("abc").?].rect;
+    // The click must report .redraw — otherwise the caret stays invisible until
+    // the next redraw (the reported "no cursor until I type" bug).
+    const cmd = try d.click(fr.x + 5, fr.y + fr.height / 2);
+    try testing.expectEqual(Command.redraw, cmd);
+    try testing.expectEqual(@as(?u32, 9001), d.focusedFieldId());
+}
+
+test "#319 double-click selects the word in a field" {
+    var m: EditApp = .{};
+    var d = try editDriver(&m);
+    d.setFont(@import("../root.zig").test_font_ttf) catch {}; // real metrics
+    defer d.deinit();
+    const fr = d.placements()[d.findText("abc").?].rect;
+    _ = try d.doubleClick(fr.x + fr.width / 2, fr.y + fr.height / 2);
+    _ = try d.render(); // resolve the word selection
+    try testing.expectEqualStrings("abc", d.fieldSelectedText(9001));
 }

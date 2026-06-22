@@ -148,6 +148,34 @@ pub const TextEdit = struct {
     }
 };
 
+/// Word boundaries around byte offset `off` for double-click selection: the run
+/// of word characters (ASCII alphanumeric or '_') under or just before the
+/// cursor. Returns an empty range (start==end) when not on a word (e.g. between
+/// spaces/punctuation), which selects nothing. UTF-8 word chars beyond ASCII
+/// aren't grouped yet (#319 follow-up).
+pub fn wordBounds(buf: []const u8, off: usize) struct { start: usize, end: usize } {
+    const isWord = struct {
+        fn f(c: u8) bool {
+            return std.ascii.isAlphanumeric(c) or c == '_';
+        }
+    }.f;
+    const o = @min(off, buf.len);
+    // Pick the reference char: the one at the cursor, else the one before it.
+    var idx = o;
+    if (idx >= buf.len or !isWord(buf[idx])) {
+        if (idx > 0 and isWord(buf[idx - 1])) {
+            idx -= 1;
+        } else {
+            return .{ .start = o, .end = o };
+        }
+    }
+    var s = idx;
+    while (s > 0 and isWord(buf[s - 1])) s -= 1;
+    var e = idx + 1;
+    while (e < buf.len and isWord(buf[e])) e += 1;
+    return .{ .start = s, .end = e };
+}
+
 /// Byte offset of the start of the codepoint preceding `i` (UTF-8).
 fn prevBoundary(buf: []const u8, i: usize) usize {
     var j = i;
@@ -268,4 +296,21 @@ test "setCaret with extend makes a shift-click selection" {
     try te.setText(gpa, "abcdef"); // caret at 6
     te.setCaret(2, true); // shift-click at offset 2
     try expectState(&te, "abcdef", 2, .{ 2, 6 });
+}
+
+test "wordBounds selects the word under or before the cursor" {
+    // "foo bar baz" — offsets: foo[0..3] space[3] bar[4..7] space[7] baz[8..11]
+    const s = "foo bar baz";
+    var w = wordBounds(s, 5); // inside "bar"
+    try testing.expectEqual(@as(usize, 4), w.start);
+    try testing.expectEqual(@as(usize, 7), w.end);
+    w = wordBounds(s, 7); // just after "bar" (caret at its end) → "bar"
+    try testing.expectEqual(@as(usize, 4), w.start);
+    try testing.expectEqual(@as(usize, 7), w.end);
+    w = wordBounds(s, 0); // start of "foo"
+    try testing.expectEqual(@as(usize, 0), w.start);
+    try testing.expectEqual(@as(usize, 3), w.end);
+    w = wordBounds(s, 3); // on the space, after "foo" → "foo"
+    try testing.expectEqual(@as(usize, 0), w.start);
+    try testing.expectEqual(@as(usize, 3), w.end);
 }

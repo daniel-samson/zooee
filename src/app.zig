@@ -1020,6 +1020,9 @@ var g_field_paste: ?struct { id: u32, on_change: ?u32 } = null;
 var g_field_caret_click: ?struct { id: u32, pt: geometry.Point, extend: bool } = null;
 /// The field id being mouse-drag-selected (pointer down→move→up), or null (#319).
 var g_field_drag: ?u32 = null;
+/// A double-click on a field whose word at `pt` should be selected (resolved in
+/// renderTextFields, which has the backend). (#319)
+var g_field_word_click: ?struct { id: u32, pt: geometry.Point } = null;
 /// A text field targeted by an Edit command (#319): its id + on_change message.
 const EditTarget = struct { id: u32, on_change: ?u32 };
 
@@ -1347,6 +1350,16 @@ pub fn renderTextFields(b: backend_mod.Backend, placements: []const layout_mod.P
             g_field_caret_click = null;
         }
     }
+    // Double-click word selection (#319), resolved here for the same reason.
+    if (g_field_word_click) |wc| {
+        if (wc.id == id) {
+            const off = layout_mod.textCaretAt(b, el, inner, wc.pt);
+            const wb = @import("text_edit.zig").wordBounds(te.text(), off);
+            te.setCaret(wb.start, false);
+            te.setCaret(wb.end, true);
+            g_field_word_click = null;
+        }
+    }
     if (te.selection()) |sel| {
         layout_mod.drawTextSelection(b, el, inner, sel.lo, sel.hi, selection_color, selection_text_color);
     }
@@ -1501,6 +1514,7 @@ pub fn resetForTest() void {
     g_field_paste = null;
     g_field_caret_click = null;
     g_field_drag = null;
+    g_field_word_click = null;
     g_focused_edit = null;
     g_open_menu = null;
     g_copy_len = 0;
@@ -1712,11 +1726,19 @@ fn dispatch(
                     changeFocus(Model, Msg, model, placements, fi);
                     g_focus_visible = false;
                 }
-                // Place the caret in a clicked text field (#319). Resolved in the
-                // render pass (which has the backend for point→offset math).
+                // Click in a text field (#319): double-click selects the word,
+                // a single click places the caret. Both resolve in the render
+                // pass (which has the backend for point→offset math). Return
+                // .redraw so the caret/selection shows immediately — otherwise it
+                // stays invisible until the next redraw (e.g. typing).
                 if (editFieldAt(placements, p.position)) |ef| {
-                    g_field_caret_click = .{ .id = ef.id, .pt = p.position, .extend = p.mods.shift };
-                    g_field_drag = ef.id; // begin a possible drag-select
+                    if (p.click_count >= 2) {
+                        g_field_word_click = .{ .id = ef.id, .pt = p.position };
+                    } else {
+                        g_field_caret_click = .{ .id = ef.id, .pt = p.position, .extend = p.mods.shift };
+                        g_field_drag = ef.id; // begin a possible drag-select
+                    }
+                    break :blk .redraw;
                 }
                 if (hitMsg(placements, p.position, .click)) |m| {
                     break :blk model.update(@as(Msg, @enumFromInt(m)));
