@@ -92,6 +92,9 @@ pub const Box = struct {
     height: ?f32 = null,
     background: ?Color = null,
     corner_radius: f32 = 0,
+    /// Box-model border (#330). null `border_color` falls back to the theme border.
+    border_width: f32 = 0,
+    border_color: ?Color = null,
     /// Make the whole box clickable (dispatches this message id, shows a pointer).
     on_click: ?u32 = null,
     /// Mark this box as a scroll target: scroll input is only delivered to the
@@ -605,6 +608,7 @@ pub const Ui = struct {
                     .rect_style = .{
                         .background = b.background,
                         .corner_radius = if (b.corner_radius > 0) .all(b.corner_radius * s) else .none,
+                        .border = borderFrom(b.border_width, b.border_color, self.theme, s),
                     },
                 };
             },
@@ -886,6 +890,18 @@ test "lower: box → flex Element with lowered children" {
 
 fn cursorPointer() @import("cursor.zig").Cursor {
     return .pointer;
+}
+
+test "lower: box carries a border (#321)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ui = Ui.init(arena.allocator());
+    const el = try ui.lower(try ui.column(.{ .border_width = 2, .border_color = Color.rgb(1, 2, 3) }, &.{}));
+    try testing.expect(!el.rect_style.border.isNone());
+    try testing.expectEqual(@as(f32, 2), el.rect_style.border.top.width);
+    // No border by default.
+    const plain = try ui.lower(try ui.column(.{}, &.{}));
+    try testing.expect(plain.rect_style.border.isNone());
 }
 
 test "lower: composite expands via its view()" {
