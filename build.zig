@@ -155,18 +155,35 @@ pub fn build(b: *std.Build) void {
     // run / run-gui: convenience runners.
     const run = b.addRunArtifact(addExe(b, target, optimize, mod, "zooee-run", "src/main.zig"));
     if (b.args) |args| run.addArgs(args);
+    forwardZooeeEnv(b, run);
     b.step("run", "Run the terminal demo").dependOn(&run.step);
     if (os == .macos or os == .windows or os == .linux) {
-        b.step("run-gui", "Run the native GUI demo (GPU path)")
-            .dependOn(&b.addRunArtifact(guiDemo(b, mod, target, optimize, "zooee-gui-run", "examples/gui_demo.zig", false)).step);
-        b.step("run-docs", "Run the component gallery / docs app")
-            .dependOn(&b.addRunArtifact(guiDemo(b, mod, target, optimize, "zooee-docs-run", "examples/docs_app.zig", false)).step);
-        b.step("run-playground", "Run the interactive layout playground")
-            .dependOn(&b.addRunArtifact(guiDemo(b, mod, target, optimize, "zooee-playground-run", "examples/layout_playground.zig", false)).step);
+        const gui_run = b.addRunArtifact(guiDemo(b, mod, target, optimize, "zooee-gui-run", "examples/gui_demo.zig", false));
+        forwardZooeeEnv(b, gui_run);
+        b.step("run-gui", "Run the native GUI demo (GPU path)").dependOn(&gui_run.step);
+        const docs_run = b.addRunArtifact(guiDemo(b, mod, target, optimize, "zooee-docs-run", "examples/docs_app.zig", false));
+        forwardZooeeEnv(b, docs_run);
+        b.step("run-docs", "Run the component gallery / docs app").dependOn(&docs_run.step);
+        const play_run = b.addRunArtifact(guiDemo(b, mod, target, optimize, "zooee-playground-run", "examples/layout_playground.zig", false));
+        forwardZooeeEnv(b, play_run);
+        b.step("run-playground", "Run the interactive layout playground").dependOn(&play_run.step);
     }
 }
 
 /// An executable importing the zooee module (or none, for a standalone tool).
+/// Forward `ZOOEE_*` variables from the `zig build` invocation into a run
+/// child. A Run step doesn't pass the parent env through, so without this
+/// `ZOOEE_TRAFFIC=… zig build run-docs` (and the other ZOOEE_* knobs) never
+/// reach the app.
+fn forwardZooeeEnv(b: *std.Build, run: *std.Build.Step.Run) void {
+    var it = b.graph.environ_map.iterator();
+    while (it.next()) |kv| {
+        if (std.mem.startsWith(u8, kv.key_ptr.*, "ZOOEE_")) {
+            run.setEnvironmentVariable(kv.key_ptr.*, kv.value_ptr.*);
+        }
+    }
+}
+
 fn addExe(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
