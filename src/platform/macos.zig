@@ -509,6 +509,10 @@ const NSWindowStyleMask = struct {
 };
 
 pub const Window = struct {
+    /// Native OS menus are available (NSMenu): the framework uses them rather
+    /// than the in-window overlay (#319).
+    pub const native_menus = true;
+
     ns_window: id,
     gpa: std.mem.Allocator,
     queue: std.ArrayList(Event) = .empty,

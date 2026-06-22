@@ -360,6 +360,10 @@ fn vkToKey(vk: usize) ?core_event.Key {
 // --- window ----------------------------------------------------------------
 
 pub const Window = struct {
+    /// Native OS menus are available (HMENU): the framework uses them rather
+    /// than the in-window overlay (#319).
+    pub const native_menus = true;
+
     hwnd: HWND,
     /// Single-producer queue filled by the wndproc during pumpEvents.
     queue: std.ArrayList(Event) = .empty,

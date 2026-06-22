@@ -46,6 +46,7 @@ pub fn buildTree(comptime Model: type, model: *Model, arena: std.mem.Allocator, 
         focus_ring_color = u.theme.accent; // focus ring tracks the theme accent (#310)
         selection_color = u.theme.selection; // text-selection highlight (#318)
         selection_text_color = u.theme.selection_text;
+        g_menu_theme = u.theme; // colors for the in-window menu overlay (#319)
         layout_mod.scrollbar_thumb = .{ .r = u.theme.text_muted.r, .g = u.theme.text_muted.g, .b = u.theme.text_muted.b, .a = 150 }; // muted neutral thumb (#312)
         return u.lower(try model.viewUi(&u));
     }
@@ -219,6 +220,7 @@ pub fn run(
         renderFocusRing(b, result.placements); // focus ring (#310)
         renderTextSelection(b, result.placements); // text selection (#318)
         renderTextFields(b, result.placements); // text fields (#319)
+        renderMenuOverlay(b); // menu overlay (#319)
         try b.endFrame();
         result.deinit(frame_arena.allocator());
         const text = try term.renderToText(gpa);
@@ -255,6 +257,7 @@ pub fn run(
             renderFocusRing(b, result.placements); // focus ring (#310)
             renderTextSelection(b, result.placements); // text selection (#318)
             renderTextFields(b, result.placements); // text fields (#319)
+            renderMenuOverlay(b); // menu overlay (#319)
             try b.endFrame();
             try term.present(out);
             try out.flush();
@@ -296,6 +299,7 @@ pub fn runWindow(
     // ZOOEE_SOFTWARE forces the CPU raster path (deterministic CI, debugging).
     const want_gpu = has_gpu_window and !opts.force_software and !init.environ_map.contains("ZOOEE_SOFTWARE");
     clipboard_debug = init.environ_map.contains("ZOOEE_CLIPLOG"); // selection→clipboard diagnostic (#318)
+    force_overlay_menu = init.environ_map.contains("ZOOEE_OVERLAY_MENU"); // test the in-window menu on any OS (#319)
     if (clipboard_debug) std.debug.print("CLIP: diagnostic enabled\n", .{});
 
     // Only Linux carries a GL context on the window (macOS=Metal, Windows=D3D).
@@ -376,6 +380,7 @@ pub fn runWindow(
             renderFocusRing(self.backend, result.placements); // focus ring (#310)
             renderTextSelection(self.backend, result.placements); // text selection (#318)
             renderTextFields(self.backend, result.placements); // text fields (#319)
+            renderMenuOverlay(self.backend); // menu overlay (#319)
             self.backend.endFrame() catch return;
             platform.blit(self.win, self.raster.pixels, self.raster.width, self.raster.height);
         }
@@ -485,6 +490,7 @@ fn runWindowGl(
             renderFocusRing(self.backend, result.placements); // focus ring (#310)
             renderTextSelection(self.backend, result.placements); // text selection (#318)
             renderTextFields(self.backend, result.placements); // text fields (#319)
+            renderMenuOverlay(self.backend); // menu overlay (#319)
             self.backend.endFrame() catch return;
             self.win.glSwap();
         }
@@ -537,6 +543,7 @@ fn runWindowGl(
                 renderFocusRing(b, result.placements); // focus ring (#310)
                 renderTextSelection(b, result.placements); // text selection (#318)
                 renderTextFields(b, result.placements); // text fields (#319)
+                renderMenuOverlay(b); // menu overlay (#319)
                 try b.endFrame();
                 const pixels = try glb.readPixels();
                 defer gpa.free(pixels);
@@ -649,6 +656,7 @@ fn runWindowMetal(
             renderFocusRing(self.backend, result.placements); // focus ring (#310)
             renderTextSelection(self.backend, result.placements); // text selection (#318)
             renderTextFields(self.backend, result.placements); // text fields (#319)
+            renderMenuOverlay(self.backend); // menu overlay (#319)
             const t_walk = lap(prof, self.io, &t);
             self.backend.endFrame() catch return;
             const t_end = lap(prof, self.io, &t);
@@ -708,6 +716,7 @@ fn runWindowMetal(
                 renderFocusRing(b, result.placements); // focus ring (#310)
                 renderTextSelection(b, result.placements); // text selection (#318)
                 renderTextFields(b, result.placements); // text fields (#319)
+                renderMenuOverlay(b); // menu overlay (#319)
                 try b.endFrame();
                 const pixels = try mb.readPixels();
                 defer gpa.free(pixels);
@@ -789,6 +798,7 @@ fn runWindowD3d(
             renderFocusRing(self.backend, result.placements); // focus ring (#310)
             renderTextSelection(self.backend, result.placements); // text selection (#318)
             renderTextFields(self.backend, result.placements); // text fields (#319)
+            renderMenuOverlay(self.backend); // menu overlay (#319)
             self.backend.endFrame() catch return;
             self.db.presentTo(self.swapchain);
         }
@@ -840,6 +850,7 @@ fn runWindowD3d(
                 renderFocusRing(b, result.placements); // focus ring (#310)
                 renderTextSelection(b, result.placements); // text selection (#318)
                 renderTextFields(b, result.placements); // text fields (#319)
+                renderMenuOverlay(b); // menu overlay (#319)
                 try b.endFrame();
                 const pixels = try db.readPixels();
                 defer gpa.free(pixels);
@@ -953,6 +964,7 @@ pub fn renderOffscreen(
     renderFocusRing(b, result.placements); // focus ring (#310)
     renderTextSelection(b, result.placements); // text selection (#318)
     renderTextFields(b, result.placements); // text fields (#319)
+    renderMenuOverlay(b); // menu overlay (#319)
     try b.endFrame();
     return result;
 }
@@ -1004,6 +1016,99 @@ var g_copy_len: usize = 0;
 var g_field_paste: ?struct { id: u32, on_change: ?u32 } = null;
 /// A text field targeted by an Edit command (#319): its id + on_change message.
 const EditTarget = struct { id: u32, on_change: ?u32 };
+
+// --- in-window menu overlay (#319): used where the platform has no native
+// menus (X11). A framework-drawn, modal popup handled in the normal render +
+// event loop, so it needs no per-platform menu code.
+var g_menu_theme: theme_mod.Theme = theme_mod.Theme.dark;
+/// An open overlay menu. `items` is borrowed (a stable static / model buffer)
+/// and must outlive the open menu; `target` is the field an Edit command acts
+/// on; `panel` is filled by the render pass for hit-testing in dispatch.
+const OpenMenu = struct {
+    items: []const menu_mod.Item,
+    x: f32,
+    y: f32,
+    target: ?EditTarget = null,
+    hover: ?usize = null,
+    panel: geometry.Rect = .{},
+};
+var g_open_menu: ?OpenMenu = null;
+/// Force the overlay menu even on platforms with native menus (ZOOEE_OVERLAY_MENU)
+/// — for testing the overlay on macOS/Windows.
+pub var force_overlay_menu: bool = false;
+
+// Overlay metrics in logical px (scaled by g_scale at draw/hit time).
+const menu_item_h: f32 = 26;
+const menu_sep_h: f32 = 9;
+const menu_pad_x: f32 = 12;
+const menu_font: f32 = 14;
+
+/// Whether the active window backend exposes native OS menus (#319).
+fn nativeMenus(window: anytype) bool {
+    return if (@hasDecl(@TypeOf(window.*), "native_menus")) @TypeOf(window.*).native_menus else true;
+}
+
+/// The selectable item index at point `p` within an open overlay menu, or null
+/// (outside the panel or on a separator/disabled row). Geometry mirrors
+/// renderMenuOverlay so dispatch (no backend) and render agree.
+fn menuItemAt(m: OpenMenu, p: geometry.Point) ?usize {
+    const sc = g_scale;
+    if (!m.panel.contains(p)) return null;
+    var cy = m.y + 6 * sc;
+    for (m.items, 0..) |it, i| {
+        const h = if (it.separator) menu_sep_h * sc else menu_item_h * sc;
+        if (!it.separator and it.enabled and p.y >= cy and p.y < cy + h) return i;
+        cy += h;
+    }
+    return null;
+}
+
+/// Draw the open overlay menu (#319): a themed panel with hover highlight,
+/// separators, disabled dimming, and right-aligned accelerators. Records the
+/// panel rect for hit-testing. Called last in the render pass so it's on top.
+pub fn renderMenuOverlay(b: backend_mod.Backend) void {
+    const m = &(g_open_menu orelse return);
+    const sc = g_scale;
+    const th = g_menu_theme;
+    // Panel size: widest label (+ accelerator) and the stacked item heights.
+    var w: f32 = 140 * sc;
+    var total: f32 = 12 * sc;
+    for (m.items) |it| {
+        if (it.separator) {
+            total += menu_sep_h * sc;
+            continue;
+        }
+        total += menu_item_h * sc;
+        var tw = b.measureText(it.label, .{ .size = menu_font * sc }).width + 2 * menu_pad_x * sc;
+        if (it.accelerator.len > 0) tw += b.measureText(it.accelerator, .{ .size = (menu_font - 2) * sc }).width + 24 * sc;
+        w = @max(w, tw);
+    }
+    const x = m.x;
+    const y = m.y;
+    m.panel = .{ .x = x, .y = y, .width = w, .height = total };
+    b.drawRect(m.panel, .{ .background = th.surface, .border = style_mod.Border.all(1 * sc, th.border), .corner_radius = .all(6 * sc) });
+
+    var cy = y + 6 * sc;
+    for (m.items, 0..) |it, i| {
+        if (it.separator) {
+            b.drawRect(.{ .x = x + 8 * sc, .y = cy + menu_sep_h * sc / 2, .width = w - 16 * sc, .height = @max(1, sc) }, .{ .background = th.border });
+            cy += menu_sep_h * sc;
+            continue;
+        }
+        const hovered = (m.hover == i) and it.enabled;
+        if (hovered) {
+            b.drawRect(.{ .x = x + 4 * sc, .y = cy, .width = w - 8 * sc, .height = menu_item_h * sc }, .{ .background = th.accent, .corner_radius = .all(4 * sc) });
+        }
+        const col = if (!it.enabled) th.text_muted else if (hovered) th.on_accent else th.text;
+        b.drawText(.{ .x = x + menu_pad_x * sc, .y = cy + (menu_item_h - menu_font) * sc / 2 }, it.label, .{ .size = menu_font * sc, .color = col });
+        if (it.accelerator.len > 0) {
+            const aw = b.measureText(it.accelerator, .{ .size = (menu_font - 2) * sc }).width;
+            const acol = if (hovered) th.on_accent else th.text_muted;
+            b.drawText(.{ .x = x + w - menu_pad_x * sc - aw, .y = cy + (menu_item_h - (menu_font - 2)) * sc / 2 }, it.accelerator, .{ .size = (menu_font - 2) * sc, .color = acol });
+        }
+        cy += menu_item_h * sc;
+    }
+}
 /// The currently-focused editable field, refreshed each frame by
 /// renderTextFields. Lets the menu-bar Edit commands (which run without
 /// placements) target it. Null when no field is focused. (#319)
@@ -1450,6 +1555,39 @@ fn focusIndexAt(placements: []const layout_mod.Placement, p: geometry.Point) ?us
 
 /// Map one event to a Command, dispatching interaction messages through
 /// the model. Shared by the terminal and GUI loops.
+/// Modal handling for an open overlay menu (#319): hover tracking, click to
+/// choose (running the command) or dismiss, Escape to cancel. Swallows pointer
+/// and key input while open; returns null to let other events proceed.
+fn handleOpenMenuEvent(comptime Model: type, comptime Msg: type, model: *Model, ev: event_mod.Event) ?Command {
+    const m = &(g_open_menu orelse return null);
+    switch (ev) {
+        .pointer_move => |p| {
+            m.hover = menuItemAt(m.*, p.position);
+            return .redraw;
+        },
+        .pointer_down => |p| {
+            const chosen = menuItemAt(m.*, p.position);
+            const items = m.items;
+            const target = m.target;
+            g_open_menu = null; // close on any click
+            if (chosen) |ci| {
+                const id = items[ci].id;
+                if (menu_mod.isEditCommand(id)) return doEditCommand(Model, Msg, model, id, target);
+                if (@hasDecl(Model, "onMenuCommand")) return model.onMenuCommand(id);
+            }
+            return .redraw;
+        },
+        .key_down => |k| {
+            if (k.key == .escape) g_open_menu = null;
+            return .redraw; // modal: swallow keys while open
+        },
+        .text => return .none,
+        .scroll => return .none,
+        .close_requested => return .quit,
+        else => return null, // resized etc. proceed normally (menu re-clamps)
+    }
+}
+
 fn dispatch(
     comptime Model: type,
     comptime Msg: type,
@@ -1457,6 +1595,9 @@ fn dispatch(
     ev: event_mod.Event,
     placements: []const layout_mod.Placement,
 ) Command {
+    if (g_open_menu != null) {
+        if (handleOpenMenuEvent(Model, Msg, model, ev)) |cmd| return cmd;
+    }
     return switch (ev) {
         .close_requested => .quit,
         .resized => .redraw,
@@ -1730,6 +1871,9 @@ fn handleContextMenu(comptime Model: type, comptime Msg: type, window: anytype, 
     if (ev != .pointer_down) return .none;
     const p = ev.pointer_down;
     if (!p.buttons.secondary) return .none;
+    // X11 (no native menus) and the test override use the in-window overlay;
+    // mac/Windows pop the OS-native menu synchronously.
+    const overlay = force_overlay_menu or !nativeMenus(window);
 
     // Framework Edit menu on a text field / read-only selection.
     const field = editFieldAt(placements, p.position);
@@ -1748,6 +1892,10 @@ fn handleContextMenu(comptime Model: type, comptime Msg: type, window: anytype, 
         else
             g_textsel != null;
         const items = buildEditMenu(field != null, has_sel);
+        if (overlay) {
+            g_open_menu = .{ .items = items, .x = p.position.x, .y = p.position.y, .target = field };
+            return .redraw;
+        }
         const chosen = window.popupMenu(items, p.position.x, p.position.y) orelse return .none;
         if (menu_mod.isEditCommand(chosen)) return doEditCommand(Model, Msg, model, chosen, field);
         return .none;
@@ -1756,6 +1904,10 @@ fn handleContextMenu(comptime Model: type, comptime Msg: type, window: anytype, 
     // Otherwise the app's own context menu.
     if (!@hasDecl(Model, "contextMenu")) return .none;
     const items = model.contextMenu() orelse return .none;
+    if (overlay) {
+        g_open_menu = .{ .items = items, .x = p.position.x, .y = p.position.y, .target = g_focused_edit };
+        return .redraw;
+    }
     const chosen = window.popupMenu(items, p.position.x, p.position.y) orelse return .none;
     if (menu_mod.isEditCommand(chosen)) return doEditCommand(Model, Msg, model, chosen, g_focused_edit);
     if (@hasDecl(Model, "onMenuCommand")) return model.onMenuCommand(chosen);

@@ -806,6 +806,10 @@ fn stopAppearanceWatcher() void {
 pub const Event = core_event.Event;
 
 pub const Window = struct {
+    /// X11 has no toolkit-agnostic native menus, so the framework draws an
+    /// in-window overlay menu instead of using popupMenu/setMenuBar (#319).
+    pub const native_menus = false;
+
     display: *Display,
     handle: Window_,
     gc: *GC,
