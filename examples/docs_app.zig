@@ -535,6 +535,7 @@ pub fn main(init: std.process.Init) !void {
         // look). The sidebar's top padding clears the traffic lights.
         .titlebar = .integrated,
         // Optional reposition via ZOOEE_TRAFFIC=x,y (macOS); unset = OS default.
-        .traffic_lights = trafficLightsFromEnv(init),
+        // .traffic_lights = trafficLightsFromEnv(init),
+        .traffic_lights = .{ .x = 8, .y = 8 },
     });
 }
