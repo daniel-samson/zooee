@@ -588,12 +588,15 @@ fn keysymToKey(ks: KeySym) ?core_event.Key {
     };
 }
 
-// --- OS appearance integration (#318): GNOME via gsettings ------------------
+// --- OS appearance integration (#318): XDG desktop portal (D-Bus) -----------
 // Mirrors the macOS/Windows hooks so the app loop can re-theme on OS change.
-// `gsettings` needs a subprocess (and thus the loop's gpa/io), which the no-arg
-// prefersDark()/systemAccent() can't supply — so takeAppearanceChanged(gpa, io)
-// polls gsettings (throttled to ~1s) and caches the result here; the accessors
-// just return the cache. Degrades to "light, no accent" on non-GNOME desktops.
+// Reads the cross-desktop `org.freedesktop.appearance` settings via the portal
+// (GNOME, KDE, …), falling back to GNOME `gsettings`. Both are subprocesses, so
+// they need the loop's gpa/io, which the no-arg prefersDark()/systemAccent()
+// can't supply — so takeAppearanceChanged(gpa, io) polls (throttled to ~1s) and
+// caches the result here; the accessors return the cache. Subprocess-only, so
+// no linked D-Bus lib and no binary-size cost. Degrades to "light, no accent"
+// where neither the portal nor gsettings answers.
 const style_mod = @import("../style.zig");
 
 var g_dark: bool = false;
@@ -630,13 +633,52 @@ fn gsettingsGet(gpa: std.mem.Allocator, io: std.Io, key: []const u8) ?[]u8 {
     return res.stdout; // caller frees
 }
 
+/// Read an `org.freedesktop.appearance` key through the XDG desktop portal over
+/// D-Bus (via `gdbus`) — the cross-desktop standard (GNOME, KDE Plasma, and any
+/// portal-backed environment; it's what GTK/Qt/browsers use). Subprocess, so it
+/// adds no linked deps / binary size. Caller frees; null when gdbus or the
+/// portal/key is unavailable. Other appearance keys (`contrast`, …) read the
+/// same way when the theme grows hooks for them.
+fn portalRead(gpa: std.mem.Allocator, io: std.Io, key: []const u8) ?[]u8 {
+    const res = std.process.run(gpa, io, .{ .argv = &.{
+        "gdbus",          "call",                                  "--session",
+        "--dest",         "org.freedesktop.portal.Desktop",        "--object-path",
+        "/org/freedesktop/portal/desktop", "--method",             "org.freedesktop.portal.Settings.Read",
+        "org.freedesktop.appearance",      key,
+    } }) catch return null;
+    defer gpa.free(res.stderr);
+    switch (res.term) {
+        .exited => |code| if (code != 0) {
+            gpa.free(res.stdout);
+            return null;
+        },
+        else => {
+            gpa.free(res.stdout);
+            return null;
+        },
+    }
+    return res.stdout; // caller frees
+}
+
+/// OS dark preference. Portal `color-scheme` (uint32: 0 none, 1 dark, 2 light)
+/// is the general path; GNOME `gsettings` is the fallback when no portal runs.
 fn readDark(gpa: std.mem.Allocator, io: std.Io) bool {
+    if (portalRead(gpa, io, "color-scheme")) |out| {
+        defer gpa.free(out);
+        return std.mem.indexOf(u8, out, "uint32 1") != null;
+    }
     const out = gsettingsGet(gpa, io, "color-scheme") orelse return false;
     defer gpa.free(out);
     return std.mem.indexOf(u8, out, "prefer-dark") != null;
 }
 
+/// OS accent. Portal `accent-color` is a `(ddd)` of 0..1 sRGB (all −1 = unset);
+/// GNOME `gsettings`' named accent is the fallback. Null when neither resolves.
 fn readAccent(gpa: std.mem.Allocator, io: std.Io) ?style_mod.Color {
+    if (portalRead(gpa, io, "accent-color")) |out| {
+        defer gpa.free(out);
+        if (parsePortalAccent(out)) |c| return c;
+    }
     const out = gsettingsGet(gpa, io, "accent-color") orelse return null;
     defer gpa.free(out);
     const Named = struct { name: []const u8, r: u8, g: u8, b: u8 };
@@ -653,6 +695,39 @@ fn readAccent(gpa: std.mem.Allocator, io: std.Io) ?style_mod.Color {
     };
     for (palette) |p| if (std.mem.indexOf(u8, out, p.name) != null) return style_mod.Color.rgb(p.r, p.g, p.b);
     return null;
+}
+
+/// Parse the portal `accent-color` reply into sRGB — the numeric tuple
+/// `(r, g, b)` (doubles 0..1, or all −1 when unset). The reply nests the tuple
+/// in one or two variant wrappers (`(<(…)>,)` / `(<<(…)>>,)`), so locate the
+/// `(` that directly precedes the first number rather than a fixed prefix.
+/// Null on unset or a malformed reply.
+fn parsePortalAccent(s: []const u8) ?style_mod.Color {
+    var start: ?usize = null;
+    var i: usize = 0;
+    while (i + 1 < s.len) : (i += 1) {
+        if (s[i] != '(') continue;
+        const c = s[i + 1];
+        if (c == '-' or c == '.' or (c >= '0' and c <= '9')) {
+            start = i + 1;
+            break;
+        }
+    }
+    const begin = start orelse return null;
+    const end = std.mem.indexOfPos(u8, s, begin, ")") orelse return null;
+    var it = std.mem.splitScalar(u8, s[begin..end], ',');
+    var ch: [3]f64 = undefined;
+    var n: usize = 0;
+    while (it.next()) |tok| : (n += 1) {
+        if (n >= 3) return null;
+        ch[n] = std.fmt.parseFloat(f64, std.mem.trim(u8, tok, " ")) catch return null;
+    }
+    if (n != 3 or ch[0] < 0 or ch[1] < 0 or ch[2] < 0) return null;
+    return style_mod.Color.rgb(unitTo8(ch[0]), unitTo8(ch[1]), unitTo8(ch[2]));
+}
+
+fn unitTo8(x: f64) u8 {
+    return @intFromFloat(@round(std.math.clamp(x, 0.0, 1.0) * 255.0));
 }
 
 fn accentEql(a: ?style_mod.Color, b: ?style_mod.Color) bool {
