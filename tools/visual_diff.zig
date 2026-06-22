@@ -100,6 +100,13 @@ fn parseBmp(gpa: std.mem.Allocator, data: []const u8, path: []const u8) Image {
     return .{ .width = w, .height = h, .rgb = rgb };
 }
 
+/// Mean of all RGB channel values (0..255) — a simple overall-brightness proxy.
+fn meanBrightness(img: Image) f64 {
+    var sum: u64 = 0;
+    for (img.rgb) |b| sum += b;
+    return @as(f64, @floatFromInt(sum)) / @as(f64, @floatFromInt(img.rgb.len));
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.arena.allocator();
     const args = try init.minimal.args.toSlice(gpa);
@@ -108,13 +115,22 @@ pub fn main(init: std.process.Init) !void {
     var actual_path: ?[]const u8 = null;
     var solid: ?[3]u8 = null;
     var reject_solid: ?[3]u8 = null;
+    var darker: ?struct { dark: []const u8, light: []const u8 } = null;
     var max_avg_diff: f64 = 2.0;
     var max_pixel_frac: f64 = 0.01;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--max-avg-diff")) {
+        if (std.mem.eql(u8, arg, "--darker")) {
+            // `--darker <dark> <light>`: pass only if the first image is
+            // meaningfully darker than the second — for OS dark-mode e2e
+            // (the app should render dark under a dark OS theme). #318.
+            i += 1;
+            const d = args[i];
+            i += 1;
+            darker = .{ .dark = d, .light = args[i] };
+        } else if (std.mem.eql(u8, arg, "--max-avg-diff")) {
             i += 1;
             max_avg_diff = try std.fmt.parseFloat(f64, args[i]);
         } else if (std.mem.eql(u8, arg, "--max-pixel-frac")) {
@@ -137,7 +153,21 @@ pub fn main(init: std.process.Init) !void {
             actual_path = arg;
         } else fail("unexpected argument: {s}", .{arg});
     }
-    const ap = actual_path orelse fail("usage: visual-diff [<golden>|--expect-solid R,G,B|--reject-solid R,G,B] <actual>", .{});
+    // --darker: brightness-only comparison of two captures (OS dark-mode e2e).
+    if (darker) |dl| {
+        const margin: f64 = 40; // dark vs light themes differ by ~200; 40 is slack.
+        const db = meanBrightness(loadImage(gpa, dl.dark, init.io));
+        const lb = meanBrightness(loadImage(gpa, dl.light, init.io));
+        std.debug.print("visual-diff: mean brightness dark={d:.1} light={d:.1} (need light-dark > {d:.0})\n", .{ db, lb, margin });
+        if (lb - db < margin) {
+            std.debug.print("visual-diff: NOT DARKER — app did not follow the OS dark theme\n", .{});
+            std.process.exit(1);
+        }
+        std.debug.print("visual-diff: OK (dark capture is darker than light)\n", .{});
+        return;
+    }
+
+    const ap = actual_path orelse fail("usage: visual-diff [<golden>|--expect-solid R,G,B|--reject-solid R,G,B|--darker DARK LIGHT] <actual>", .{});
     const actual = loadImage(gpa, ap, init.io);
 
     // --reject-solid: assert the capture has content (not a blank window).

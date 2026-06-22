@@ -26,6 +26,37 @@ jobs:
           echo "Display: ${DISPLAY:-none}"
           uname -a
 
+      - name: E2E OS dark-mode theming follows color-scheme (#318)
+        run: |
+          # The docs app reads the OS light/dark preference at startup, so flip it
+          # and assert the rendered frame tracks it. A private D-Bus session makes
+          # `gsettings set` and the app's gsettings fallback share one dconf (a bare
+          # session has no portal → this exercises the fallback path); one frame per
+          # mode is captured via ZOOEE_CAPTURE under Xvfb + software GL.
+          set -euo pipefail
+          if ! command -v gsettings >/dev/null || ! command -v dbus-run-session >/dev/null; then
+            echo "skip: gsettings / dbus-run-session not available on this runner"; exit 0
+          fi
+          dbus-run-session -- bash -c '
+            set -e
+            for mode in dark light; do
+              [ "$mode" = dark ] && scheme=prefer-dark || scheme=prefer-light
+              gsettings set org.gnome.desktop.interface color-scheme "$scheme"
+              xvfb-run -a env LIBGL_ALWAYS_SOFTWARE=1 ZOOEE_CAPTURE="docs-$mode.ppm" ./zig-out/bin/zooee-docs-demo
+            done
+          '
+          ./zig-out/bin/visual-diff --darker docs-dark.ppm docs-light.ppm
+
+      - name: Upload dark-mode captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-darkmode-capture
+          path: |
+            docs-dark.ppm
+            docs-light.ppm
+          if-no-files-found: ignore
+
   windows-vm:
     runs-on: [self-hosted, windows, vm]
     defaults:
@@ -133,10 +164,39 @@ jobs:
           }
           Write-Host "D3D11 GPU window captured: $((Get-Item d3d_window.ppm).Length) bytes"
 
+      - name: E2E OS dark-mode theming follows AppsUseLightTheme (#318)
+        run: |
+          # The docs app reads the OS light/dark preference at startup, so flip the
+          # registry and assert the rendered frame tracks it. ZOOEE_CAPTURE renders
+          # one frame to a PPM via the D3D path (works in this interactive session).
+          $key = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+          $orig = (Get-ItemProperty -Path $key -Name AppsUseLightTheme -ErrorAction SilentlyContinue).AppsUseLightTheme
+          try {
+            Set-ItemProperty -Path $key -Name AppsUseLightTheme -Value 0 -Type DWord
+            $env:ZOOEE_CAPTURE = "docs-dark.ppm"
+            Start-Process -FilePath "zig-out\bin\zooee-docs-demo.exe" -Wait
+            Set-ItemProperty -Path $key -Name AppsUseLightTheme -Value 1 -Type DWord
+            $env:ZOOEE_CAPTURE = "docs-light.ppm"
+            Start-Process -FilePath "zig-out\bin\zooee-docs-demo.exe" -Wait
+            if (-not (Test-Path docs-dark.ppm) -or -not (Test-Path docs-light.ppm)) {
+              throw "docs capture missing (GPU swapchain path did not run?)"
+            }
+            & "zig-out\bin\visual-diff.exe" --darker docs-dark.ppm docs-light.ppm
+            if ($LASTEXITCODE -ne 0) { throw "docs did not follow OS dark mode" }
+          } finally {
+            if ($null -ne $orig) {
+              Set-ItemProperty -Path $key -Name AppsUseLightTheme -Value $orig -Type DWord
+            }
+            Remove-Item Env:\ZOOEE_CAPTURE -ErrorAction SilentlyContinue
+          }
+
       - name: Upload D3D window capture
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: d3d-window-capture
-          path: d3d_window.ppm
+          path: |
+            d3d_window.ppm
+            docs-dark.ppm
+            docs-light.ppm
           if-no-files-found: ignore
