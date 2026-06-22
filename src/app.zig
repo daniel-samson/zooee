@@ -404,7 +404,7 @@ pub fn runWindow(
             if (handleContextMenu(Model, window, model, ev) == .redraw) dirty = true;
         }
         // Native menu-bar selections + file-open requests (#129).
-        if (frameOsHooks(Model, window, model, gpa, io) == .redraw) dirty = true;
+        if (frameOsHooks(Model, Msg, window, model, gpa, io) == .redraw) dirty = true;
         if (animate(Model, model, dt) == .redraw) dirty = true;
         if (layout_mod.tickScrollbarFade(dt)) dirty = true; // scrollbar fade (#312)
 
@@ -513,7 +513,7 @@ fn runWindowGl(
             if (handleContextMenu(Model, window, model, ev) == .redraw) dirty = true;
         }
         // Native menu-bar selections + file-open requests (#129).
-        if (frameOsHooks(Model, window, model, gpa, io) == .redraw) dirty = true;
+        if (frameOsHooks(Model, Msg, window, model, gpa, io) == .redraw) dirty = true;
         if (animate(Model, model, dt) == .redraw) dirty = true;
         if (layout_mod.tickScrollbarFade(dt)) dirty = true; // scrollbar fade (#312)
         if (modelBackground(Model, model)) |c| glb.clear_color = c.rgbaF(); // theming toggle
@@ -686,7 +686,7 @@ fn runWindowMetal(
             if (handleContextMenu(Model, window, model, ev) == .redraw) dirty = true;
         }
         // Native menu-bar selections + file-open requests (#129).
-        if (frameOsHooks(Model, window, model, gpa, io) == .redraw) dirty = true;
+        if (frameOsHooks(Model, Msg, window, model, gpa, io) == .redraw) dirty = true;
         if (animate(Model, model, dt) == .redraw) dirty = true;
         if (layout_mod.tickScrollbarFade(dt)) dirty = true; // scrollbar fade (#312)
         frame.sync_present = pointer_drag; // low-latency present while dragging
@@ -817,7 +817,7 @@ fn runWindowD3d(
             if (handleContextMenu(Model, window, model, ev) == .redraw) dirty = true;
         }
         // Native menu-bar selections + file-open requests (#129).
-        if (frameOsHooks(Model, window, model, gpa, io) == .redraw) dirty = true;
+        if (frameOsHooks(Model, Msg, window, model, gpa, io) == .redraw) dirty = true;
         if (animate(Model, model, dt) == .redraw) dirty = true;
         if (layout_mod.tickScrollbarFade(dt)) dirty = true; // scrollbar fade (#312)
         if (modelBackground(Model, model)) |c| db.clear_color = c.rgbaF(); // theming toggle
@@ -995,8 +995,20 @@ var g_copy_request: bool = false; // ⌘C pressed; the render pass fills the buf
 var g_copy_pending: bool = false; // buffer ready; the OS-hooks pass writes the clipboard
 var g_copy_buf: [4096]u8 = undefined;
 var g_copy_len: usize = 0;
+/// Pending paste into a focused text field (#319): the clipboard read happens in
+/// frameOsHooks (which has the window + allocator), then inserts at the caret.
+var g_field_paste: ?struct { id: u32, on_change: ?u32 } = null;
 /// Diagnostic: log the selection→clipboard path (ZOOEE_CLIPLOG).
 pub var clipboard_debug: bool = false;
+
+/// Queue `text` for the system clipboard (the OS-hooks pass writes it). Used by
+/// field Copy/Cut, which have the text in hand immediately (no render pass). #319
+fn queueClipboardWrite(text: []const u8) void {
+    const len = @min(text.len, g_copy_buf.len);
+    @memcpy(g_copy_buf[0..len], text[0..len]);
+    g_copy_len = len;
+    g_copy_pending = true;
+}
 
 /// Clear any active text selection (tests / programmatic).
 pub fn resetTextSelection() void {
@@ -1506,6 +1518,39 @@ fn dispatch(
             if (clipboard_debug) std.debug.print("CLIP text: cp={d} ctrl={} super={} textsel={}\n", .{ t.codepoint, t.mods.ctrl, t.mods.super, g_textsel != null });
             // Copy the active text selection (#318): ⌘C / Ctrl+C. The render pass
             // resolves the selected substring and the OS-hooks pass writes it.
+            // Clipboard / select-all on a focused field (#319). ⌘ on macOS,
+            // Ctrl elsewhere — both surface as `super`/`ctrl` here.
+            if ((t.mods.super or t.mods.ctrl) and !t.mods.alt) {
+                if (focusedEditPlacement(placements)) |pl| {
+                    const el = pl.element;
+                    const id = el.edit_field.?;
+                    const te = edit_state.get(id).?;
+                    const cp = t.codepoint | 0x20; // case-fold ASCII
+                    switch (cp) {
+                        'c' => {
+                            if (te.selection() != null) queueClipboardWrite(te.selectedText());
+                            break :blk .redraw;
+                        },
+                        'x' => {
+                            if (te.selection() != null) {
+                                queueClipboardWrite(te.selectedText());
+                                te.deleteSelection(edit_state.allocator());
+                                if (el.edit_on_change) |m| _ = model.update(@as(Msg, @enumFromInt(m)));
+                            }
+                            break :blk .redraw;
+                        },
+                        'v' => {
+                            g_field_paste = .{ .id = id, .on_change = el.edit_on_change };
+                            break :blk .redraw;
+                        },
+                        'a' => {
+                            te.selectAll();
+                            break :blk .redraw;
+                        },
+                        else => {},
+                    }
+                }
+            }
             if ((t.mods.super or t.mods.ctrl) and (t.codepoint == 'c' or t.codepoint == 'C') and g_textsel != null) {
                 g_copy_request = true;
                 break :blk .redraw;
@@ -1560,8 +1605,24 @@ fn setupMenuBar(comptime Model: type, window: anytype, model: *Model) void {
 /// requested it (via `takeOpenRequest`), show the native file-open dialog and
 /// hand the chosen path to `onFileChosen`. Returns `.redraw` if anything
 /// changed model state. No-ops without the corresponding hooks.
-fn frameOsHooks(comptime Model: type, window: anytype, model: *Model, gpa: std.mem.Allocator, io: std.Io) Command {
+fn frameOsHooks(comptime Model: type, comptime Msg: type, window: anytype, model: *Model, gpa: std.mem.Allocator, io: std.Io) Command {
     var cmd: Command = .none;
+    // Paste into a focused text field (#319): read the clipboard here (we have
+    // the window + allocator) and insert at the caret, then fire on_change.
+    if (g_field_paste) |fp| {
+        g_field_paste = null;
+        var clip = systemClipboard(window, gpa);
+        if (clip.interface().getText(gpa)) |maybe| {
+            if (maybe) |txt| {
+                defer gpa.free(txt);
+                if (edit_state.get(fp.id)) |te| {
+                    te.insert(edit_state.allocator(), txt) catch {};
+                    if (fp.on_change) |m| _ = model.update(@as(Msg, @enumFromInt(m)));
+                    cmd = .redraw;
+                }
+            }
+        } else |_| {}
+    }
     if (@hasDecl(Model, "menuBar")) {
         if (window.takeMenuCommand()) |id| {
             if (model.onMenuCommand(id) == .redraw) cmd = .redraw;
