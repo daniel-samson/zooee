@@ -71,8 +71,13 @@ pub fn build(b: *std.Build) void {
     const gen_icons = b.addRunArtifact(svg2icons);
     gen_icons.addArgs(&.{ "icons", "src/generated_icons.zig" });
     gen_icons.has_side_effects = true; // writes into the source tree
+    // Normalize the emitted file through `zig fmt` so the committed output is
+    // formatting-clean (the emitter keeps `@"name"` quoting + tight braces; fmt
+    // unquotes valid identifiers and adds spacing, matching CI's fmt --check).
+    const fmt_icons = b.addSystemCommand(&.{ b.graph.zig_exe, "fmt", "src/generated_icons.zig" });
+    fmt_icons.step.dependOn(&gen_icons.step);
     const gen_icons_step = b.step("gen-icons", "Regenerate src/generated_icons.zig from icons/*.svg");
-    gen_icons_step.dependOn(&gen_icons.step);
+    gen_icons_step.dependOn(&fmt_icons.step);
 
     // The full Lucide set (src/lucide.zig) is the committed artifact; it's baked
     // from the SVG pool in assets/lucide/icons/, which is gitignored and fetched
@@ -82,8 +87,10 @@ pub fn build(b: *std.Build) void {
     const gen_lucide = b.addRunArtifact(svg2icons);
     gen_lucide.addArgs(&.{ "assets/lucide/icons", "src/lucide.zig" });
     gen_lucide.has_side_effects = true;
-    b.step("gen-lucide", "Regenerate src/lucide.zig from the full Lucide pool").dependOn(&gen_lucide.step);
-    gen_icons_step.dependOn(&gen_lucide.step);
+    const fmt_lucide = b.addSystemCommand(&.{ b.graph.zig_exe, "fmt", "src/lucide.zig" });
+    fmt_lucide.step.dependOn(&gen_lucide.step);
+    b.step("gen-lucide", "Regenerate src/lucide.zig from the full Lucide pool").dependOn(&fmt_lucide.step);
+    gen_icons_step.dependOn(&fmt_lucide.step);
 
     // --- test --------------------------------------------------------------
     const test_step = b.step("test", "Run unit tests");

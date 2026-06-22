@@ -25,7 +25,7 @@ jobs:
 
       - name: Install X11/GL (Linux backends + software GL for tests)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libx11-dev libgl-dev libgl1-mesa-dri xvfb
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libxi-dev libgl-dev libgl1-mesa-dri xvfb
 
       - name: Build (library + demos + checks)
         run: zig build && zig build demos check

@@ -188,10 +188,10 @@ const Play = struct {
     fn configLine(self: *Play, buf: []u8) []const u8 {
         const off = zooee.app.scrollOffset(@intFromEnum(Msg.scroll_region));
         return std.fmt.bufPrint(buf, "direction={s} justify={s} align={s} text-wrap={} flex-wrap={} overflow=({s},{s}) scroll=({d:.0},{d:.0}) gap={d:.0} padding={d:.0} boxes={d}", .{
-            @tagName(self.dir),       @tagName(self.justify),    @tagName(self.align_items),
-            self.wrap,                self.box_wrap,             @tagName(self.overflow_x),
-            @tagName(self.overflow_y), off.x,                    off.y,
-            self.gap,                 self.pad,                  self.count,
+            @tagName(self.dir),        @tagName(self.justify), @tagName(self.align_items),
+            self.wrap,                 self.box_wrap,          @tagName(self.overflow_x),
+            @tagName(self.overflow_y), off.x,                  off.y,
+            self.gap,                  self.pad,               self.count,
         }) catch "(config too long)";
     }
 
