@@ -1714,6 +1714,7 @@ pub const PopupSurface = struct {
         // popup (grab) window — exactly the popup-local coords menuItemAt wants,
         // including clicks outside the panel (which dismiss).
         const ok = XGrabPointer(win.display, handle, 0, @intCast(ButtonPressMask | ButtonReleaseMask | PointerMotionMask), GrabModeAsync, GrabModeAsync, 0, 0, win.last_event_time);
+        std.debug.print("[popup] create handle={} grab={}\n", .{ handle, ok });
         if (ok != GrabSuccess) {
             _ = XFreeGC(win.display, gc);
             _ = XDestroyWindow(win.display, handle);
