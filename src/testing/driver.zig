@@ -922,6 +922,85 @@ fn editDriver(m: *EditApp) !Driver(EditApp, EditApp.Msg) {
     return Driver(EditApp, EditApp.Msg).init(testing.allocator, m, .{ .width = 240, .height = 140 });
 }
 
+// A model with a nested context menu, for submenu coverage (#336).
+const sub_items = [_]menu_mod.Item{
+    .{ .label = "Nested A", .id = 101 },
+    .{ .label = "Nested B", .id = 102 },
+};
+const menu_items = [_]menu_mod.Item{
+    .{ .label = "Top", .id = 1 },
+    .{ .label = "More", .submenu = &sub_items },
+    .{ .label = "Bottom", .id = 2 },
+};
+
+const MenuApp = struct {
+    last_id: u32 = 0,
+    pub const Msg = enum(u32) { _ };
+    pub fn viewUi(self: *MenuApp, u: *ui_mod.Ui) !ui_mod.Widget {
+        _ = self;
+        return u.text("right-click me", .{}); // non-selectable → app contextMenu fires
+    }
+    pub fn update(self: *MenuApp, msg: Msg) Command {
+        _ = self;
+        _ = msg;
+        return .redraw;
+    }
+    pub fn contextMenu(self: *MenuApp) ?[]const menu_mod.Item {
+        _ = self;
+        return &menu_items;
+    }
+    pub fn onMenuCommand(self: *MenuApp, id: u32) Command {
+        self.last_id = id;
+        return .redraw;
+    }
+    pub fn onEvent(self: *MenuApp, ev: event_mod.Event) Command {
+        _ = self;
+        _ = ev;
+        return .none;
+    }
+};
+
+fn menuDriver(m: *MenuApp) !Driver(MenuApp, MenuApp.Msg) {
+    app_mod.resetForTest();
+    return Driver(MenuApp, MenuApp.Msg).init(testing.allocator, m, .{ .width = 400, .height = 220 });
+}
+
+test "#336 submenu opens on hover and a nested item activates" {
+    var m: MenuApp = .{};
+    var d = try menuDriver(&m);
+    defer d.deinit();
+    _ = try d.rightClick(40, 12); // not over text → app context menu
+    try testing.expect(d.menuOpen());
+    try testing.expectEqual(@as(usize, 1), app_mod.overlayMenuDepth());
+    _ = try d.render();
+    const more = app_mod.overlayMenuItemPoint("More").?;
+    _ = try d.move(more.x, more.y); // hover the submenu parent → opens it
+    try testing.expectEqual(@as(usize, 2), app_mod.overlayMenuDepth());
+    _ = try d.chooseMenu("Nested A"); // finds + clicks the nested row
+    try testing.expect(!d.menuOpen()); // chosen → closed
+    try testing.expectEqual(@as(u32, 101), m.last_id);
+}
+
+test "#336 keyboard: Right opens submenu, Left closes, Enter activates a nested item" {
+    var m: MenuApp = .{};
+    var d = try menuDriver(&m);
+    defer d.deinit();
+    _ = try d.rightClick(40, 12);
+    _ = try d.key(.down); // Top
+    _ = try d.key(.down); // More (submenu parent)
+    try testing.expectEqualStrings("More", app_mod.overlayMenuHoverLabel().?);
+    _ = try d.key(.right); // open submenu, highlight first nested
+    try testing.expectEqual(@as(usize, 2), app_mod.overlayMenuDepth());
+    try testing.expectEqualStrings("Nested A", app_mod.overlayMenuHoverLabel().?);
+    _ = try d.key(.left); // close back to root
+    try testing.expectEqual(@as(usize, 1), app_mod.overlayMenuDepth());
+    _ = try d.key(.right); // reopen
+    _ = try d.key(.down); // Nested A → Nested B
+    _ = try d.key(.enter); // activate
+    try testing.expect(!d.menuOpen());
+    try testing.expectEqual(@as(u32, 102), m.last_id);
+}
+
 test "#319 click focuses a TextInput and typing updates its value" {
     var m: EditApp = .{};
     var d = try editDriver(&m);
