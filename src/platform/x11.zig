@@ -1247,6 +1247,17 @@ pub const Window = struct {
         return PopupSurface.create(self, gx, gy, w, h);
     }
 
+    /// Whether the popup will be a transparent ARGB surface — i.e. a compositor
+    /// is running AND a 32-bit visual exists (#341). Matches PopupSurface's own
+    /// alpha decision, so app.zig can reserve the drop-shadow margin only when
+    /// the shadow will actually be transparent.
+    pub fn compositorPresent(self: *Window) bool {
+        const screen = XDefaultScreen(self.display);
+        if (!PopupSurface.hasCompositor(self.display, screen)) return false;
+        var vinfo: XVisualInfo = undefined;
+        return XMatchVisualInfo(self.display, screen, 32, TrueColor, &vinfo) != 0;
+    }
+
     /// Native menu bar (#129): no native X11 menu bar; no-op (apps draw their
     /// own, #17). Present for cross-platform uniformity.
     pub fn setMenuBar(self: *Window, items: []const menu_mod.Item) void {

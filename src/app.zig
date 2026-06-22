@@ -48,6 +48,7 @@ pub fn buildTree(comptime Model: type, model: *Model, arena: std.mem.Allocator, 
         selection_color = u.theme.selection; // text-selection highlight (#318)
         selection_text_color = u.theme.selection_text;
         g_menu_theme = u.theme; // colors for the in-window menu overlay (#319)
+        g_menu_dark = u.theme.surface.r < 128; // dark palette for the menu shadow (#341)
         layout_mod.scrollbar_thumb = .{ .r = u.theme.text_muted.r, .g = u.theme.text_muted.g, .b = u.theme.text_muted.b, .a = 150 }; // muted neutral thumb (#312)
         return u.lower(try model.viewUi(&u));
     }
@@ -1039,6 +1040,32 @@ const EditTarget = struct { id: u32, on_change: ?u32 };
 // menus (X11). A framework-drawn, modal popup handled in the normal render +
 // event loop, so it needs no per-platform menu code.
 var g_menu_theme: theme_mod.Theme = theme_mod.Theme.dark;
+/// Whether the active theme is dark (surface luminance heuristic), set in
+/// buildTree. Picks the dark menu palette (#341).
+var g_menu_dark: bool = true;
+/// Whether to paint the menu's drop shadow (#341). On by default for the
+/// in-window overlay; runPopupMenu turns it off for the opaque popup fallback
+/// (a shadow on an opaque window looks wrong) and on for the transparent ARGB
+/// popup (where it has room to fade out).
+var g_menu_shadow: bool = true;
+
+/// The menu's drop shadow (#341), tuned per light/dark so it reads as a
+/// floating panel like a native context menu. The colors stay theme-driven
+/// (accent hover etc.); only this soft shadow + the corner radius are new.
+fn menuShadow() style_mod.BoxShadow {
+    return if (g_menu_dark)
+        .{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 150 }, .dy = 8, .blur = 28, .corner_radius = menu_radius }
+    else
+        .{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 70 }, .dy = 6, .blur = 24, .corner_radius = menu_radius };
+}
+
+/// Panel corner radius (logical px), bumped to match a native menu (#341).
+const menu_radius: f32 = 8;
+
+/// Logical-px margin reserved around the panel inside the popup window for the
+/// drop shadow to fade out (#341); only used when the ARGB transparent surface
+/// is available.
+const menu_shadow_pad: f32 = 18;
 /// An open overlay menu. `items` is borrowed (a stable static / model buffer)
 /// and must outlive the open menu; `target` is the field an Edit command acts
 /// on; `panel` is filled by the render pass for hit-testing in dispatch.
@@ -1206,7 +1233,19 @@ fn renderMenuPanel(b: backend_mod.Backend, m: *MenuPanel, viewport: geometry.Siz
     const x = m.x;
     const y = m.y;
     m.panel = .{ .x = x, .y = y, .width = w, .height = total };
-    b.drawRect(m.panel, .{ .background = th.surface, .border = style_mod.Border.all(1 * sc, th.border), .corner_radius = .all(6 * sc) });
+    var shadow = if (g_menu_shadow) menuShadow() else null;
+    if (shadow) |*sh| { // scale the shadow geometry to device px
+        sh.dy *= sc;
+        sh.dx *= sc;
+        sh.blur *= sc;
+        sh.corner_radius *= sc;
+    }
+    b.drawRect(m.panel, .{
+        .background = th.surface,
+        .border = style_mod.Border.all(1 * sc, th.border),
+        .corner_radius = .all(menu_radius * sc),
+        .shadow = shadow,
+    });
 
     var cy = y + 6 * sc;
     for (m.items, 0..) |it, i| {
@@ -2290,19 +2329,24 @@ fn runPopupMenu(
     const b = raster.interface();
 
     const size = measureMenu(b, items);
-    const w: u32 = @intFromFloat(@ceil(size.width));
-    const h: u32 = @intFromFloat(@ceil(size.height));
-    var surf = window.popupSurface(@as(i32, @intFromFloat(x)), @as(i32, @intFromFloat(y)), w, h) orelse return .grab_failed;
+    // On a compositor we reserve a transparent margin around the panel for the
+    // drop shadow to fade into (#341); otherwise the window hugs the panel.
+    const pad: f32 = if (window.compositorPresent()) menu_shadow_pad * g_scale else 0;
+    const w: u32 = @intFromFloat(@ceil(size.width) + 2 * pad);
+    const h: u32 = @intFromFloat(@ceil(size.height) + 2 * pad);
+    var surf = window.popupSurface(@as(i32, @intFromFloat(x - pad)), @as(i32, @intFromFloat(y - pad)), w, h) orelse return .grab_failed;
     defer surf.destroy();
     // On an ARGB surface (compositor present) clear to fully transparent so the
-    // menu's rounded corners show the desktop; otherwise the corners blend into
-    // the opaque surface fill (#333 transparency).
+    // menu's rounded corners + shadow show the desktop; otherwise the corners
+    // blend into the opaque surface fill (#333 transparency).
     raster.clear_color = if (surf.alpha) .{ .r = 0, .g = 0, .b = 0, .a = 0 } else g_menu_theme.surface;
+    g_menu_shadow = surf.alpha; // shadow only on the transparent surface
+    defer g_menu_shadow = true; // restore the in-window-overlay default
 
-    // Reuse the overlay state machine, but at popup-local origin (0,0) — the
-    // surface IS the (root) panel. (Submenus aren't promoted to their own popup
-    // window yet — #336 v1 is overlay-only; in a popup they just don't expand.)
-    openRootMenu(items, 0, 0, target);
+    // Reuse the overlay state machine; the (root) panel sits at (pad, pad) inside
+    // the window so the shadow margin surrounds it. (Submenus aren't promoted to
+    // their own popup window yet — #336 v1 is overlay-only.)
+    openRootMenu(items, pad, pad, target);
     if (g_open_menu) |*om| om.flat = true; // single popup window → no submenu expansion (#336)
     defer g_open_menu = null;
     const viewport: geometry.Size = .{ .width = @floatFromInt(w), .height = @floatFromInt(h) };
