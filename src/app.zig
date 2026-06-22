@@ -998,6 +998,11 @@ var g_focus_visible: bool = false;
 /// pass resolves these points to byte offsets (it has the backend for caret
 /// math) and draws the highlight; copy slices the source by those offsets.
 /// Single active selection, like g_focus.
+/// Selection granularity (#319, browser parity): a plain drag selects by
+/// character; double-click selects the word at the point; triple-click the
+/// whole element (paragraph/line).
+const Granularity = enum { char, word, line };
+
 const TextSelection = struct {
     /// Placement index of the selectable element under each drag endpoint. They
     /// differ once the drag crosses into another paragraph (#319 multi-element).
@@ -1006,6 +1011,7 @@ const TextSelection = struct {
     anchor_pt: geometry.Point,
     focus_pt: geometry.Point,
     dragging: bool = false,
+    gran: Granularity = .char,
 };
 var g_textsel: ?TextSelection = null;
 var g_copy_request: bool = false; // ⌘C pressed; the render pass fills the buffer
@@ -1184,16 +1190,30 @@ pub fn renderTextSelection(b: backend_mod.Backend, placements: []const layout_mo
     var copy_len: usize = 0;
 
     if (s_idx == e_idx) {
-        // Single element: order by offset (the drag direction within it).
+        // Single element: char drag orders by offset; word/line clicks expand
+        // to the word at the point / the whole paragraph (#319 browser parity).
         const pl = placements[s_idx];
         const el = pl.element;
         const t = el.text orelse return;
         if (!el.text_selectable) return;
         const inner = layout_mod.contentBoxOf(el, pl.rect);
-        const a = layout_mod.textCaretAt(b, el, inner, s_pt);
-        const f = layout_mod.textCaretAt(b, el, inner, e_pt);
-        const lo = @min(a, f);
-        const hi = @min(@max(a, f), t.len);
+        var lo: usize = 0;
+        var hi: usize = t.len;
+        switch (ts.gran) {
+            .char => {
+                const a = layout_mod.textCaretAt(b, el, inner, s_pt);
+                const f = layout_mod.textCaretAt(b, el, inner, e_pt);
+                lo = @min(a, f);
+                hi = @min(@max(a, f), t.len);
+            },
+            .word => {
+                const off = layout_mod.textCaretAt(b, el, inner, s_pt);
+                const wb = @import("text_edit.zig").wordBounds(t, off);
+                lo = wb.start;
+                hi = wb.end;
+            },
+            .line => {}, // whole element: lo=0, hi=len (defaults)
+        }
         layout_mod.drawTextSelection(b, el, inner, lo, hi, selection_color, selection_text_color);
         if (want_copy) appendCopy(&copy_len, t[lo..hi]);
     } else {
@@ -1714,7 +1734,11 @@ fn dispatch(
                 // drag-select; pressing elsewhere clears any existing selection.
                 if (selectableAt(placements, p.position)) |sidx| {
                     if (clipboard_debug) std.debug.print("CLIP press: selectable idx={d} at ({d},{d})\n", .{ sidx, p.position.x, p.position.y });
-                    g_textsel = .{ .anchor_idx = sidx, .focus_idx = sidx, .anchor_pt = p.position, .focus_pt = p.position, .dragging = true };
+                    // Browser parity (#319): double-click selects the word,
+                    // triple-click the whole paragraph; a single press drags by
+                    // character. Word/line clicks aren't drag-extending.
+                    const gran: Granularity = if (p.click_count >= 3) .line else if (p.click_count == 2) .word else .char;
+                    g_textsel = .{ .anchor_idx = sidx, .focus_idx = sidx, .anchor_pt = p.position, .focus_pt = p.position, .dragging = gran == .char, .gran = gran };
                     break :blk .redraw;
                 }
                 if (clipboard_debug) std.debug.print("CLIP press: NOT selectable at ({d},{d})\n", .{ p.position.x, p.position.y });
@@ -1732,7 +1756,9 @@ fn dispatch(
                 // .redraw so the caret/selection shows immediately — otherwise it
                 // stays invisible until the next redraw (e.g. typing).
                 if (editFieldAt(placements, p.position)) |ef| {
-                    if (p.click_count >= 2) {
+                    if (p.click_count >= 3) {
+                        if (edit_state.get(ef.id)) |te| te.selectAll(); // triple-click → whole field
+                    } else if (p.click_count == 2) {
                         g_field_word_click = .{ .id = ef.id, .pt = p.position };
                     } else {
                         g_field_caret_click = .{ .id = ef.id, .pt = p.position, .extend = p.mods.shift };

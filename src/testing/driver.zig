@@ -900,6 +900,7 @@ const EditApp = struct {
             u.textInput(.{ .id = 9001, .value = "abc", .width = 200 }),
             u.text("alpha", .{ .selectable = true }),
             u.text("omega", .{ .selectable = true }),
+            u.text("two words", .{ .selectable = true }),
         });
     }
     pub fn update(self: *EditApp, msg: Msg) Command {
@@ -1045,4 +1046,34 @@ test "#319 double-click selects the word in a field" {
     _ = try d.doubleClick(fr.x + fr.width / 2, fr.y + fr.height / 2);
     _ = try d.render(); // resolve the word selection
     try testing.expectEqualStrings("abc", d.fieldSelectedText(9001));
+}
+
+test "#319 triple-click selects the whole field" {
+    var m: EditApp = .{};
+    var d = try editDriver(&m);
+    defer d.deinit();
+    const fr = d.placements()[d.findText("abc").?].rect;
+    _ = try d.clickN(fr.x + fr.width / 2, fr.y + fr.height / 2, 3); // triple-click
+    _ = try d.pointerUp(fr.x + fr.width / 2, fr.y + fr.height / 2);
+    try testing.expectEqualStrings("abc", d.fieldSelectedText(9001));
+}
+
+test "#319 read-only double-click selects a word, triple-click the paragraph" {
+    var m: EditApp = .{};
+    var d = try editDriver(&m);
+    d.setFont(@import("../root.zig").test_font_ttf) catch {}; // real metrics
+    defer d.deinit();
+    const r = d.placements()[d.findText("two words").?].rect;
+    const midy = r.y + r.height / 2;
+    // Double-click near the left → the word "two".
+    _ = try d.doubleClick(r.x + 2, midy);
+    _ = try d.textMods('c', .{ .super = true });
+    _ = try d.render();
+    try testing.expectEqualStrings("two", d.copiedText());
+    // Triple-click → the whole paragraph.
+    _ = try d.clickN(r.x + 2, midy, 3);
+    _ = try d.pointerUp(r.x + 2, midy);
+    _ = try d.textMods('c', .{ .super = true });
+    _ = try d.render();
+    try testing.expectEqualStrings("two words", d.copiedText());
 }

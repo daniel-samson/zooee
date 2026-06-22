@@ -149,14 +149,16 @@ pub const TextEdit = struct {
 };
 
 /// Word boundaries around byte offset `off` for double-click selection: the run
-/// of word characters (ASCII alphanumeric or '_') under or just before the
-/// cursor. Returns an empty range (start==end) when not on a word (e.g. between
-/// spaces/punctuation), which selects nothing. UTF-8 word chars beyond ASCII
-/// aren't grouped yet (#319 follow-up).
+/// of word characters under or just before the cursor (browser-like). A word
+/// byte is ASCII alphanumeric / '_', or any non-ASCII byte (>= 0x80) — so whole
+/// UTF-8 sequences (accents, CJK, …) group as words and the bounds stay on
+/// codepoint boundaries. Returns an empty range when not on a word (between
+/// spaces / ASCII punctuation). (Approximates UAX #29; non-ASCII punctuation
+/// isn't split out yet.)
 pub fn wordBounds(buf: []const u8, off: usize) struct { start: usize, end: usize } {
     const isWord = struct {
         fn f(c: u8) bool {
-            return std.ascii.isAlphanumeric(c) or c == '_';
+            return std.ascii.isAlphanumeric(c) or c == '_' or c >= 0x80;
         }
     }.f;
     const o = @min(off, buf.len);
