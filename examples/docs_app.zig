@@ -318,18 +318,18 @@ const Docs = struct {
         var rowlist: std.ArrayList(ui.ListRow) = .empty;
         var sel_row: ?usize = null;
         if (self.selected == 0) sel_row = rowlist.items.len;
-        try rowlist.append(u.arena, .{ .label = pages[0].name, .icon = pages[0].icon, .on_click = 0 });
+        try rowlist.append(u.arena, .{ .label = pages[0].name, .icon = pages[0].icon, .on_click = 0, .padding = .symmetric(16, 6) });
         try rowlist.append(u.arena, .{ .label = "Components", .header = true });
         for (pages[1..], 1..) |p, pi| {
             if (self.selected == pi) sel_row = rowlist.items.len;
-            try rowlist.append(u.arena, .{ .label = p.name, .icon = p.icon, .on_click = @intCast(pi) });
+            try rowlist.append(u.arena, .{ .label = p.name, .icon = p.icon, .on_click = @intCast(pi), .padding = .symmetric(16, 6) });
         }
         // The rounded source-list panel; the outer pane padding insets it on the
         // backdrop (traffic lights float over the top inset). Sidebar tone sits
         // just above the window backdrop until vibrancy lands.
         const sidebar_inner = try u.column(.{
             .grow = 1,
-            .corner_radius = 10,
+            .corner_radius = 20,
             .background = if (self.dark) Color.rgb(40, 40, 43) else Color.rgb(232, 232, 237),
             .padding = .{ .top = 34, .left = 10, .right = 10, .bottom = 10 },
         }, &.{
@@ -536,6 +536,6 @@ pub fn main(init: std.process.Init) !void {
         .titlebar = .integrated,
         // Optional reposition via ZOOEE_TRAFFIC=x,y (macOS); unset = OS default.
         // .traffic_lights = trafficLightsFromEnv(init),
-        .traffic_lights = .{ .x = 8, .y = 8 },
+        .traffic_lights = .{ .x = 12, .y = 12 },
     });
 }
