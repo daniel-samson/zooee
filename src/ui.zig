@@ -150,6 +150,15 @@ pub const TextInput = struct {
     on_change: ?u32 = null,
     width: ?f32 = 200,
     disabled: bool = false,
+
+    // Box model (#330). Defaults reproduce the stock field look; override to
+    // restyle. `background`/`border_color` null falls back to the theme.
+    padding: layout.EdgeInsets = .symmetric(8, 6),
+    margin: layout.EdgeInsets = .{},
+    background: ?Color = null,
+    corner_radius: f32 = 6,
+    border_width: f32 = 1,
+    border_color: ?Color = null,
 };
 
 fn variantSize(v: TextVariant) f32 {
@@ -645,8 +654,7 @@ pub const Ui = struct {
                 // normal layout draws it; the framework overlays the caret +
                 // selection on the focused field in a render pass (#319).
                 const fsize = 15 * s;
-                const padx = 8 * s;
-                const pady = 6 * s;
+                const pad = scaleInsets(ti.padding, s);
                 const buf = edit_state.value(ti.id);
                 const show_ph = buf.len == 0;
                 el.* = .{
@@ -658,16 +666,17 @@ pub const Ui = struct {
                     .focusable = !ti.disabled,
                     .cursor = if (ti.disabled) null else .text,
                     .width = if (ti.width) |iw| iw * s else null,
-                    .height = fsize * 1.35 + 2 * pady,
-                    .padding = .symmetric(padx, pady),
+                    .height = fsize * 1.35 + pad.top + pad.bottom,
+                    .padding = pad,
+                    .margin = scaleInsets(ti.margin, s),
                     .text_style = .{
                         .size = fsize,
                         .color = if (ti.disabled) self.theme.text_muted else if (show_ph) self.theme.text_muted else self.theme.text,
                     },
                     .rect_style = .{
-                        .background = self.theme.surface,
-                        .border = .all(1 * s, self.theme.border),
-                        .corner_radius = .all(6 * s),
+                        .background = ti.background orelse self.theme.surface,
+                        .border = borderFrom(ti.border_width, ti.border_color, self.theme, s),
+                        .corner_radius = if (ti.corner_radius > 0) .all(ti.corner_radius * s) else .none,
                     },
                 };
             },
@@ -1052,6 +1061,35 @@ test "lower: icon → sized filled path; disabled dims the tint (#272)" {
     const on = try ui.lower(ui.icon(.{ .name = .check, .role = .primary }));
     const off = try ui.lower(ui.icon(.{ .name = .check, .role = .primary, .disabled = true }));
     try testing.expect(!std.meta.eql(on.path_color, off.path_color));
+}
+
+test "lower: text input defaults to the field look and honors box-model overrides (#322)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ui = Ui.init(arena.allocator());
+
+    // Default field look: surface fill, 1px border, 6px radius, symmetric pad.
+    const def = try ui.lower(ui.textInput(.{ .id = 7701 }));
+    try testing.expectEqual(@as(?u32, 7701), def.edit_field);
+    try testing.expect(def.rect_style.background != null);
+    try testing.expect(!def.rect_style.border.isNone());
+    try testing.expectEqual(@as(f32, 6), def.rect_style.corner_radius.top_left);
+    try testing.expectEqual(@as(f32, 8), def.padding.left);
+
+    // Overrides flow through.
+    const styled = try ui.lower(ui.textInput(.{
+        .id = 7702,
+        .padding = .all(12),
+        .margin = .{ .bottom = 4 },
+        .background = Color.rgb(7, 7, 7),
+        .corner_radius = 16,
+        .border_width = 0,
+    }));
+    try testing.expectEqual(@as(f32, 12), styled.padding.left);
+    try testing.expectEqual(@as(f32, 4), styled.margin.bottom);
+    try testing.expectEqual(Color.rgb(7, 7, 7), styled.rect_style.background.?);
+    try testing.expectEqual(@as(f32, 16), styled.rect_style.corner_radius.top_left);
+    try testing.expect(styled.rect_style.border.isNone()); // border_width 0 → none
 }
 
 test "lower: list rows are clickable; selected row is highlighted (#273)" {
