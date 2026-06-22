@@ -2084,12 +2084,7 @@ fn runPopupMenu(
     const size = measureMenu(b, items);
     const w: u32 = @intFromFloat(@ceil(size.width));
     const h: u32 = @intFromFloat(@ceil(size.height));
-    std.debug.print("[popup] runPopupMenu size={d}x{d} at {d},{d}\n", .{ w, h, x, y });
-    var surf = window.popupSurface(@as(i32, @intFromFloat(x)), @as(i32, @intFromFloat(y)), w, h) orelse {
-        std.debug.print("[popup] popupSurface FAILED -> overlay fallback\n", .{});
-        return .grab_failed;
-    };
-    std.debug.print("[popup] surface ok, entering modal loop\n", .{});
+    var surf = window.popupSurface(@as(i32, @intFromFloat(x)), @as(i32, @intFromFloat(y)), w, h) orelse return .grab_failed;
     defer surf.destroy();
 
     // Reuse the overlay state machine, but at popup-local origin (0,0) — the
