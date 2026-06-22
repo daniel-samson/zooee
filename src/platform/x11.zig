@@ -537,6 +537,7 @@ const XSetWindowAttributes = extern struct {
 extern "X11" fn XCreateColormap(*Display, Window_, ?*Visual, c_int) Colormap;
 extern "X11" fn XFreeColormap(*Display, Colormap) c_int;
 extern "X11" fn XMatchVisualInfo(*Display, c_int, c_int, c_int, *XVisualInfo) c_int;
+extern "X11" fn XQueryExtension(*Display, [*:0]const u8, *c_int, *c_int, *c_int) Bool;
 const TrueColor: c_int = 4;
 extern "X11" fn XCreateWindow(*Display, Window_, c_int, c_int, c_uint, c_uint, c_uint, c_int, c_uint, ?*Visual, c_ulong, *XSetWindowAttributes) Window_;
 extern "X11" fn XSync(*Display, Bool) c_int;
@@ -1714,10 +1715,16 @@ pub const PopupSurface = struct {
     /// A colormap we created for the ARGB visual (freed in destroy); 0 = none.
     argb_colormap: Colormap = 0,
 
-    /// Whether a compositing manager is running on `screen` — required for an
-    /// ARGB window's transparency to actually show (else clear pixels are
-    /// undefined). EWMH: the `_NET_WM_CM_S<screen>` selection has an owner.
+    /// Whether the desktop composites this X11 display — required for an ARGB
+    /// window's transparency to actually show (else clear pixels are undefined).
+    /// Two cases: a classic X compositor owns `_NET_WM_CM_S<screen>` (picom on
+    /// bare X), OR we're on **Xwayland** (Mutter/KWin compose every surface but
+    /// do NOT own that selection — the modern default; #341).
     fn hasCompositor(display: *Display, screen: c_int) bool {
+        var op: c_int = 0;
+        var ev: c_int = 0;
+        var er: c_int = 0;
+        if (XQueryExtension(display, "XWAYLAND", &op, &ev, &er) != 0) return true;
         var buf: [32]u8 = undefined;
         const name = std.fmt.bufPrintZ(&buf, "_NET_WM_CM_S{d}", .{screen}) catch return false;
         return XGetSelectionOwner(display, XInternAtom(display, name.ptr, 0)) != 0;
