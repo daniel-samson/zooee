@@ -1077,3 +1077,18 @@ test "#319 read-only double-click selects a word, triple-click the paragraph" {
     _ = try d.render();
     try testing.expectEqualStrings("two words", d.copiedText());
 }
+
+test "#319 field scrolls horizontally to keep the caret visible on overflow" {
+    var m: EditApp = .{};
+    var d = try editDriver(&m);
+    d.setFont(@import("../root.zig").test_font_ttf) catch {}; // real metrics
+    defer d.deinit();
+    _ = try d.clickText("abc"); // focus
+    _ = try d.render(); // resolve the click→caret (to the end of "abc")
+    try d.typeText(" plus a lot more text than fits in two hundred pixels of box width");
+    _ = try d.render();
+    try testing.expect(app_mod.fieldScrollX(9001) > 0); // scrolled to follow the caret
+    _ = try d.key(.home); // caret to start
+    _ = try d.render();
+    try testing.expectEqual(@as(f32, 0), app_mod.fieldScrollX(9001)); // scrolled back
+}

@@ -439,16 +439,16 @@ fn renderNode(b: Backend, placements: []const Placement, i: *usize) void {
             }
         } else |_| {}
     }
-    if (el.text) |t| {
+    // Editable fields (#319) draw their own text in renderTextFields (clipped +
+    // horizontally scrolled to follow the caret), so layout skips it here.
+    if (el.text) |t| if (el.edit_field == null) {
         const inner = contentBox(el, p.rect);
         if (el.text_wrap != .nowrap or hasNewline(t)) {
             drawWrappedText(b, el, t, inner);
         } else {
-            var abuf: [3072]u8 = undefined;
-            var vbuf: [3072]u8 = undefined;
-            b.drawText(inner.origin(), shapeForDisplay(t, &abuf, &vbuf), el.text_style); // #202/#203
+            drawTextLine(b, el, inner);
         }
-    }
+    };
 
     // Overflow (#96/#309): clip + pan per axis.
     //   visible — never clip/pan (content spills);
@@ -672,6 +672,16 @@ pub fn drawTextSelection(b: Backend, el: *const Element, inner: Rect, sel_a: usi
         b.drawRect(rect, .{ .background = hl });
         b.drawText(.{ .x = rect.x, .y = inner.y + ln.y }, shapeForDisplay(t[a..c], &abuf, &vbuf), sel_style);
     }
+}
+
+/// Draw a single (non-wrapped) line of `el.text` at the content box origin.
+/// Public so the framework can draw an editable field's text itself (#319),
+/// clipped + translated for horizontal scroll.
+pub fn drawTextLine(b: Backend, el: *const Element, inner: Rect) void {
+    const t = el.text orelse return;
+    var abuf: [3072]u8 = undefined;
+    var vbuf: [3072]u8 = undefined;
+    b.drawText(inner.origin(), shapeForDisplay(t, &abuf, &vbuf), el.text_style); // #202/#203
 }
 
 /// A thin vertical caret rect (absolute coords) at byte `offset` in `el`'s text,

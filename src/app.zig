@@ -1029,6 +1029,9 @@ var g_field_drag: ?u32 = null;
 /// A double-click on a field whose word at `pt` should be selected (resolved in
 /// renderTextFields, which has the backend). (#319)
 var g_field_word_click: ?struct { id: u32, pt: geometry.Point } = null;
+/// Per-field horizontal scroll offset (px) keeping the caret in view for
+/// single-line fields whose text overflows the box, keyed by field id. (#319)
+var g_field_scroll: std.AutoHashMapUnmanaged(u32, f32) = .empty;
 /// A text field targeted by an Edit command (#319): its id + on_change message.
 const EditTarget = struct { id: u32, on_change: ?u32 };
 
@@ -1274,6 +1277,12 @@ pub fn applyPendingPaste(comptime Model: type, comptime Msg: type, model: *Model
     return .none;
 }
 
+/// The horizontal scroll offset (px) of the field with this id — 0 when the
+/// text fits / is scrolled to the start. For tests / introspection (#319).
+pub fn fieldScrollX(id: u32) f32 {
+    return g_field_scroll.get(id) orelse 0;
+}
+
 /// The selected substring of the TextInput with this id ("" if none). For
 /// tests / introspection (#319).
 pub fn fieldSelectedText(id: u32) []const u8 {
@@ -1344,48 +1353,63 @@ fn editKey(comptime Model: type, comptime Msg: type, model: *Model, el: *const l
     return .redraw;
 }
 
-/// Draw the caret + selection on the focused TextInput (#319). The field's text
-/// itself is drawn by the normal layout pass (the box carries the live buffer);
-/// this overlays the selection highlight and a blink-less caret. Loops call it
-/// alongside renderTextSelection.
+/// Draw every editable field's text (#319) — clipped to its box and horizontally
+/// scrolled so the caret stays in view, since single-line text overflows the
+/// box. Layout skips field text (see render); this owns it. The focused field
+/// also gets its pending click→caret resolution, selection highlight, and caret.
+/// Loops call it alongside renderTextSelection.
 pub fn renderTextFields(b: backend_mod.Backend, placements: []const layout_mod.Placement) void {
-    const fp = focusedPlacement(placements) orelse {
-        g_focused_edit = null;
-        return;
-    };
-    const el = fp.element;
-    const id = el.edit_field orelse {
-        g_focused_edit = null;
-        return;
-    };
-    g_focused_edit = .{ .id = id, .on_change = el.edit_on_change };
-    const te = edit_state.get(id) orelse return;
-    const inner = layout_mod.contentBoxOf(el, fp.rect);
-    // Resolve a pending field click to a caret offset now that we have the
-    // backend for point→offset math (#319).
-    if (g_field_caret_click) |cc| {
-        if (cc.id == id) {
-            const off = layout_mod.textCaretAt(b, el, inner, cc.pt);
-            te.setCaret(off, cc.extend);
-            g_field_caret_click = null;
+    const fp = focusedPlacement(placements);
+    g_focused_edit = if (fp != null and fp.?.element.edit_field != null)
+        .{ .id = fp.?.element.edit_field.?, .on_change = fp.?.element.edit_on_change }
+    else
+        null;
+
+    for (placements) |pl| {
+        const el = pl.element;
+        const id = el.edit_field orelse continue;
+        const te = edit_state.get(id) orelse continue;
+        const focused = fp != null and fp.?.element == el;
+        const inner = layout_mod.contentBoxOf(el, pl.rect);
+        var sx: f32 = g_field_scroll.get(id) orelse 0;
+
+        if (focused) {
+            // Resolve a pending click/double-click now that we have the backend.
+            // The click point is over the scrolled text, so shift it by +sx.
+            if (g_field_caret_click) |cc| if (cc.id == id) {
+                te.setCaret(layout_mod.textCaretAt(b, el, inner, .{ .x = cc.pt.x + sx, .y = cc.pt.y }), cc.extend);
+                g_field_caret_click = null;
+            };
+            if (g_field_word_click) |wc| if (wc.id == id) {
+                const off = layout_mod.textCaretAt(b, el, inner, .{ .x = wc.pt.x + sx, .y = wc.pt.y });
+                const wb = @import("text_edit.zig").wordBounds(te.text(), off);
+                te.setCaret(wb.start, false);
+                te.setCaret(wb.end, true);
+                g_field_word_click = null;
+            };
+            // Scroll to keep the caret inside the box (browser-like).
+            const caret_x = layout_mod.caretRect(b, el, inner, te.caret, 1).x - inner.x;
+            const text_w = b.measureText(el.text orelse "", el.text_style).width;
+            const pad = 2 * g_scale;
+            if (caret_x - sx < 0) sx = caret_x;
+            if (caret_x - sx > inner.width - pad) sx = caret_x - inner.width + pad;
+            sx = std.math.clamp(sx, 0, @max(0, text_w - inner.width + pad));
+            g_field_scroll.put(edit_state.allocator(), id, sx) catch {};
         }
-    }
-    // Double-click word selection (#319), resolved here for the same reason.
-    if (g_field_word_click) |wc| {
-        if (wc.id == id) {
-            const off = layout_mod.textCaretAt(b, el, inner, wc.pt);
-            const wb = @import("text_edit.zig").wordBounds(te.text(), off);
-            te.setCaret(wb.start, false);
-            te.setCaret(wb.end, true);
-            g_field_word_click = null;
+
+        b.pushClip(inner);
+        b.pushTranslate(-sx, 0);
+        layout_mod.drawTextLine(b, el, inner); // buffer, or placeholder when empty (set in lower)
+        if (focused) {
+            if (te.selection()) |sel| {
+                layout_mod.drawTextSelection(b, el, inner, sel.lo, sel.hi, selection_color, selection_text_color);
+            }
+            const w = @max(1.5, el.text_style.size * 0.08);
+            b.drawRect(layout_mod.caretRect(b, el, inner, te.caret, w), .{ .background = focus_ring_color });
         }
+        b.popTranslate();
+        b.popClip();
     }
-    if (te.selection()) |sel| {
-        layout_mod.drawTextSelection(b, el, inner, sel.lo, sel.hi, selection_color, selection_text_color);
-    }
-    const w = @max(1.5, el.text_style.size * 0.08);
-    const cr = layout_mod.caretRect(b, el, inner, te.caret, w);
-    b.drawRect(cr, .{ .background = focus_ring_color });
 }
 /// Whether the focus ring should currently show (`:focus-visible`): true after
 /// keyboard focus, false after a mouse click. Backends gate ring drawing on it.
@@ -1535,6 +1559,7 @@ pub fn resetForTest() void {
     g_field_caret_click = null;
     g_field_drag = null;
     g_field_word_click = null;
+    g_field_scroll.clearRetainingCapacity();
     g_focused_edit = null;
     g_open_menu = null;
     g_copy_len = 0;
