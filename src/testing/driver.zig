@@ -24,10 +24,26 @@ const ui_mod = @import("../ui.zig");
 const raster_mod = @import("../backends/raster.zig");
 const geometry = @import("../geometry.zig");
 
+const menu_mod = @import("../menu.zig");
+
 const Event = event_mod.Event;
 const Point = geometry.Point;
 const Size = geometry.Size;
 const Command = app_mod.Command;
+
+/// A windowless stand-in so the in-window overlay context menu (the X11 path)
+/// can be driven headlessly: `native_menus = false` routes handleContextMenu to
+/// the overlay; `popupMenu` exists only to satisfy the (unreached) call site.
+const FakeWindow = struct {
+    pub const native_menus = false;
+    pub fn popupMenu(self: *FakeWindow, items: []const menu_mod.Item, x: f32, y: f32) ?u32 {
+        _ = self;
+        _ = items;
+        _ = x;
+        _ = y;
+        return null;
+    }
+};
 
 /// A headless app driver bound to a Model/Msg pair. Owns a raster backend and a
 /// frame arena; re-lays-out whenever an event reports a redraw so hit-testing
@@ -46,6 +62,8 @@ pub fn Driver(comptime Model: type, comptime Msg: type) type {
         /// Commands returned by each `send`, newest last — lets tests assert the
         /// loop would have quit/redrawn without inspecting Model internals.
         last_command: Command = .none,
+        /// Stand-in window for driving the overlay context menu (#319).
+        fake_window: FakeWindow = .{},
 
         pub fn init(gpa: std.mem.Allocator, model: *Model, viewport: Size) !Self {
             var self: Self = .{
@@ -227,6 +245,83 @@ pub fn Driver(comptime Model: type, comptime Msg: type) type {
             return cmd;
         }
 
+        // --- Playwright-style helpers (#319) ------------------------------
+
+        /// A `.text` event carrying modifiers — e.g. ⌘C / Ctrl+V shortcuts.
+        pub fn textMods(self: *Self, codepoint: u21, mods: event_mod.Modifiers) !Command {
+            return self.send(.{ .text = .{ .codepoint = codepoint, .mods = mods } });
+        }
+
+        /// Type a UTF-8 string into the focused field, one codepoint at a time.
+        pub fn typeText(self: *Self, s: []const u8) !void {
+            var i: usize = 0;
+            while (i < s.len) {
+                const n = std.unicode.utf8ByteSequenceLength(s[i]) catch 1;
+                const cp = std.unicode.utf8Decode(s[i .. i + n]) catch s[i];
+                _ = try self.text(cp);
+                i += n;
+            }
+        }
+
+        /// The current value of the TextInput with this id.
+        pub fn fieldValue(self: *Self, id: u32) []const u8 {
+            _ = self;
+            return app_mod.textInputValue(id);
+        }
+
+        /// The focused editable field id, or null.
+        pub fn focusedFieldId(self: *Self) ?u32 {
+            return app_mod.focusedEditFieldId(self.placements());
+        }
+
+        /// The text most recently copied to the clipboard (Copy/Cut/⌘C).
+        pub fn copiedText(self: *Self) []const u8 {
+            _ = self;
+            return app_mod.copiedText();
+        }
+
+        /// Placement index of the first element whose text contains `needle`.
+        pub fn findText(self: *Self, needle: []const u8) ?usize {
+            for (self.placements(), 0..) |pl, i| {
+                if (pl.element.text) |t| if (std.mem.indexOf(u8, t, needle) != null) return i;
+            }
+            return null;
+        }
+
+        /// Click the center of the first element whose text contains `needle`
+        /// (e.g. to focus a field or start a selection). Errors if not found.
+        pub fn clickText(self: *Self, needle: []const u8) !Command {
+            const idx = self.findText(needle) orelse return error.TextNotFound;
+            const r = self.placements()[idx].rect;
+            return self.click(r.x + r.width / 2, r.y + r.height / 2);
+        }
+
+        /// A secondary (right) click that opens the in-window overlay context
+        /// menu where applicable (field / selection), via the production
+        /// handleContextMenu path with the headless stand-in window.
+        pub fn rightClick(self: *Self, x: f32, y: f32) !Command {
+            const ev = Event{ .pointer_down = .{ .position = .{ .x = x, .y = y }, .buttons = .{ .secondary = true } } };
+            _ = app_mod.dispatchEvent(Model, Msg, self.model, ev, self.placements());
+            const cmd = app_mod.handleContextMenu(Model, Msg, &self.fake_window, self.model, self.placements(), ev);
+            self.last_command = cmd;
+            if (cmd == .redraw) try self.relayout();
+            return cmd;
+        }
+
+        /// Whether an overlay context menu is currently open.
+        pub fn menuOpen(self: *Self) bool {
+            _ = self;
+            return app_mod.overlayMenuOpen();
+        }
+
+        /// Choose an open overlay menu item by label: render to position the
+        /// menu, then click the item. Errors if no such item.
+        pub fn chooseMenu(self: *Self, label: []const u8) !Command {
+            _ = try self.render(); // sets the menu panel geometry for hit-testing
+            const p = app_mod.overlayMenuItemPoint(label) orelse return error.MenuItemNotFound;
+            return self.click(p.x, p.y);
+        }
+
         // --- Rendering / assertions ---------------------------------------
 
         /// Render the current frame to the raster backend and return its RGBA
@@ -235,7 +330,16 @@ pub fn Driver(comptime Model: type, comptime Msg: type) type {
         pub fn render(self: *Self) ![]u8 {
             const b = self.raster.interface();
             try b.beginFrame(self.viewport);
-            if (self.result) |r| layout_mod.render(b, r);
+            if (self.result) |r| {
+                layout_mod.render(b, r);
+                // The same overlay passes the real loops run after layout, so
+                // tests see focus rings, the caret/selection, ⌘C copy fills, and
+                // the in-window menu — not just the base tree (#310/#318/#319).
+                app_mod.renderFocusRing(b, r.placements);
+                app_mod.renderTextSelection(b, r.placements);
+                app_mod.renderTextFields(b, r.placements);
+                app_mod.renderMenuOverlay(b);
+            }
             try b.endFrame();
             return self.raster.pixels;
         }
@@ -732,4 +836,103 @@ test "resize relays out to the new viewport" {
     try testing.expectEqual(Command.redraw, cmd); // resized → redraw
     const px = try d.render();
     try testing.expectEqual(@as(usize, 80 * 40 * 4), px.len);
+}
+
+// --- #319 text editing: field, selection, clipboard, overlay menu ----------
+// A widget model with an editable field (id 9001, seeded "abc") and two
+// selectable paragraphs — exercised headlessly through the real dispatch +
+// render passes the Driver now runs.
+const EditApp = struct {
+    pub const Msg = enum(u32) { _ };
+    pub fn viewUi(self: *EditApp, u: *ui_mod.Ui) !ui_mod.Widget {
+        _ = self;
+        return u.column(.{ .gap = 6 }, &.{
+            u.textInput(.{ .id = 9001, .value = "abc", .width = 200 }),
+            u.text("alpha", .{ .selectable = true }),
+            u.text("omega", .{ .selectable = true }),
+        });
+    }
+    pub fn update(self: *EditApp, msg: Msg) Command {
+        _ = self;
+        _ = msg;
+        return .redraw;
+    }
+    pub fn onEvent(self: *EditApp, ev: event_mod.Event) Command {
+        _ = self;
+        _ = ev;
+        return .none;
+    }
+};
+
+fn editDriver(m: *EditApp) !Driver(EditApp, EditApp.Msg) {
+    app_mod.resetForTest();
+    return Driver(EditApp, EditApp.Msg).init(testing.allocator, m, .{ .width = 240, .height = 140 });
+}
+
+test "#319 click focuses a TextInput and typing updates its value" {
+    var m: EditApp = .{};
+    var d = try editDriver(&m);
+    defer d.deinit();
+    _ = try d.clickText("abc");
+    try testing.expectEqual(@as(?u32, 9001), d.focusedFieldId());
+    try d.typeText("Z"); // caret seeded at end → "abcZ"
+    try testing.expectEqualStrings("abcZ", d.fieldValue(9001));
+}
+
+test "#319 backspace deletes the codepoint before the caret" {
+    var m: EditApp = .{};
+    var d = try editDriver(&m);
+    defer d.deinit();
+    _ = try d.clickText("abc");
+    _ = try d.key(.backspace);
+    try testing.expectEqualStrings("ab", d.fieldValue(9001));
+}
+
+test "#319 select-all + copy stages the field text on the clipboard" {
+    var m: EditApp = .{};
+    var d = try editDriver(&m);
+    defer d.deinit();
+    _ = try d.clickText("abc");
+    _ = try d.textMods('a', .{ .super = true }); // ⌘A
+    _ = try d.textMods('c', .{ .super = true }); // ⌘C
+    try testing.expectEqualStrings("abc", d.copiedText());
+}
+
+test "#319 cut copies the selection and clears the field" {
+    var m: EditApp = .{};
+    var d = try editDriver(&m);
+    defer d.deinit();
+    _ = try d.clickText("abc");
+    _ = try d.textMods('a', .{ .super = true });
+    _ = try d.textMods('x', .{ .super = true }); // ⌘X
+    try testing.expectEqualStrings("abc", d.copiedText());
+    try testing.expectEqualStrings("", d.fieldValue(9001));
+}
+
+test "#319 overlay context menu Select All targets the clicked field" {
+    var m: EditApp = .{};
+    var d = try editDriver(&m);
+    defer d.deinit();
+    const fr = d.placements()[d.findText("abc").?].rect;
+    _ = try d.rightClick(fr.x + fr.width / 2, fr.y + fr.height / 2);
+    try testing.expect(d.menuOpen());
+    _ = try d.chooseMenu("Select All");
+    try testing.expect(!d.menuOpen()); // closed after a choice
+    _ = try d.textMods('c', .{ .super = true });
+    try testing.expectEqualStrings("abc", d.copiedText());
+}
+
+test "#319 drag-select across paragraphs and ⌘C joins them with a newline" {
+    var m: EditApp = .{};
+    var d = try editDriver(&m);
+    defer d.deinit();
+    const a = d.placements()[d.findText("alpha").?].rect;
+    const o = d.placements()[d.findText("omega").?].rect;
+    _ = try d.pointerDown(a.x, a.y + a.height / 2); // start at alpha's left edge
+    _ = try d.move(o.x + o.width - 0.5, o.y + o.height / 2); // into omega, near its end
+    _ = try d.pointerUp(o.x + o.width - 0.5, o.y + o.height / 2);
+    _ = try d.textMods('c', .{ .super = true });
+    _ = try d.render(); // renderTextSelection fills the copy buffer across elements
+    try testing.expect(std.mem.startsWith(u8, d.copiedText(), "alpha\n")); // alpha full + join
+    try testing.expect(std.mem.indexOf(u8, d.copiedText(), "o") != null); // some of omega
 }

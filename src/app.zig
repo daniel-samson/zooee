@@ -1155,7 +1155,7 @@ fn appendCopy(len: *usize, text: []const u8) void {
 /// elements fully, and the last element from its start to the end point. On a
 /// pending ⌘C the selected text (elements joined by newlines) is copied for the
 /// OS-hooks pass. Called by every present loop right after `render`.
-fn renderTextSelection(b: backend_mod.Backend, placements: []const layout_mod.Placement) void {
+pub fn renderTextSelection(b: backend_mod.Backend, placements: []const layout_mod.Placement) void {
     const ts = g_textsel orelse return;
     if (ts.anchor_idx >= placements.len or ts.focus_idx >= placements.len) return;
     // Order the endpoints by document (placement) position.
@@ -1222,6 +1222,40 @@ pub fn focusedIndex() ?usize {
 /// response to the field's `on_change` message.
 pub fn textInputValue(id: u32) []const u8 {
     return edit_state.value(id);
+}
+
+/// The id of the focused editable field, or null. For tests / introspection (#319).
+pub fn focusedEditFieldId(placements: []const layout_mod.Placement) ?u32 {
+    const pl = focusedPlacement(placements) orelse return null;
+    return pl.element.edit_field;
+}
+
+/// The text most recently queued for the clipboard (field Copy/Cut, or the
+/// read-only selection ⌘C after a render). For tests (#319).
+pub fn copiedText() []const u8 {
+    return g_copy_buf[0..g_copy_len];
+}
+
+/// Whether an in-window overlay menu is currently open (#319).
+pub fn overlayMenuOpen() bool {
+    return g_open_menu != null;
+}
+
+/// Center point of the open overlay menu's item with the given label, or null
+/// (no menu / no such item). Geometry mirrors renderMenuOverlay; valid after a
+/// render has set the panel rect. For tests to click a menu item (#319).
+pub fn overlayMenuItemPoint(label: []const u8) ?geometry.Point {
+    const m = g_open_menu orelse return null;
+    const sc = g_scale;
+    var cy = m.y + 6 * sc;
+    for (m.items) |it| {
+        const h = if (it.separator) menu_sep_h * sc else menu_item_h * sc;
+        if (!it.separator and std.mem.eql(u8, it.label, label)) {
+            return .{ .x = m.panel.x + m.panel.width / 2, .y = cy + h / 2 };
+        }
+        cy += h;
+    }
+    return null;
 }
 
 /// The focused placement if it is an editable text field (#319), else null.
@@ -1414,6 +1448,18 @@ fn dragBar(p: geometry.Point) void {
 pub fn resetFocus() void {
     g_focus = null;
     g_focus_visible = false;
+}
+
+/// Reset all module-global interaction state between tests (#319): focus, text
+/// selection, clipboard staging, the overlay menu, and every field's edit state.
+pub fn resetForTest() void {
+    resetFocus();
+    resetTextSelection();
+    g_field_paste = null;
+    g_focused_edit = null;
+    g_open_menu = null;
+    g_copy_len = 0;
+    edit_state.reset();
 }
 
 /// Number of focusable elements in the frame (the Tab order length).
@@ -1867,7 +1913,7 @@ fn editFieldAt(placements: []const layout_mod.Placement, p: geometry.Point) ?Edi
 /// framework Edit menu when the click is on a text field or selectable text
 /// (handled by the framework), otherwise the model's `contextMenu()`. Edit
 /// command ids are intercepted; everything else routes to `onMenuCommand`.
-fn handleContextMenu(comptime Model: type, comptime Msg: type, window: anytype, model: *Model, placements: []const layout_mod.Placement, ev: event_mod.Event) Command {
+pub fn handleContextMenu(comptime Model: type, comptime Msg: type, window: anytype, model: *Model, placements: []const layout_mod.Placement, ev: event_mod.Event) Command {
     if (ev != .pointer_down) return .none;
     const p = ev.pointer_down;
     if (!p.buttons.secondary) return .none;

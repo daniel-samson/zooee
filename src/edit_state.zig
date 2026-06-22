@@ -39,3 +39,10 @@ pub fn value(id: u32) []const u8 {
 pub fn allocator() std.mem.Allocator {
     return gpa;
 }
+
+/// Drop all field state (tests, for isolation between cases).
+pub fn reset() void {
+    var it = fields.iterator();
+    while (it.next()) |e| e.value_ptr.deinit(gpa);
+    fields.clearAndFree(gpa);
+}
