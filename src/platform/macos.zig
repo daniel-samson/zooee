@@ -337,8 +337,11 @@ fn onThemeChanged(_: id, _: SEL, _: id) callconv(.c) void {
 }
 
 /// Consume the "OS theme changed" flag — the app repaints so its theme()
-/// hook re-reads systemAccent()/prefersDark() (#318).
-pub fn takeAppearanceChanged() bool {
+/// hook re-reads systemAccent()/prefersDark() (#318). `gpa`/`io` are part of the
+/// cross-platform signature (Linux polls gsettings with them); unused here.
+pub fn takeAppearanceChanged(gpa: std.mem.Allocator, io: std.Io) bool {
+    _ = gpa;
+    _ = io;
     defer theme_changed = false;
     return theme_changed;
 }

@@ -193,8 +193,12 @@ pub fn prefersDark() bool {
 var g_theme_changed: bool = false;
 
 /// Consume the "OS theme changed" flag (accent / personalization) so the present
-/// loop repaints and theme() re-reads systemAccent() (#318).
-pub fn takeAppearanceChanged() bool {
+/// loop repaints and theme() re-reads systemAccent()/prefersDark() (#318).
+/// `gpa`/`io` are part of the cross-platform signature (Linux polls gsettings
+/// with them); unused here.
+pub fn takeAppearanceChanged(gpa: std.mem.Allocator, io: std.Io) bool {
+    _ = gpa;
+    _ = io;
     defer g_theme_changed = false;
     return g_theme_changed;
 }

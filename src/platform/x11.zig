@@ -589,41 +589,56 @@ fn keysymToKey(ks: KeySym) ?core_event.Key {
 }
 
 // --- OS appearance integration (#318): GNOME via gsettings ------------------
-// Mirrors the macOS/Windows hooks so the app loop can re-theme live. Degrades
-// to "light, no accent, no live updates" on non-GNOME desktops (no gsettings).
+// Mirrors the macOS/Windows hooks so the app loop can re-theme on OS change.
+// `gsettings` needs a subprocess (and thus the loop's gpa/io), which the no-arg
+// prefersDark()/systemAccent() can't supply — so takeAppearanceChanged(gpa, io)
+// polls gsettings (throttled to ~1s) and caches the result here; the accessors
+// just return the cache. Degrades to "light, no accent" on non-GNOME desktops.
 const style_mod = @import("../style.zig");
 
-const AppearanceWatcher = struct {
-    started: bool = false,
-    child: ?std.process.Child = null,
-    fd: std.posix.fd_t = -1,
-};
-var g_watcher: AppearanceWatcher = .{};
+var g_dark: bool = false;
+var g_accent: ?style_mod.Color = null;
+var g_primed: bool = false;
+var g_last_poll_ns: i128 = 0;
 
-/// Run `gsettings get org.gnome.desktop.interface <key>`; caller frees the
-/// returned stdout. Null when gsettings is missing or the read fails.
-fn gsettingsGet(key: [:0]const u8) ?[]u8 {
-    const res = std.process.Child.run(.{
-        .allocator = std.heap.page_allocator,
-        .argv = &.{ "gsettings", "get", "org.gnome.desktop.interface", key },
-    }) catch return null;
-    std.heap.page_allocator.free(res.stderr);
-    return res.stdout;
+/// Last polled OS dark preference (cache). Primed on the first frame, refreshed
+/// at most once a second by takeAppearanceChanged.
+pub fn prefersDark() bool {
+    return g_dark;
 }
 
-/// Whether the desktop prefers dark — GNOME `color-scheme == 'prefer-dark'`.
-/// Mirrors macOS/Windows `prefersDark()`; false on non-GNOME or when unset.
-pub fn prefersDark() bool {
-    const out = gsettingsGet("color-scheme") orelse return false;
-    defer std.heap.page_allocator.free(out);
+/// Last polled OS accent (cache), or null on non-GNOME / older desktops.
+pub fn systemAccent() ?style_mod.Color {
+    return g_accent;
+}
+
+/// `gsettings get org.gnome.desktop.interface <key>` → trimmed stdout. Null on
+/// non-zero exit (key/schema absent) or when gsettings isn't installed.
+fn gsettingsGet(gpa: std.mem.Allocator, io: std.Io, key: []const u8) ?[]u8 {
+    const res = std.process.run(gpa, io, .{ .argv = &.{ "gsettings", "get", "org.gnome.desktop.interface", key } }) catch return null;
+    defer gpa.free(res.stderr);
+    switch (res.term) {
+        .exited => |code| if (code != 0) {
+            gpa.free(res.stdout);
+            return null;
+        },
+        else => {
+            gpa.free(res.stdout);
+            return null;
+        },
+    }
+    return res.stdout; // caller frees
+}
+
+fn readDark(gpa: std.mem.Allocator, io: std.Io) bool {
+    const out = gsettingsGet(gpa, io, "color-scheme") orelse return false;
+    defer gpa.free(out);
     return std.mem.indexOf(u8, out, "prefer-dark") != null;
 }
 
-/// The desktop accent (GNOME 47+ `accent-color`, a named enum) → sRGB, or null
-/// on older / non-GNOME desktops. Best-effort parity with macOS/Windows accent.
-pub fn systemAccent() ?style_mod.Color {
-    const out = gsettingsGet("accent-color") orelse return null;
-    defer std.heap.page_allocator.free(out);
+fn readAccent(gpa: std.mem.Allocator, io: std.Io) ?style_mod.Color {
+    const out = gsettingsGet(gpa, io, "accent-color") orelse return null;
+    defer gpa.free(out);
     const Named = struct { name: []const u8, r: u8, g: u8, b: u8 };
     const palette = [_]Named{
         .{ .name = "blue", .r = 0x35, .g = 0x84, .b = 0xe4 },
@@ -640,44 +655,27 @@ pub fn systemAccent() ?style_mod.Color {
     return null;
 }
 
-/// Consume the "OS appearance changed" signal. Lazily starts a single
-/// `gsettings monitor org.gnome.desktop.interface` child and polls its pipe
-/// non-blocking; any output means a key (color-scheme / accent-color) flipped.
-/// The app loop calls this each frame, so no extra fd needs to join the X wait.
-pub fn takeAppearanceChanged() bool {
-    if (!g_watcher.started) {
-        g_watcher.started = true;
-        var child = std.process.Child.init(
-            &.{ "gsettings", "monitor", "org.gnome.desktop.interface" },
-            std.heap.page_allocator,
-        );
-        child.stdin_behavior = .Ignore;
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Ignore;
-        child.spawn() catch {
-            g_watcher.child = null;
-            return false;
-        };
-        g_watcher.child = child;
-        g_watcher.fd = if (child.stdout) |o| o.handle else -1;
-    }
-    if (g_watcher.fd < 0) return false;
-    var pfd = [_]std.posix.pollfd{.{ .fd = g_watcher.fd, .events = std.posix.POLL.IN, .revents = 0 }};
-    const ready = std.posix.poll(&pfd, 0) catch return false;
-    if (ready == 0 or (pfd[0].revents & std.posix.POLL.IN) == 0) return false;
-    var buf: [512]u8 = undefined;
-    const n = std.posix.read(g_watcher.fd, &buf) catch return false;
-    return n > 0; // n==0 is EOF (monitor died) — not a change
+fn accentEql(a: ?style_mod.Color, b: ?style_mod.Color) bool {
+    if (a == null and b == null) return true;
+    if (a == null or b == null) return false;
+    return a.?.r == b.?.r and a.?.g == b.?.g and a.?.b == b.?.b;
 }
 
-/// Stop the gsettings monitor child. Called from Window.destroy so the helper
-/// process doesn't outlive the app.
-fn stopAppearanceWatcher() void {
-    if (g_watcher.child) |*c| {
-        _ = c.kill() catch {};
-        g_watcher.child = null;
-        g_watcher.fd = -1;
-    }
+/// Refresh the cached OS appearance from gsettings, throttled to ~1s (spawning
+/// gsettings every frame would be wasteful). Returns true when it changed — or
+/// on the first prime — so the loop repaints and the model resyncs. `gpa`/`io`
+/// come from the frame loop. No-op-ish on non-GNOME (reads fail → light).
+pub fn takeAppearanceChanged(gpa: std.mem.Allocator, io: std.Io) bool {
+    const now: i128 = std.Io.Timestamp.now(io, .awake).nanoseconds;
+    if (g_primed and now - g_last_poll_ns < 1_000_000_000) return false;
+    g_last_poll_ns = now;
+    const nd = readDark(gpa, io);
+    const na = readAccent(gpa, io);
+    const changed = !g_primed or nd != g_dark or !accentEql(na, g_accent);
+    g_dark = nd;
+    g_accent = na;
+    g_primed = true;
+    return changed;
 }
 
 pub const Event = core_event.Event;
@@ -1281,7 +1279,6 @@ pub const Window = struct {
     }
 
     pub fn destroy(self: *Window) void {
-        stopAppearanceWatcher(); // don't leave the gsettings monitor running
         if (self.gl_ctx) |ctx| {
             _ = glXMakeCurrent(self.display, 0, null);
             glXDestroyContext(self.display, ctx);

@@ -1513,7 +1513,7 @@ fn frameOsHooks(comptime Model: type, window: anytype, model: *Model, gpa: std.m
     // that cache OS-derived state (e.g. a light/dark flag behind a manual
     // toggle) can resync it in an optional `onAppearanceChange` hook before the
     // repaint — `theme()` alone can't, since it must honor the manual override.
-    if (@hasDecl(WindowPlatform, "takeAppearanceChanged") and WindowPlatform.takeAppearanceChanged()) {
+    if (@hasDecl(WindowPlatform, "takeAppearanceChanged") and WindowPlatform.takeAppearanceChanged(gpa, io)) {
         if (@hasDecl(Model, "onAppearanceChange")) model.onAppearanceChange();
         cmd = .redraw;
     }
