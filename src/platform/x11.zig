@@ -594,18 +594,25 @@ fn keysymToKey(ks: KeySym) ?core_event.Key {
 // (GNOME, KDE, …), falling back to GNOME `gsettings`. Both are subprocesses, so
 // they need the loop's gpa/io, which the no-arg prefersDark()/systemAccent()
 // can't supply — so takeAppearanceChanged(gpa, io) polls (throttled to ~1s) and
-// caches the result here; the accessors return the cache. Subprocess-only, so
-// no linked D-Bus lib and no binary-size cost. Degrades to "light, no accent"
-// where neither the portal nor gsettings answers.
+// caches the result here; the accessors return the cache. Change detection is
+// event-driven: a long-lived `gdbus monitor` child blocks on D-Bus and only
+// emits on an actual SettingChanged, which the loop notices via a cheap
+// non-blocking poll() of its pipe (no per-frame/per-second querying). All
+// subprocess-based, so no linked D-Bus lib and no binary-size cost. Degrades to
+// "light, no accent" where neither the portal nor gsettings answers.
 const style_mod = @import("../style.zig");
 
 var g_dark: bool = false;
 var g_accent: ?style_mod.Color = null;
 var g_primed: bool = false;
-var g_last_poll_ns: i128 = 0;
+// Long-lived `gdbus monitor` child: it blocks on D-Bus and writes a line only
+// when a portal setting actually changes (event-driven — no per-frame querying).
+var g_mon_started: bool = false;
+var g_mon_pid: ?std.posix.pid_t = null;
+var g_mon_fd: std.posix.fd_t = -1;
 
-/// Last polled OS dark preference (cache). Primed on the first frame, refreshed
-/// at most once a second by takeAppearanceChanged.
+/// Cached OS dark preference (read on first frame, then refreshed only when the
+/// portal signals a change). See takeAppearanceChanged.
 pub fn prefersDark() bool {
     return g_dark;
 }
@@ -736,21 +743,64 @@ fn accentEql(a: ?style_mod.Color, b: ?style_mod.Color) bool {
     return a.?.r == b.?.r and a.?.g == b.?.g and a.?.b == b.?.b;
 }
 
-/// Refresh the cached OS appearance from gsettings, throttled to ~1s (spawning
-/// gsettings every frame would be wasteful). Returns true when it changed — or
-/// on the first prime — so the loop repaints and the model resyncs. `gpa`/`io`
-/// come from the frame loop. No-op-ish on non-GNOME (reads fail → light).
+/// Spawn the one-shot `gdbus monitor` child that watches the portal Settings
+/// object. It blocks on D-Bus and only emits when a setting changes, so this is
+/// event-driven rather than polled. Best-effort: if gdbus/the portal is absent,
+/// g_mon_fd stays -1 and only the initial read happens.
+fn ensureMonitor(io: std.Io) void {
+    if (g_mon_started) return;
+    g_mon_started = true;
+    const child = std.process.spawn(io, .{
+        .argv = &.{ "gdbus", "monitor", "--session", "--dest", "org.freedesktop.portal.Desktop", "--object-path", "/org/freedesktop/portal/desktop" },
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .ignore,
+    }) catch return;
+    g_mon_pid = child.id;
+    g_mon_fd = if (child.stdout) |f| f.handle else -1;
+}
+
+/// Report an OS appearance change so the loop repaints and the model resyncs.
+/// Event-driven: the cache is read once on the first frame, then refreshed only
+/// when the `gdbus monitor` pipe reports a portal SettingChanged — no per-frame
+/// or per-second querying. The per-frame cost is a single non-blocking poll().
 pub fn takeAppearanceChanged(gpa: std.mem.Allocator, io: std.Io) bool {
-    const now: i128 = std.Io.Timestamp.now(io, .awake).nanoseconds;
-    if (g_primed and now - g_last_poll_ns < 1_000_000_000) return false;
-    g_last_poll_ns = now;
+    ensureMonitor(io);
+    // First frame: read the initial state and repaint once into the right theme.
+    if (!g_primed) {
+        g_primed = true;
+        g_dark = readDark(gpa, io);
+        g_accent = readAccent(gpa, io);
+        return true;
+    }
+    if (g_mon_fd < 0) return false;
+    // Drain the monitor pipe (non-blocking). Any output = some portal setting
+    // changed; re-read only when it names the appearance namespace.
+    var pfd = [_]std.posix.pollfd{.{ .fd = g_mon_fd, .events = std.posix.POLL.IN, .revents = 0 }};
+    const ready = std.posix.poll(&pfd, 0) catch return false;
+    if (ready == 0 or (pfd[0].revents & std.posix.POLL.IN) == 0) return false;
+    var buf: [2048]u8 = undefined;
+    const n = std.posix.read(g_mon_fd, &buf) catch return false;
+    if (n == 0) return false; // monitor exited
+    if (std.mem.indexOf(u8, buf[0..n], "appearance") == null) return false;
     const nd = readDark(gpa, io);
     const na = readAccent(gpa, io);
-    const changed = !g_primed or nd != g_dark or !accentEql(na, g_accent);
+    if (nd == g_dark and accentEql(na, g_accent)) return false;
     g_dark = nd;
     g_accent = na;
-    g_primed = true;
-    return changed;
+    return true;
+}
+
+/// Stop the gdbus monitor child (Window.destroy). Uses posix.kill so no `io` is
+/// needed here; the child is reaped when the app exits.
+fn stopAppearanceWatcher() void {
+    if (g_mon_pid) |pid| {
+        std.posix.kill(pid, std.posix.SIG.TERM) catch {};
+        g_mon_pid = null;
+    }
+    // The pipe read-end fd is left for the OS to reclaim on exit (this only runs
+    // at shutdown); std.posix has no close() in this Io-centric std.
+    g_mon_fd = -1;
 }
 
 pub const Event = core_event.Event;
@@ -1354,6 +1404,7 @@ pub const Window = struct {
     }
 
     pub fn destroy(self: *Window) void {
+        stopAppearanceWatcher(); // don't leave the gdbus monitor child running
         if (self.gl_ctx) |ctx| {
             _ = glXMakeCurrent(self.display, 0, null);
             glXDestroyContext(self.display, ctx);
