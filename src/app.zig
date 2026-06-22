@@ -2340,7 +2340,6 @@ fn runPopupMenu(
     // menu's rounded corners + shadow show the desktop; otherwise the corners
     // blend into the opaque surface fill (#333 transparency).
     raster.clear_color = if (surf.alpha) .{ .r = 0, .g = 0, .b = 0, .a = 0 } else g_menu_theme.surface;
-    std.debug.print("[menu] popup alpha={} size={d}x{d}\n", .{ surf.alpha, w, h });
     g_menu_shadow = surf.alpha; // shadow only on the transparent surface
     defer g_menu_shadow = true; // restore the in-window-overlay default
 
