@@ -516,6 +516,8 @@ pub const Window = struct {
         /// transparent caption — app draws the top strip, OS buttons stay), or
         /// headless (no OS caption — app owns the whole surface).
         titlebar: window_mod.TitlebarMode = .native,
+        /// Accepted for cross-platform parity; macOS-only (traffic lights).
+        traffic_lights: ?window_mod.TrafficLights = null,
     };
 
     pub fn create(gpa: std.mem.Allocator, opts: CreateOptions) !*Window {

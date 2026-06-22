@@ -9,3 +9,14 @@
 /// - `headless`: no OS title bar — the app owns the whole surface and supplies
 ///   its own window controls + drag regions.
 pub const TitlebarMode = enum { native, integrated, headless };
+
+/// Nudge the macOS "traffic light" buttons (close / minimise / zoom) from their
+/// default top-left spot — e.g. to vertically centre them against a taller
+/// `.integrated` title bar, or inset them to line up with a custom toolbar.
+/// `x` shifts the cluster right, `y` shifts it down, in points; the three
+/// buttons move together so their spacing is preserved. macOS only — ignored on
+/// other platforms. The default `.{}` (0,0) leaves the OS placement untouched.
+pub const TrafficLights = struct {
+    x: f32 = 0,
+    y: f32 = 0,
+};

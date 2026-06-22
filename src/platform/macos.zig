@@ -322,7 +322,10 @@ fn resizeDelegate() id {
 
 /// IMP for `windowDidResize:` — redraw the live window during the modal drag.
 fn onWindowDidResize(_: id, _: SEL, _: id) callconv(.c) void {
-    if (live_resize_window) |w| if (w.redraw_fn) |f| f(w.redraw_ctx);
+    if (live_resize_window) |w| {
+        w.applyTrafficLights(); // AppKit may relayout the titlebar on resize
+        if (w.redraw_fn) |f| f(w.redraw_ctx);
+    }
 }
 
 /// OS accent / appearance changed → flag it (the present loop polls
@@ -523,6 +526,12 @@ pub const Window = struct {
     /// Scratch for drop payloads (#212): dropped paths live here until the next
     /// pumpEvents resets it (DragData is "valid only during dispatch").
     drop_arena: std.heap.ArenaAllocator,
+    /// Optional traffic-light reposition. `tl_defaults` caches the OS default
+    /// button origins (captured on first apply) so re-applies after a resize are
+    /// absolute and never drift.
+    traffic_lights: ?window_mod.TrafficLights = null,
+    tl_defaults: [3]NSPoint = undefined,
+    tl_have_defaults: bool = false,
 
     pub const CreateOptions = struct {
         title: [:0]const u8 = "zooee",
@@ -533,6 +542,8 @@ pub const Window = struct {
         gl: bool = false,
         /// Title-bar presentation (#64).
         titlebar: window_mod.TitlebarMode = .native,
+        /// Optional traffic-light reposition (close/minimise/zoom).
+        traffic_lights: ?window_mod.TrafficLights = null,
     };
 
     /// Register the redraw callback and mark this as the window whose
@@ -596,7 +607,32 @@ pub const Window = struct {
         const cv = msg(id, struct {}, window, sel("contentView"), .{});
         enableDrop(cv, self);
         enableTextInput(window, cv, self);
+        self.traffic_lights = opts.traffic_lights;
+        self.applyTrafficLights();
         return self;
+    }
+
+    /// Offset the traffic-light cluster per `self.traffic_lights`. The OS default
+    /// origins are cached on first call so later re-applies (after a resize, when
+    /// AppKit may relayout the titlebar) are absolute — they don't accumulate.
+    /// No-op when unset or zero, so the default placement is untouched.
+    fn applyTrafficLights(self: *Window) void {
+        const tl = self.traffic_lights orelse return;
+        if (tl.x == 0 and tl.y == 0) return;
+        // NSWindowButton: 0 = close, 1 = miniaturize, 2 = zoom.
+        for ([_]u64{ 0, 1, 2 }, 0..) |button, i| {
+            const btn = msg(id, struct { u64 }, self.ns_window, sel("standardWindowButton:"), .{button});
+            if (btn == null) continue;
+            if (!self.tl_have_defaults) {
+                const f = msg(NSRect, struct {}, btn, sel("frame"), .{});
+                self.tl_defaults[i] = .{ .x = f.x, .y = f.y };
+            }
+            const d = self.tl_defaults[i];
+            // View coords are y-up, so a positive `y` offset moves the cluster down.
+            const origin: NSPoint = .{ .x = d.x + tl.x, .y = d.y - tl.y };
+            _ = msg(void, struct { NSPoint }, btn, sel("setFrameOrigin:"), .{origin});
+        }
+        self.tl_have_defaults = true;
     }
 
     pub fn destroy(self: *Window) void {

@@ -296,7 +296,7 @@ pub fn runWindow(
 
     // Only Linux carries a GL context on the window (macOS=Metal, Windows=D3D).
     const want_gl_ctx = want_gpu and builtin.os.tag == .linux;
-    const window = try platform.Window.create(gpa, .{ .title = opts.title, .width = opts.width, .height = opts.height, .gl = want_gl_ctx, .titlebar = opts.titlebar });
+    const window = try platform.Window.create(gpa, .{ .title = opts.title, .width = opts.width, .height = opts.height, .gl = want_gl_ctx, .titlebar = opts.titlebar, .traffic_lights = opts.traffic_lights });
     defer window.destroy();
 
     // macOS: Metal is the primary GPU path (display-synced → lag-free resize).
@@ -914,6 +914,10 @@ pub const WindowOptions = struct {
     /// Title-bar presentation (#64): `.native` (default), `.integrated`
     /// (content under a transparent title bar), or `.headless`.
     titlebar: window_mod.TitlebarMode = .native,
+    /// Optional macOS traffic-light reposition (close/minimise/zoom). `null`
+    /// (default) keeps the OS placement; set an offset to nudge the cluster —
+    /// handy under an `.integrated` title bar. No-op on other platforms.
+    traffic_lights: ?window_mod.TrafficLights = null,
 };
 
 /// Render a Model's view into `b` once, offscreen — no window, no event

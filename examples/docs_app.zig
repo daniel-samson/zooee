@@ -469,6 +469,17 @@ const Docs = struct {
     }
 };
 
+/// Parse `ZOOEE_TRAFFIC=x,y` (points) into a traffic-light offset, e.g. "8,6"
+/// to nudge the macOS window buttons right+down under the integrated title bar.
+/// Returns null when unset/malformed, leaving the OS placement untouched.
+fn trafficLightsFromEnv(init: std.process.Init) ?zooee.window.TrafficLights {
+    const v = init.environ_map.get("ZOOEE_TRAFFIC") orelse return null;
+    const comma = std.mem.indexOfScalar(u8, v, ',') orelse return null;
+    const x = std.fmt.parseFloat(f32, std.mem.trim(u8, v[0..comma], " ")) catch return null;
+    const y = std.fmt.parseFloat(f32, std.mem.trim(u8, v[comma + 1 ..], " ")) catch return null;
+    return .{ .x = x, .y = y };
+}
+
 pub fn main(init: std.process.Init) !void {
     // Start in the OS appearance; the sidebar switch can still override it.
     var docs: Docs = .{ .dark = zooee.app.systemPrefersDark() };
@@ -480,5 +491,7 @@ pub fn main(init: std.process.Init) !void {
         // Integrated: content runs under a transparent title bar (macOS source-list
         // look). The sidebar's top padding clears the traffic lights.
         .titlebar = .integrated,
+        // Optional reposition via ZOOEE_TRAFFIC=x,y (macOS); unset = OS default.
+        .traffic_lights = trafficLightsFromEnv(init),
     });
 }

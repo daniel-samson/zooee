@@ -669,6 +669,8 @@ pub const Window = struct {
         gl: bool = false,
         /// Title-bar mode (#64); honored on macOS, ignored here for now.
         titlebar: window_mod.TitlebarMode = .native,
+        /// Accepted for cross-platform parity; macOS-only (traffic lights).
+        traffic_lights: ?window_mod.TrafficLights = null,
     };
 
     pub fn create(gpa: std.mem.Allocator, opts: CreateOptions) !*Window {
