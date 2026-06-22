@@ -1042,15 +1042,85 @@ var g_menu_theme: theme_mod.Theme = theme_mod.Theme.dark;
 /// An open overlay menu. `items` is borrowed (a stable static / model buffer)
 /// and must outlive the open menu; `target` is the field an Edit command acts
 /// on; `panel` is filled by the render pass for hit-testing in dispatch.
-const OpenMenu = struct {
+/// One drawn menu panel — the root, or a submenu opened from a parent row
+/// (#336). `panel` is filled by renderMenuOverlay for hit-testing.
+const MenuPanel = struct {
     items: []const menu_mod.Item,
     x: f32,
     y: f32,
-    target: ?EditTarget = null,
     hover: ?usize = null,
     panel: geometry.Rect = .{},
 };
+
+/// An open menu: a stack of panels (panels[0] = root, deeper = open submenu
+/// chain) plus the edit target the chosen command acts on (#319/#336).
+const max_menu_depth = 6;
+const OpenMenu = struct {
+    panels: [max_menu_depth]MenuPanel = undefined,
+    depth: usize = 1,
+    target: ?EditTarget = null,
+    /// Disable submenu expansion (#336): the X11 popup surface (#333) is a single
+    /// window sized to the root, so submenus aren't promoted to their own popup
+    /// yet — keep it flat there. The in-window overlay expands normally.
+    flat: bool = false,
+
+    fn active(self: *OpenMenu) *MenuPanel {
+        return &self.panels[self.depth - 1];
+    }
+};
 var g_open_menu: ?OpenMenu = null;
+
+/// A submenu-parent row carries nested items (menu.Item.submenu).
+fn isSubmenu(it: menu_mod.Item) bool {
+    return it.submenu.len > 0;
+}
+
+/// Open a fresh root menu at `(x, y)` (#319). Replaces any open menu.
+fn openRootMenu(items: []const menu_mod.Item, x: f32, y: f32, target: ?EditTarget) void {
+    var om: OpenMenu = .{ .depth = 1, .target = target };
+    om.panels[0] = .{ .items = items, .x = x, .y = y };
+    g_open_menu = om;
+}
+
+/// The top of `panel` for row `idx` (used to anchor a submenu to its parent).
+fn menuRowTop(panel: MenuPanel, idx: usize) f32 {
+    const sc = g_scale;
+    var cy = panel.y + 6 * sc;
+    for (panel.items, 0..) |it, i| {
+        if (i == idx) return cy;
+        cy += if (it.separator) menu_sep_h * sc else menu_item_h * sc;
+    }
+    return cy;
+}
+
+/// Open the submenu of `panels[d].items[item]` as the next panel, anchored to
+/// the parent row's right edge (#336). Truncates any deeper panels. No-op if the
+/// row isn't a submenu parent, it's already open, or the depth cap is reached.
+fn openSubmenu(m: *OpenMenu, d: usize, item: usize) void {
+    if (m.flat) return; // popup surface: flat menus only for now (#336 follow-up)
+    if (!isSubmenu(m.panels[d].items[item])) return;
+    if (d + 1 >= max_menu_depth) return;
+    // Already open from this exact row? leave it (don't reset hover).
+    if (m.depth == d + 2 and m.panels[d + 1].items.ptr == m.panels[d].items[item].submenu.ptr) return;
+    const sc = g_scale;
+    const parent = m.panels[d];
+    m.panels[d + 1] = .{
+        .items = parent.items[item].submenu,
+        .x = parent.panel.x + parent.panel.width - 2 * sc, // slight overlap
+        .y = menuRowTop(parent, item) - 6 * sc, // child's first row aligns with parent row
+    };
+    m.depth = d + 2;
+}
+
+/// The deepest open panel whose rect contains `p`, or null (#336).
+fn menuPanelAt(m: *OpenMenu, p: geometry.Point) ?usize {
+    var d = m.depth;
+    while (d > 0) {
+        d -= 1;
+        if (m.panels[d].panel.contains(p)) return d;
+    }
+    return null;
+}
 /// Force the overlay menu even on platforms with native menus (ZOOEE_OVERLAY_MENU)
 /// — for testing the overlay on macOS/Windows.
 pub var force_overlay_menu: bool = false;
@@ -1069,11 +1139,11 @@ fn nativeMenus(window: anytype) bool {
 /// The selectable item index at point `p` within an open overlay menu, or null
 /// (outside the panel or on a separator/disabled row). Geometry mirrors
 /// renderMenuOverlay so dispatch (no backend) and render agree.
-fn menuItemAt(m: OpenMenu, p: geometry.Point) ?usize {
+fn menuItemAt(panel: MenuPanel, p: geometry.Point) ?usize {
     const sc = g_scale;
-    if (!m.panel.contains(p)) return null;
-    var cy = m.y + 6 * sc;
-    for (m.items, 0..) |it, i| {
+    if (!panel.panel.contains(p)) return null;
+    var cy = panel.y + 6 * sc;
+    for (panel.items, 0..) |it, i| {
         const h = if (it.separator) menu_sep_h * sc else menu_item_h * sc;
         if (!it.separator and it.enabled and p.y >= cy and p.y < cy + h) return i;
         cy += h;
@@ -1106,14 +1176,32 @@ pub fn measureMenu(b: backend_mod.Backend, items: []const menu_mod.Item) geometr
 
 pub fn renderMenuOverlay(b: backend_mod.Backend, viewport: geometry.Size) void {
     const m = &(g_open_menu orelse return);
+    // Draw root → deepest so children paint over their parents.
+    var d: usize = 0;
+    while (d < m.depth) : (d += 1) {
+        const parent: ?MenuPanel = if (d > 0) m.panels[d - 1] else null;
+        renderMenuPanel(b, &m.panels[d], viewport, parent);
+    }
+}
+
+/// Draw one menu panel and record its hit-test rect (#319/#336). A child panel
+/// (`parent` non-null) flips to the left of its parent when it would spill past
+/// the viewport's right edge.
+fn renderMenuPanel(b: backend_mod.Backend, m: *MenuPanel, viewport: geometry.Size, parent: ?MenuPanel) void {
     const sc = g_scale;
     const th = g_menu_theme;
     const size = measureMenu(b, m.items);
     const w = size.width;
     const total = size.height;
-    // Clamp the panel into the viewport so it doesn't spill off-screen near an
-    // edge (#319). Mutating m.x/m.y keeps hit-testing (menuItemAt) in sync.
-    if (m.x + w > viewport.width) m.x = @max(0, viewport.width - w);
+    // Keep on-screen. Child panels flip to the parent's left on overflow;
+    // mutating m.x/m.y keeps hit-testing (menuItemAt) in sync.
+    if (m.x + w > viewport.width) {
+        if (parent) |pp| {
+            m.x = @max(0, pp.panel.x - w + 2 * sc); // flip to the left of the parent
+        } else {
+            m.x = @max(0, viewport.width - w);
+        }
+    }
     if (m.y + total > viewport.height) m.y = @max(0, viewport.height - total);
     const x = m.x;
     const y = m.y;
@@ -1133,7 +1221,18 @@ pub fn renderMenuOverlay(b: backend_mod.Backend, viewport: geometry.Size) void {
         }
         const col = if (!it.enabled) th.text_muted else if (hovered) th.on_accent else th.text;
         b.drawText(.{ .x = x + menu_pad_x * sc, .y = cy + (menu_item_h - menu_font) * sc / 2 }, it.label, .{ .size = menu_font * sc, .color = col });
-        if (it.accelerator.len > 0) {
+        if (isSubmenu(it)) {
+            // Trailing chevron (▸) marking a submenu parent.
+            const cxr = x + w - menu_pad_x * sc;
+            const midy = cy + menu_item_h * sc / 2;
+            const s = 3.5 * sc;
+            const tri = [_]geometry.Point{
+                .{ .x = cxr - s, .y = midy - s },
+                .{ .x = cxr, .y = midy },
+                .{ .x = cxr - s, .y = midy + s },
+            };
+            b.fillPath(&tri, if (hovered) th.on_accent else th.text_muted);
+        } else if (it.accelerator.len > 0) {
             const aw = b.measureText(it.accelerator, .{ .size = (menu_font - 2) * sc }).width;
             const acol = if (hovered) th.on_accent else th.text_muted;
             b.drawText(.{ .x = x + w - menu_pad_x * sc - aw, .y = cy + (menu_item_h - (menu_font - 2)) * sc / 2 }, it.accelerator, .{ .size = (menu_font - 2) * sc, .color = acol });
@@ -1323,13 +1422,18 @@ pub fn overlayMenuOpen() bool {
 pub fn overlayMenuItemPoint(label: []const u8) ?geometry.Point {
     const m = g_open_menu orelse return null;
     const sc = g_scale;
-    var cy = m.y + 6 * sc;
-    for (m.items) |it| {
-        const h = if (it.separator) menu_sep_h * sc else menu_item_h * sc;
-        if (!it.separator and std.mem.eql(u8, it.label, label)) {
-            return .{ .x = m.panel.x + m.panel.width / 2, .y = cy + h / 2 };
+    // Search every open panel (root + submenu chain, #336).
+    var d: usize = 0;
+    while (d < m.depth) : (d += 1) {
+        const panel = m.panels[d];
+        var cy = panel.y + 6 * sc;
+        for (panel.items) |it| {
+            const h = if (it.separator) menu_sep_h * sc else menu_item_h * sc;
+            if (!it.separator and std.mem.eql(u8, it.label, label)) {
+                return .{ .x = panel.panel.x + panel.panel.width / 2, .y = cy + h / 2 };
+            }
+            cy += h;
         }
-        cy += h;
     }
     return null;
 }
@@ -1337,15 +1441,22 @@ pub fn overlayMenuItemPoint(label: []const u8) ?geometry.Point {
 /// The highlighted (hovered/keyboard-selected) menu row index, or null. For
 /// tests to assert keyboard navigation (#335).
 pub fn overlayMenuHover() ?usize {
-    const m = g_open_menu orelse return null;
-    return m.hover;
+    var m = (g_open_menu orelse return null);
+    return m.active().hover;
 }
 
-/// The label of the highlighted menu row, or null. For tests (#335).
+/// The label of the highlighted row in the active (deepest) panel, or null (#335).
 pub fn overlayMenuHoverLabel() ?[]const u8 {
-    const m = g_open_menu orelse return null;
-    const h = m.hover orelse return null;
-    return m.items[h].label;
+    var m = (g_open_menu orelse return null);
+    const a = m.active();
+    const h = a.hover orelse return null;
+    return a.items[h].label;
+}
+
+/// Depth of the open menu (1 = root only, 2 = one submenu open, …). For tests (#336).
+pub fn overlayMenuDepth() usize {
+    const m = g_open_menu orelse return 0;
+    return m.depth;
 }
 
 /// The focused placement if it is an editable text field (#319), else null.
@@ -1763,51 +1874,81 @@ fn menuMove(items: []const menu_mod.Item, cur: ?usize, dir: i32) ?usize {
     return cur;
 }
 
-/// Close the menu and run the chosen row's command (or just close on null) —
-/// the shared path for a click and for Enter/Space (#319/#335).
-fn menuChoose(comptime Model: type, comptime Msg: type, model: *Model, m: *OpenMenu, idx: ?usize) Command {
-    const items = m.items;
-    const target = m.target;
-    g_open_menu = null; // close
-    if (idx) |ci| {
-        const id = items[ci].id;
+/// Activate row `i` of panel `d` (#319/#336): open it if it's a submenu parent,
+/// otherwise close the whole menu and run its command. A null index just
+/// dismisses. Shared by clicks and Enter/Space.
+fn menuActivate(comptime Model: type, comptime Msg: type, model: *Model, m: *OpenMenu, d: usize, i: ?usize) Command {
+    if (i) |idx| {
+        const it = m.panels[d].items[idx];
+        if (isSubmenu(it)) {
+            openSubmenu(m, d, idx);
+            m.active().hover = menuEdge(m.active().items, true); // highlight first child row
+            return .redraw;
+        }
+        const id = it.id;
+        const target = m.target;
+        g_open_menu = null; // close
         if (menu_mod.isEditCommand(id)) return doEditCommand(Model, Msg, model, id, target);
         if (@hasDecl(Model, "onMenuCommand")) return model.onMenuCommand(id);
+        return .redraw;
     }
+    g_open_menu = null;
     return .redraw;
 }
 
 /// Map one event to a Command, dispatching interaction messages through
 /// the model. Shared by the terminal and GUI loops.
-/// Modal handling for an open menu (#319): hover tracking, click/Enter to
-/// choose (running the command) or dismiss, arrow keys to move the highlight
-/// (#335), Escape to cancel. Swallows pointer + key input while open; returns
-/// null to let other events proceed.
+/// Modal handling for an open menu (#319): hover tracking (opening submenus on
+/// hover, #336), click/Enter to choose or dismiss, arrow keys to move the
+/// highlight (#335) and Right/Left to enter/leave a submenu, Escape to cancel.
+/// Swallows pointer + key input while open; returns null to let other events
+/// proceed.
 fn handleOpenMenuEvent(comptime Model: type, comptime Msg: type, model: *Model, ev: event_mod.Event) ?Command {
     const m = &(g_open_menu orelse return null);
     switch (ev) {
         .pointer_move => |p| {
-            m.hover = menuItemAt(m.*, p.position);
+            if (menuPanelAt(m, p.position)) |d| {
+                const idx = menuItemAt(m.panels[d], p.position);
+                m.panels[d].hover = idx;
+                if (m.depth > d + 1) m.depth = d + 1; // moved up the chain → close deeper
+                if (idx) |i| if (isSubmenu(m.panels[d].items[i])) openSubmenu(m, d, i);
+            }
             return .redraw;
         },
-        .pointer_down => |p| return menuChoose(Model, Msg, model, m, menuItemAt(m.*, p.position)),
+        .pointer_down => |p| {
+            if (menuPanelAt(m, p.position)) |d| return menuActivate(Model, Msg, model, m, d, menuItemAt(m.panels[d], p.position));
+            g_open_menu = null; // click outside any panel → dismiss
+            return .redraw;
+        },
         .key_down => |k| {
+            const a = m.active();
+            const ai = m.depth - 1;
             switch (k.key) {
-                .escape => g_open_menu = null,
-                .down => m.hover = menuMove(m.items, m.hover, 1),
-                .up => m.hover = menuMove(m.items, m.hover, -1),
-                .home => m.hover = menuEdge(m.items, true),
-                .end => m.hover = menuEdge(m.items, false),
-                // Enter on a highlighted row activates it; with no highlight it's
-                // a no-op (menu stays open).
-                .enter => if (m.hover != null) return menuChoose(Model, Msg, model, m, m.hover),
+                .escape => if (m.depth > 1) {
+                    m.depth -= 1; // close one level
+                } else {
+                    g_open_menu = null;
+                },
+                .down => a.hover = menuMove(a.items, a.hover, 1),
+                .up => a.hover = menuMove(a.items, a.hover, -1),
+                .home => a.hover = menuEdge(a.items, true),
+                .end => a.hover = menuEdge(a.items, false),
+                .right => if (a.hover) |i| if (isSubmenu(a.items[i])) {
+                    openSubmenu(m, ai, i);
+                    m.active().hover = menuEdge(m.active().items, true);
+                },
+                .left => if (m.depth > 1) {
+                    m.depth -= 1;
+                },
+                // Enter activates the highlighted row (opens a submenu or runs it).
+                .enter => if (a.hover != null) return menuActivate(Model, Msg, model, m, ai, a.hover),
                 else => {},
             }
             return .redraw; // modal: swallow keys while open
         },
         .text => |t| {
             // Space activates the highlighted row (Enter's keyboard twin).
-            if (t.codepoint == ' ' and m.hover != null) return menuChoose(Model, Msg, model, m, m.hover);
+            if (t.codepoint == ' ' and m.active().hover != null) return menuActivate(Model, Msg, model, m, m.depth - 1, m.active().hover);
             return .none; // swallow other text while open
         },
         .scroll => return .none,
@@ -2156,8 +2297,10 @@ fn runPopupMenu(
     defer surf.destroy();
 
     // Reuse the overlay state machine, but at popup-local origin (0,0) — the
-    // surface IS the panel, so renderMenuOverlay/menuItemAt need no changes.
-    g_open_menu = .{ .items = items, .x = 0, .y = 0, .target = target };
+    // surface IS the (root) panel. (Submenus aren't promoted to their own popup
+    // window yet — #336 v1 is overlay-only; in a popup they just don't expand.)
+    openRootMenu(items, 0, 0, target);
+    if (g_open_menu) |*om| om.flat = true; // single popup window → no submenu expansion (#336)
     defer g_open_menu = null;
     const viewport: geometry.Size = .{ .width = @floatFromInt(w), .height = @floatFromInt(h) };
 
@@ -2236,7 +2379,7 @@ fn openMenu(comptime Model: type, comptime Msg: type, window: anytype, model: *M
             }
         }
     }
-    g_open_menu = .{ .items = items, .x = x, .y = y, .target = target };
+    openRootMenu(items, x, y, target);
     return .redraw;
 }
 

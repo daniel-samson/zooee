@@ -17,6 +17,14 @@ const force_software = @import("build_options").force_software;
 var menu_bar_buf: [2]zooee.menu.Item = undefined;
 const app_menu_items = [_]zooee.menu.Item{.{ .label = "About Zooee Docs", .enabled = false }};
 
+// Right-click context menu with a nested submenu (#336 demo): right-click an
+// empty area of the detail pane → Reload / Theme▸{Light,Dark} / About.
+const ctx_theme_sub = [_]zooee.menu.Item{
+    .{ .label = "Light", .id = 4001 },
+    .{ .label = "Dark", .id = 4002 },
+};
+var ctx_menu_buf: [3]zooee.menu.Item = undefined;
+
 const Page = struct { name: []const u8, body: []const u8, icon: ui.IconName };
 const pages = [_]Page{
     .{ .name = "Welcome", .icon = .sparkles, .body = "Welcome to zooee — a native, cross-platform UI in Zig.\n\nThis app is the component gallery: pick an item on the left to see it, with variants and examples. The look adapts per OS (macOS / WinUI / Linux) and is still being tuned." },
@@ -496,6 +504,28 @@ const Docs = struct {
             .{ .label = "Edit", .submenu = zooee.app.editMenuItems() },
         };
         return &menu_bar_buf;
+    }
+
+    /// In-window context menu (#319/#336): right-click an empty area of the
+    /// detail pane for a small menu with a nested Theme submenu.
+    pub fn contextMenu(self: *Docs) ?[]const zooee.menu.Item {
+        _ = self;
+        ctx_menu_buf = .{
+            .{ .label = "Reload", .id = 4000 },
+            .{ .label = "Theme", .submenu = &ctx_theme_sub },
+            .{ .label = "About", .id = 4003, .enabled = false },
+        };
+        return &ctx_menu_buf;
+    }
+
+    /// Route the context menu's commands (#336): the Theme submenu toggles dark.
+    pub fn onMenuCommand(self: *Docs, id: u32) zooee.app.Command {
+        switch (id) {
+            4001 => self.dark = false,
+            4002 => self.dark = true,
+            else => {},
+        }
+        return .redraw;
     }
 
     /// The OS flipped light ⇆ dark (System Settings): follow it. The sidebar
