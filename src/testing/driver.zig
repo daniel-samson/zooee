@@ -975,6 +975,39 @@ test "#319 overlay context menu Select All targets the clicked field" {
     try testing.expectEqualStrings("abc", d.copiedText());
 }
 
+test "#335 menu arrow keys skip disabled rows + separators and wrap" {
+    var m: EditApp = .{};
+    var d = try editDriver(&m);
+    defer d.deinit();
+    const fr = d.placements()[d.findText("abc").?].rect;
+    _ = try d.rightClick(fr.x + fr.width / 2, fr.y + fr.height / 2);
+    try testing.expect(d.menuOpen());
+    // Field, no selection → [Cut(off), Copy(off), Paste, ----, Select All].
+    try testing.expect(app_mod.overlayMenuHover() == null); // nothing highlighted yet
+    _ = try d.key(.down); // skips disabled Cut/Copy → Paste
+    try testing.expectEqualStrings("Paste", app_mod.overlayMenuHoverLabel().?);
+    _ = try d.key(.down); // skips the separator → Select All
+    try testing.expectEqualStrings("Select All", app_mod.overlayMenuHoverLabel().?);
+    _ = try d.key(.down); // wraps back to Paste (first selectable)
+    try testing.expectEqualStrings("Paste", app_mod.overlayMenuHoverLabel().?);
+    _ = try d.key(.up); // wrap the other way → Select All
+    try testing.expectEqualStrings("Select All", app_mod.overlayMenuHoverLabel().?);
+}
+
+test "#335 End highlights the last row and Enter activates it" {
+    var m: EditApp = .{};
+    var d = try editDriver(&m);
+    defer d.deinit();
+    const fr = d.placements()[d.findText("abc").?].rect;
+    _ = try d.rightClick(fr.x + fr.width / 2, fr.y + fr.height / 2);
+    _ = try d.key(.end); // last selectable → Select All
+    try testing.expectEqualStrings("Select All", app_mod.overlayMenuHoverLabel().?);
+    _ = try d.key(.enter); // activate
+    try testing.expect(!d.menuOpen()); // closed
+    _ = try d.textMods('c', .{ .super = true }); // copy the now-selected field
+    try testing.expectEqualStrings("abc", d.copiedText());
+}
+
 test "#319 drag-select across paragraphs and ⌘C joins them with a newline" {
     var m: EditApp = .{};
     var d = try editDriver(&m);

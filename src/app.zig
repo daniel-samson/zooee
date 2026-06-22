@@ -1334,6 +1334,20 @@ pub fn overlayMenuItemPoint(label: []const u8) ?geometry.Point {
     return null;
 }
 
+/// The highlighted (hovered/keyboard-selected) menu row index, or null. For
+/// tests to assert keyboard navigation (#335).
+pub fn overlayMenuHover() ?usize {
+    const m = g_open_menu orelse return null;
+    return m.hover;
+}
+
+/// The label of the highlighted menu row, or null. For tests (#335).
+pub fn overlayMenuHoverLabel() ?[]const u8 {
+    const m = g_open_menu orelse return null;
+    const h = m.hover orelse return null;
+    return m.items[h].label;
+}
+
 /// The focused placement if it is an editable text field (#319), else null.
 fn focusedEditPlacement(placements: []const layout_mod.Placement) ?layout_mod.Placement {
     const pl = focusedPlacement(placements) orelse return null;
@@ -1713,11 +1727,62 @@ fn focusIndexAt(placements: []const layout_mod.Placement, p: geometry.Point) ?us
     return found;
 }
 
+/// A menu row is keyboard/click selectable when it's neither a separator nor
+/// disabled (#335).
+fn menuSelectable(it: menu_mod.Item) bool {
+    return !it.separator and it.enabled;
+}
+
+/// The first (or last) selectable row index, or null if none (#335).
+fn menuEdge(items: []const menu_mod.Item, first: bool) ?usize {
+    if (first) {
+        for (items, 0..) |it, i| if (menuSelectable(it)) return i;
+    } else {
+        var i = items.len;
+        while (i > 0) {
+            i -= 1;
+            if (menuSelectable(items[i])) return i;
+        }
+    }
+    return null;
+}
+
+/// Move the highlight from `cur` by `dir` (+1 down / -1 up), skipping
+/// separators + disabled rows and wrapping at the ends (#335). From no
+/// highlight, Down lands on the first row and Up on the last.
+fn menuMove(items: []const menu_mod.Item, cur: ?usize, dir: i32) ?usize {
+    const n = items.len;
+    if (n == 0) return null;
+    const start = cur orelse return menuEdge(items, dir > 0);
+    var idx = start;
+    var steps: usize = 0;
+    while (steps < n) : (steps += 1) {
+        idx = if (dir > 0) (idx + 1) % n else (idx + n - 1) % n;
+        if (menuSelectable(items[idx])) return idx;
+    }
+    return cur;
+}
+
+/// Close the menu and run the chosen row's command (or just close on null) —
+/// the shared path for a click and for Enter/Space (#319/#335).
+fn menuChoose(comptime Model: type, comptime Msg: type, model: *Model, m: *OpenMenu, idx: ?usize) Command {
+    const items = m.items;
+    const target = m.target;
+    g_open_menu = null; // close
+    if (idx) |ci| {
+        const id = items[ci].id;
+        if (menu_mod.isEditCommand(id)) return doEditCommand(Model, Msg, model, id, target);
+        if (@hasDecl(Model, "onMenuCommand")) return model.onMenuCommand(id);
+    }
+    return .redraw;
+}
+
 /// Map one event to a Command, dispatching interaction messages through
 /// the model. Shared by the terminal and GUI loops.
-/// Modal handling for an open overlay menu (#319): hover tracking, click to
-/// choose (running the command) or dismiss, Escape to cancel. Swallows pointer
-/// and key input while open; returns null to let other events proceed.
+/// Modal handling for an open menu (#319): hover tracking, click/Enter to
+/// choose (running the command) or dismiss, arrow keys to move the highlight
+/// (#335), Escape to cancel. Swallows pointer + key input while open; returns
+/// null to let other events proceed.
 fn handleOpenMenuEvent(comptime Model: type, comptime Msg: type, model: *Model, ev: event_mod.Event) ?Command {
     const m = &(g_open_menu orelse return null);
     switch (ev) {
@@ -1725,23 +1790,26 @@ fn handleOpenMenuEvent(comptime Model: type, comptime Msg: type, model: *Model, 
             m.hover = menuItemAt(m.*, p.position);
             return .redraw;
         },
-        .pointer_down => |p| {
-            const chosen = menuItemAt(m.*, p.position);
-            const items = m.items;
-            const target = m.target;
-            g_open_menu = null; // close on any click
-            if (chosen) |ci| {
-                const id = items[ci].id;
-                if (menu_mod.isEditCommand(id)) return doEditCommand(Model, Msg, model, id, target);
-                if (@hasDecl(Model, "onMenuCommand")) return model.onMenuCommand(id);
-            }
-            return .redraw;
-        },
+        .pointer_down => |p| return menuChoose(Model, Msg, model, m, menuItemAt(m.*, p.position)),
         .key_down => |k| {
-            if (k.key == .escape) g_open_menu = null;
+            switch (k.key) {
+                .escape => g_open_menu = null,
+                .down => m.hover = menuMove(m.items, m.hover, 1),
+                .up => m.hover = menuMove(m.items, m.hover, -1),
+                .home => m.hover = menuEdge(m.items, true),
+                .end => m.hover = menuEdge(m.items, false),
+                // Enter on a highlighted row activates it; with no highlight it's
+                // a no-op (menu stays open).
+                .enter => if (m.hover != null) return menuChoose(Model, Msg, model, m, m.hover),
+                else => {},
+            }
             return .redraw; // modal: swallow keys while open
         },
-        .text => return .none,
+        .text => |t| {
+            // Space activates the highlighted row (Enter's keyboard twin).
+            if (t.codepoint == ' ' and m.hover != null) return menuChoose(Model, Msg, model, m, m.hover);
+            return .none; // swallow other text while open
+        },
         .scroll => return .none,
         .close_requested => return .quit,
         else => return null, // resized etc. proceed normally (menu re-clamps)
