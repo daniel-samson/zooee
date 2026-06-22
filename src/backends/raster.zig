@@ -257,7 +257,9 @@ pub const RasterBackend = struct {
             self.pixels[i + 0] = self.clear_color.r;
             self.pixels[i + 1] = self.clear_color.g;
             self.pixels[i + 2] = self.clear_color.b;
-            self.pixels[i + 3] = 255;
+            // Honor the clear color's alpha so a backend can request a transparent
+            // background (e.g. the X11 ARGB popup, #333); defaults to opaque.
+            self.pixels[i + 3] = self.clear_color.a;
         }
         self.in_frame = true;
     }

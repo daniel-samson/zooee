@@ -535,6 +535,9 @@ const XSetWindowAttributes = extern struct {
 };
 
 extern "X11" fn XCreateColormap(*Display, Window_, ?*Visual, c_int) Colormap;
+extern "X11" fn XFreeColormap(*Display, Colormap) c_int;
+extern "X11" fn XMatchVisualInfo(*Display, c_int, c_int, c_int, *XVisualInfo) c_int;
+const TrueColor: c_int = 4;
 extern "X11" fn XCreateWindow(*Display, Window_, c_int, c_int, c_uint, c_uint, c_uint, c_int, c_uint, ?*Visual, c_ulong, *XSetWindowAttributes) Window_;
 extern "X11" fn XSync(*Display, Bool) c_int;
 extern "X11" fn XFree(?*anyopaque) c_int;
@@ -1692,6 +1695,22 @@ pub const PopupSurface = struct {
     height: u32,
     queue: std.ArrayList(Event) = .empty,
     kbd_grabbed: bool = false,
+    /// True when the window uses a 32-bit ARGB visual (a compositor is running):
+    /// the menu's rounded corners are then genuinely transparent (#333). When
+    /// false the surface is opaque (default visual) and corners blend into the
+    /// menu fill. Set by `app.zig` on the raster clear + here on blit.
+    alpha: bool = false,
+    /// A colormap we created for the ARGB visual (freed in destroy); 0 = none.
+    argb_colormap: Colormap = 0,
+
+    /// Whether a compositing manager is running on `screen` — required for an
+    /// ARGB window's transparency to actually show (else clear pixels are
+    /// undefined). EWMH: the `_NET_WM_CM_S<screen>` selection has an owner.
+    fn hasCompositor(display: *Display, screen: c_int) bool {
+        var buf: [32]u8 = undefined;
+        const name = std.fmt.bufPrintZ(&buf, "_NET_WM_CM_S{d}", .{screen}) catch return false;
+        return XGetSelectionOwner(display, XInternAtom(display, name.ptr, 0)) != 0;
+    }
 
     /// Create + map the popup at root coords `(gx, gy)` and grab the pointer.
     /// Returns null on window/GC creation or pointer-grab failure (caller falls
@@ -1700,24 +1719,38 @@ pub const PopupSurface = struct {
     fn create(win: *Window, gx: c_int, gy: c_int, w: u32, h: u32) ?PopupSurface {
         const screen = XDefaultScreen(win.display);
         const root = XRootWindow(win.display, screen);
-        // Use the screen's DEFAULT visual/depth/colormap — NOT the main window's
-        // (which may be a GLX visual whose colormap we don't have; creating a
-        // window with a non-default visual and no matching colormap is a
-        // BadMatch and the window never really exists). The raster popup doesn't
-        // need the GL visual anyway.
-        const visual = XDefaultVisual(win.display, screen);
-        const depth: c_uint = @intCast(XDefaultDepth(win.display, screen));
+        // Prefer a 32-bit ARGB visual when a compositor is running, so the menu's
+        // rounded corners are truly transparent against the desktop (#333). Else
+        // fall back to the screen's DEFAULT visual/depth/colormap — never the main
+        // window's (which may be a GLX visual whose colormap we lack → BadMatch).
+        var visual = XDefaultVisual(win.display, screen);
+        var depth: c_uint = @intCast(XDefaultDepth(win.display, screen));
+        var colormap = XDefaultColormap(win.display, screen);
+        var use_alpha = false;
+        var own_cmap: Colormap = 0;
+        var vinfo: XVisualInfo = undefined;
+        if (hasCompositor(win.display, screen) and XMatchVisualInfo(win.display, screen, 32, TrueColor, &vinfo) != 0) {
+            visual = vinfo.visual;
+            depth = 32;
+            colormap = XCreateColormap(win.display, root, vinfo.visual, AllocNone);
+            own_cmap = colormap;
+            use_alpha = true;
+        }
         var swa: XSetWindowAttributes = .{
             .override_redirect = 1, // WM leaves it undecorated/unmanaged
-            .background_pixel = XWhitePixel(win.display, screen),
-            .border_pixel = 0,
-            .colormap = XDefaultColormap(win.display, screen),
+            .background_pixel = if (use_alpha) 0 else XWhitePixel(win.display, screen),
+            .border_pixel = 0, // required with a non-default-depth visual (no BadMatch)
+            .colormap = colormap,
             .event_mask = ExposureMask | ButtonPressMask | ButtonReleaseMask | PointerMotionMask | KeyPressMask,
         };
         const handle = XCreateWindow(win.display, root, gx, gy, w, h, 0, @intCast(depth), InputOutput, visual, CWOverrideRedirect | CWBackPixel | CWBorderPixel | CWColormap | CWEventMask, &swa);
-        if (handle == 0) return null;
+        if (handle == 0) {
+            if (own_cmap != 0) _ = XFreeColormap(win.display, own_cmap);
+            return null;
+        }
         const gc = XCreateGC(win.display, handle, 0, null) orelse {
             _ = XDestroyWindow(win.display, handle);
+            if (own_cmap != 0) _ = XFreeColormap(win.display, own_cmap);
             return null;
         };
         _ = XMapRaised(win.display, handle);
@@ -1729,6 +1762,7 @@ pub const PopupSurface = struct {
         if (ok != GrabSuccess) {
             _ = XFreeGC(win.display, gc);
             _ = XDestroyWindow(win.display, handle);
+            if (own_cmap != 0) _ = XFreeColormap(win.display, own_cmap);
             _ = XFlush(win.display);
             return null;
         }
@@ -1747,7 +1781,13 @@ pub const PopupSurface = struct {
             .width = w,
             .height = h,
             .kbd_grabbed = kbd,
+            .alpha = use_alpha,
+            .argb_colormap = own_cmap,
         };
+    }
+
+    fn premul(c: u8, a: u8) u8 {
+        return @intCast((@as(u16, c) * @as(u16, a)) / 255);
     }
 
     /// Present an RGBA frame to the popup (RGBA→BGRA + XPutImage), mirroring the
@@ -1758,10 +1798,13 @@ pub const PopupSurface = struct {
         const dst = self.bgra.items;
         var i: usize = 0;
         while (i < rgba.len) : (i += 4) {
-            dst[i + 0] = rgba[i + 2];
-            dst[i + 1] = rgba[i + 1];
-            dst[i + 2] = rgba[i + 0];
-            dst[i + 3] = 255;
+            const a = if (self.alpha) rgba[i + 3] else 255;
+            // ARGB visuals expect PREMULTIPLIED alpha; scale RGB by alpha so the
+            // compositor blends edges/corners cleanly (no-op when a==255/opaque).
+            dst[i + 0] = if (self.alpha) premul(rgba[i + 2], a) else rgba[i + 2];
+            dst[i + 1] = if (self.alpha) premul(rgba[i + 1], a) else rgba[i + 1];
+            dst[i + 2] = if (self.alpha) premul(rgba[i + 0], a) else rgba[i + 0];
+            dst[i + 3] = a;
         }
         if (self.ximage == null or self.img_w != width or self.img_h != height) {
             if (self.ximage) |old| {
@@ -1829,6 +1872,7 @@ pub const PopupSurface = struct {
         }
         _ = XFreeGC(self.display, self.gc);
         _ = XDestroyWindow(self.display, self.handle);
+        if (self.argb_colormap != 0) _ = XFreeColormap(self.display, self.argb_colormap);
         _ = XFlush(self.display);
         self.bgra.deinit(self.gpa);
         self.queue.deinit(self.gpa);

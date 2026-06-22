@@ -2286,7 +2286,6 @@ fn runPopupMenu(
     defer raster.deinit();
     raster.char_width = 8 * g_scale;
     raster.line_height = 16 * g_scale;
-    raster.clear_color = g_menu_theme.surface; // panel corners blend into the surface
     _ = system_font.loadInto(gpa, io, &raster);
     const b = raster.interface();
 
@@ -2295,6 +2294,10 @@ fn runPopupMenu(
     const h: u32 = @intFromFloat(@ceil(size.height));
     var surf = window.popupSurface(@as(i32, @intFromFloat(x)), @as(i32, @intFromFloat(y)), w, h) orelse return .grab_failed;
     defer surf.destroy();
+    // On an ARGB surface (compositor present) clear to fully transparent so the
+    // menu's rounded corners show the desktop; otherwise the corners blend into
+    // the opaque surface fill (#333 transparency).
+    raster.clear_color = if (surf.alpha) .{ .r = 0, .g = 0, .b = 0, .a = 0 } else g_menu_theme.surface;
 
     // Reuse the overlay state machine, but at popup-local origin (0,0) — the
     // surface IS the (root) panel. (Submenus aren't promoted to their own popup
@@ -2568,6 +2571,20 @@ fn hitMsg(placements: []const layout_mod.Placement, p: geometry.Point, kind: Int
 
 const testing = std.testing;
 const record = @import("backends/record.zig");
+
+test "#333 transparent clear leaves a rounded panel's corners see-through" {
+    var rb = raster_mod.RasterBackend.init(testing.allocator);
+    defer rb.deinit();
+    rb.clear_color = .{ .r = 0, .g = 0, .b = 0, .a = 0 }; // ARGB popup clears transparent
+    const b = rb.interface();
+    try b.beginFrame(.{ .width = 40, .height = 40 });
+    b.drawRect(.{ .x = 0, .y = 0, .width = 40, .height = 40 }, .{ .background = .{ .r = 200, .g = 200, .b = 200 }, .corner_radius = .all(10) });
+    try b.endFrame();
+    // Center is the opaque menu fill; the extreme corner is outside the radius,
+    // so it stays fully transparent (the desktop shows through under a compositor).
+    try testing.expectEqual(@as(u8, 255), rb.pixelAt(20, 20).a);
+    try testing.expectEqual(@as(u8, 0), rb.pixelAt(0, 0).a);
+}
 
 test "measureMenu sizes the panel from items + separators (#333)" {
     g_scale = 1;
