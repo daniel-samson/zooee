@@ -322,6 +322,20 @@ pub fn Driver(comptime Model: type, comptime Msg: type) type {
             return self.click(p.x, p.y);
         }
 
+        /// Paste `text` into the focused field: stage it on a memory clipboard,
+        /// send ⌘V, and run the framework's paste-apply (which the real loop does
+        /// in frameOsHooks). Headless equivalent of the OS clipboard (#319).
+        pub fn paste(self: *Self, clip_text: []const u8) !Command {
+            var mc = @import("../clipboard.zig").MemoryClipboard.init(self.gpa);
+            defer mc.deinit();
+            try mc.interface().setText(clip_text);
+            _ = try self.textMods('v', .{ .super = true }); // stages g_field_paste
+            const cmd = app_mod.applyPendingPaste(Model, Msg, self.model, mc.interface(), self.gpa);
+            self.last_command = cmd;
+            if (cmd == .redraw) try self.relayout();
+            return cmd;
+        }
+
         // --- Rendering / assertions ---------------------------------------
 
         /// Render the current frame to the raster backend and return its RGBA
@@ -935,4 +949,26 @@ test "#319 drag-select across paragraphs and ⌘C joins them with a newline" {
     _ = try d.render(); // renderTextSelection fills the copy buffer across elements
     try testing.expect(std.mem.startsWith(u8, d.copiedText(), "alpha\n")); // alpha full + join
     try testing.expect(std.mem.indexOf(u8, d.copiedText(), "o") != null); // some of omega
+}
+
+test "#319 paste inserts the clipboard text at the caret" {
+    var m: EditApp = .{};
+    var d = try editDriver(&m);
+    defer d.deinit();
+    _ = try d.clickText("abc"); // focus, caret seeded at end
+    _ = try d.paste("XY"); // "abc" + "XY"
+    try testing.expectEqualStrings("abcXY", d.fieldValue(9001));
+}
+
+test "#319 clicking inside a field places the caret (type inserts there)" {
+    var m: EditApp = .{};
+    var d = try editDriver(&m);
+    d.setFont(@import("../root.zig").test_font_ttf) catch {}; // real metrics for caret math
+    defer d.deinit();
+    const fr = d.placements()[d.findText("abc").?].rect;
+    // Click near the left edge of the field → caret before 'a'; render resolves it.
+    _ = try d.click(fr.x + 2, fr.y + fr.height / 2);
+    _ = try d.render(); // resolves the pending caret-click to an offset
+    _ = try d.text('Z'); // inserts at the caret (start), not the end
+    try testing.expectEqualStrings("Zabc", d.fieldValue(9001));
 }

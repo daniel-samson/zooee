@@ -30,6 +30,7 @@ const cursor_mod = @import("cursor.zig");
 const ui_mod = @import("ui.zig");
 const dialog = @import("dialog.zig");
 const menu_mod = @import("menu.zig");
+const clipboard_mod = @import("clipboard.zig");
 
 /// Build the frame's Element tree from the Model (#4): prefer the widget-layer
 /// `viewUi(ui) Widget` hook (lowered to Elements via `Ui`), else the raw
@@ -1014,6 +1015,9 @@ var g_copy_len: usize = 0;
 /// Pending paste into a focused text field (#319): the clipboard read happens in
 /// frameOsHooks (which has the window + allocator), then inserts at the caret.
 var g_field_paste: ?struct { id: u32, on_change: ?u32 } = null;
+/// A click on a text field whose caret should be placed at `pt` (resolved to a
+/// byte offset in renderTextFields, which has the backend). `extend` = shift. (#319)
+var g_field_caret_click: ?struct { id: u32, pt: geometry.Point, extend: bool } = null;
 /// A text field targeted by an Edit command (#319): its id + on_change message.
 const EditTarget = struct { id: u32, on_change: ?u32 };
 
@@ -1224,6 +1228,23 @@ pub fn textInputValue(id: u32) []const u8 {
     return edit_state.value(id);
 }
 
+/// Apply a pending field paste (#319): read `clip`, insert at the focused
+/// field's caret, fire its on_change. Returns `.redraw` on insert. Called by
+/// frameOsHooks (system clipboard) and the test Driver (memory clipboard).
+pub fn applyPendingPaste(comptime Model: type, comptime Msg: type, model: *Model, clip: clipboard_mod.Clipboard, gpa: std.mem.Allocator) Command {
+    const fp = g_field_paste orelse return .none;
+    g_field_paste = null;
+    const maybe = clip.getText(gpa) catch return .none;
+    const txt = maybe orelse return .none;
+    defer gpa.free(txt);
+    if (edit_state.get(fp.id)) |te| {
+        te.insert(edit_state.allocator(), txt) catch {};
+        if (fp.on_change) |m| _ = model.update(@as(Msg, @enumFromInt(m)));
+        return .redraw;
+    }
+    return .none;
+}
+
 /// The id of the focused editable field, or null. For tests / introspection (#319).
 pub fn focusedEditFieldId(placements: []const layout_mod.Placement) ?u32 {
     const pl = focusedPlacement(placements) orelse return null;
@@ -1304,6 +1325,15 @@ pub fn renderTextFields(b: backend_mod.Backend, placements: []const layout_mod.P
     g_focused_edit = .{ .id = id, .on_change = el.edit_on_change };
     const te = edit_state.get(id) orelse return;
     const inner = layout_mod.contentBoxOf(el, fp.rect);
+    // Resolve a pending field click to a caret offset now that we have the
+    // backend for point→offset math (#319).
+    if (g_field_caret_click) |cc| {
+        if (cc.id == id) {
+            const off = layout_mod.textCaretAt(b, el, inner, cc.pt);
+            te.setCaret(off, cc.extend);
+            g_field_caret_click = null;
+        }
+    }
     if (te.selection()) |sel| {
         layout_mod.drawTextSelection(b, el, inner, sel.lo, sel.hi, selection_color, selection_text_color);
     }
@@ -1456,6 +1486,7 @@ pub fn resetForTest() void {
     resetFocus();
     resetTextSelection();
     g_field_paste = null;
+    g_field_caret_click = null;
     g_focused_edit = null;
     g_open_menu = null;
     g_copy_len = 0;
@@ -1666,6 +1697,11 @@ fn dispatch(
                 if (focusIndexAt(placements, p.position)) |fi| {
                     changeFocus(Model, Msg, model, placements, fi);
                     g_focus_visible = false;
+                }
+                // Place the caret in a clicked text field (#319). Resolved in the
+                // render pass (which has the backend for point→offset math).
+                if (editFieldAt(placements, p.position)) |ef| {
+                    g_field_caret_click = .{ .id = ef.id, .pt = p.position, .extend = p.mods.shift };
                 }
                 if (hitMsg(placements, p.position, .click)) |m| {
                     break :blk model.update(@as(Msg, @enumFromInt(m)));
@@ -1972,21 +2008,11 @@ fn setupMenuBar(comptime Model: type, window: anytype, model: *Model) void {
 /// changed model state. No-ops without the corresponding hooks.
 fn frameOsHooks(comptime Model: type, comptime Msg: type, window: anytype, model: *Model, gpa: std.mem.Allocator, io: std.Io) Command {
     var cmd: Command = .none;
-    // Paste into a focused text field (#319): read the clipboard here (we have
-    // the window + allocator) and insert at the caret, then fire on_change.
-    if (g_field_paste) |fp| {
-        g_field_paste = null;
+    // Paste into a focused text field (#319): read the system clipboard here
+    // (we have the window + allocator) and insert at the caret.
+    if (g_field_paste != null) {
         var clip = systemClipboard(window, gpa);
-        if (clip.interface().getText(gpa)) |maybe| {
-            if (maybe) |txt| {
-                defer gpa.free(txt);
-                if (edit_state.get(fp.id)) |te| {
-                    te.insert(edit_state.allocator(), txt) catch {};
-                    if (fp.on_change) |m| _ = model.update(@as(Msg, @enumFromInt(m)));
-                    cmd = .redraw;
-                }
-            }
-        } else |_| {}
+        if (applyPendingPaste(Model, Msg, model, clip.interface(), gpa) == .redraw) cmd = .redraw;
     }
     if (@hasDecl(Model, "menuBar")) {
         if (window.takeMenuCommand()) |id| {
