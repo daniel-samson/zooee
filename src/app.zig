@@ -1018,6 +1018,8 @@ var g_field_paste: ?struct { id: u32, on_change: ?u32 } = null;
 /// A click on a text field whose caret should be placed at `pt` (resolved to a
 /// byte offset in renderTextFields, which has the backend). `extend` = shift. (#319)
 var g_field_caret_click: ?struct { id: u32, pt: geometry.Point, extend: bool } = null;
+/// The field id being mouse-drag-selected (pointer down→move→up), or null (#319).
+var g_field_drag: ?u32 = null;
 /// A text field targeted by an Edit command (#319): its id + on_change message.
 const EditTarget = struct { id: u32, on_change: ?u32 };
 
@@ -1243,6 +1245,13 @@ pub fn applyPendingPaste(comptime Model: type, comptime Msg: type, model: *Model
         return .redraw;
     }
     return .none;
+}
+
+/// The selected substring of the TextInput with this id ("" if none). For
+/// tests / introspection (#319).
+pub fn fieldSelectedText(id: u32) []const u8 {
+    const te = edit_state.get(id) orelse return "";
+    return te.selectedText();
 }
 
 /// The id of the focused editable field, or null. For tests / introspection (#319).
@@ -1487,6 +1496,7 @@ pub fn resetForTest() void {
     resetTextSelection();
     g_field_paste = null;
     g_field_caret_click = null;
+    g_field_drag = null;
     g_focused_edit = null;
     g_open_menu = null;
     g_copy_len = 0;
@@ -1702,6 +1712,7 @@ fn dispatch(
                 // render pass (which has the backend for point→offset math).
                 if (editFieldAt(placements, p.position)) |ef| {
                     g_field_caret_click = .{ .id = ef.id, .pt = p.position, .extend = p.mods.shift };
+                    g_field_drag = ef.id; // begin a possible drag-select
                 }
                 if (hitMsg(placements, p.position, .click)) |m| {
                     break :blk model.update(@as(Msg, @enumFromInt(m)));
@@ -1712,6 +1723,7 @@ fn dispatch(
         .pointer_up => blk: {
             g_bar_drag = null; // end any scrollbar drag
             if (g_textsel) |*ts| ts.dragging = false; // end a text drag-select (#318)
+            g_field_drag = null; // end a field drag-select (#319)
             break :blk model.onEvent(ev); // also let the app end a drag of its own
         },
         .pointer_move => |p| blk: {
@@ -1722,6 +1734,12 @@ fn dispatch(
                 if (selectableAt(placements, p.position)) |fi| ts.focus_idx = fi;
                 break :blk .redraw;
             };
+            // Drag-select within a text field (#319): extend the caret/selection
+            // to the pointer (resolved in the render pass).
+            if (g_field_drag) |id| {
+                g_field_caret_click = .{ .id = id, .pt = p.position, .extend = true };
+                break :blk .redraw;
+            }
             // A scrollbar drag takes precedence and scrolls the dragged region.
             if (g_bar_drag != null) {
                 dragBar(p.position);

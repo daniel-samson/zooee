@@ -322,6 +322,35 @@ pub fn Driver(comptime Model: type, comptime Msg: type) type {
             return self.click(p.x, p.y);
         }
 
+        /// Drag-select from (x1,y1) to (x2,y2): pointer down → move → up. Renders
+        /// between steps so the field caret/selection (resolved in the render
+        /// pass) tracks each point — within a field it selects between the two
+        /// points; on read-only text it spans paragraphs.
+        pub fn dragSelect(self: *Self, x1: f32, y1: f32, x2: f32, y2: f32) !Command {
+            const cmd = try self.pointerDown(x1, y1);
+            _ = try self.render(); // resolve the anchor caret
+            _ = try self.move(x2, y2);
+            _ = try self.render(); // resolve the extended focus caret
+            _ = try self.pointerUp(x2, y2);
+            return cmd;
+        }
+
+        /// The selected substring of the TextInput with this id ("" if none).
+        pub fn fieldSelectedText(self: *Self, id: u32) []const u8 {
+            _ = self;
+            return app_mod.fieldSelectedText(id);
+        }
+
+        /// The border-box rect of the placement at `idx`.
+        pub fn elementRect(self: *Self, idx: usize) geometry.Rect {
+            return self.placements()[idx].rect;
+        }
+
+        /// The text of the element at `idx` ("" if it has none).
+        pub fn textAt(self: *Self, idx: usize) []const u8 {
+            return self.placements()[idx].element.text orelse "";
+        }
+
         /// Paste `text` into the focused field: stage it on a memory clipboard,
         /// send ⌘V, and run the framework's paste-apply (which the real loop does
         /// in frameOsHooks). Headless equivalent of the OS clipboard (#319).
@@ -971,4 +1000,19 @@ test "#319 clicking inside a field places the caret (type inserts there)" {
     _ = try d.render(); // resolves the pending caret-click to an offset
     _ = try d.text('Z'); // inserts at the caret (start), not the end
     try testing.expectEqualStrings("Zabc", d.fieldValue(9001));
+}
+
+test "#319 mouse drag-selects text within a field" {
+    var m: EditApp = .{};
+    var d = try editDriver(&m);
+    d.setFont(@import("../root.zig").test_font_ttf) catch {}; // real metrics for caret math
+    defer d.deinit();
+    const fr = d.placements()[d.findText("abc").?].rect;
+    const midy = fr.y + fr.height / 2;
+    // Drag from the left edge (before 'a') to past the right edge (after 'c').
+    _ = try d.dragSelect(fr.x + 1, midy, fr.x + fr.width + 20, midy);
+    try testing.expectEqualStrings("abc", d.fieldSelectedText(9001));
+    // The selection is now copyable.
+    _ = try d.textMods('c', .{ .super = true });
+    try testing.expectEqualStrings("abc", d.copiedText());
 }
