@@ -17,7 +17,7 @@ const pages = [_]Page{
     .{ .name = "Welcome", .icon = .sparkles, .body = "Welcome to zooee — a native, cross-platform UI in Zig.\n\nThis app is the component gallery: pick an item on the left to see it, with variants and examples. The look adapts per OS (macOS / WinUI / Linux) and is still being tuned." },
     .{ .name = "Layout", .icon = .layout_dashboard, .body = "Flex containers (row / column) with gap, padding, grow, and CSS-style justify-content / align-items. `spacer()` fills free space; `divider()` draws a 1px rule across the cross axis." },
     .{ .name = "Button", .icon = .square_mouse_pointer, .body = "Buttons trigger actions. Variants: primary, secondary, danger. (Live examples land as the Button component is built.)" },
-    .{ .name = "Icon", .icon = .shapes, .body = "Vector icons baked from real SVGs at build time (Lucide). Each icon flattens to stroke/fill subpaths; they tint with the current role and dim when disabled. Drop an SVG in icons/ and run `zig build gen-icons`." },
+    .{ .name = "Icon", .icon = .shapes, .body = "Vector icons baked from real SVGs at build time (Lucide). Each icon flattens to stroke/fill subpaths; they tint with the current role and dim when disabled. The full Lucide set — 1737 icons — is baked into `src/lucide.zig`, where each is its own `pub const`, so an app compiles in only the ones it names (`lucide.house`) and the rest are dropped. A small curated set lives in `icons/`; drop an SVG there and run `zig build gen-icons`." },
     .{ .name = "Text", .icon = .type, .body = "Text and labels: titles, headings, body, captions — with the shaping pipeline (Latin, Arabic, BiDi)." },
     .{ .name = "List", .icon = .list, .body = "A selectable list — the master/nav pattern. Each row dispatches on click; the selected row is highlighted. (The sidebar on the left is itself a List.) Virtualization and keyboard nav are follow-ups." },
     .{ .name = "Scroll", .icon = .scroll_text, .body = "A scroll viewport: a fixed-size box that clips its content and pans it on wheel/trackpad. Offsets are clamped to the content extent. Scroll inside the box below." },
@@ -146,15 +146,9 @@ fn listExamples(u: *ui.Ui, selected: usize) !Widget {
     }));
 }
 
-/// Live examples for the Icon page (#272): the starter set, tints, sizes.
+/// Live examples for the Icon page (#272): tints and sizes.
 fn iconExamples(u: *ui.Ui) !Widget {
     return u.column(.{ .gap = 18 }, &.{
-        try example(u, "the starter set", try u.row(.{ .gap = 16 }, &.{
-            u.icon(.{ .name = .plus, .size = 24 }),
-            u.icon(.{ .name = .check, .size = 24 }),
-            u.icon(.{ .name = .play, .size = 24 }),
-            u.icon(.{ .name = .chevron_right, .size = 24 }),
-        })),
         try example(u, "role tints", try u.row(.{ .gap = 16 }, &.{
             u.icon(.{ .name = .check, .size = 24, .role = .primary }),
             u.icon(.{ .name = .check, .size = 24, .role = .secondary }),
@@ -169,18 +163,23 @@ fn iconExamples(u: *ui.Ui) !Widget {
     });
 }
 
-/// The complete Lucide set (src/lucide.zig), baked at build time and rendered
-/// through `Ui.iconData` — a wrapped grid the content pane scrolls. Proves the
-/// full library is usable without growing the curated `IconName` enum.
-fn lucideGallery(u: *ui.Ui) !Widget {
-    const names = comptime std.enums.values(zooee.lucide.Name);
-    const cells = try u.arena.alloc(Widget, names.len);
-    for (names, 0..) |name, i| {
-        cells[i] = try u.column(.{ .width = 34, .height = 34, .justify = .center, .align_items = .center }, &.{
-            u.iconData(.{ .data = zooee.lucide.get(name), .size = 20, .role = .secondary }),
-        });
-    }
-    return example(u, u.fmt("the full Lucide set — {d} icons baked at build time", .{names.len}), try u.row(.{ .gap = 4, .wrap = .wrap }, cells));
+/// A few icons from the full Lucide set (src/lucide.zig), each pulled in by name
+/// (`lucide.house`) and rendered via `Ui.iconData`. Only the icons named here
+/// compile into this binary — the other ~1.7k baked decls are dropped by Zig's
+/// lazy analysis, so showcasing the library costs almost nothing. (Iterating
+/// `lucide.Name` + `lucide.get(...)` would pull in the whole set — avoid that
+/// unless you genuinely need every icon.)
+fn lucideExtras(u: *ui.Ui) !Widget {
+    return example(u, "a few from the 1737-icon Lucide set, each compiled in by name", try u.row(.{ .gap = 16 }, &.{
+        u.iconData(.{ .data = zooee.lucide.house, .size = 24, .role = .secondary }),
+        u.iconData(.{ .data = zooee.lucide.star, .size = 24, .role = .secondary }),
+        u.iconData(.{ .data = zooee.lucide.heart, .size = 24, .role = .secondary }),
+        u.iconData(.{ .data = zooee.lucide.bell, .size = 24, .role = .secondary }),
+        u.iconData(.{ .data = zooee.lucide.camera, .size = 24, .role = .secondary }),
+        u.iconData(.{ .data = zooee.lucide.cloud, .size = 24, .role = .secondary }),
+        u.iconData(.{ .data = zooee.lucide.rocket, .size = 24, .role = .secondary }),
+        u.iconData(.{ .data = zooee.lucide.globe, .size = 24, .role = .secondary }),
+    }));
 }
 
 /// Live examples for the Button page (#271): role variants, sizes, disabled.
@@ -351,7 +350,7 @@ const Docs = struct {
             try blocks.append(u.arena, try buttonExamples(u));
         } else if (std.mem.eql(u8, page.name, "Icon")) {
             try blocks.append(u.arena, try iconExamples(u));
-            try blocks.append(u.arena, try lucideGallery(u));
+            try blocks.append(u.arena, try lucideExtras(u));
         } else if (std.mem.eql(u8, page.name, "List")) {
             try blocks.append(u.arena, try listExamples(u, self.list_demo));
         } else if (std.mem.eql(u8, page.name, "Scroll")) {
