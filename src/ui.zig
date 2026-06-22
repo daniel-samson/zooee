@@ -496,8 +496,13 @@ pub const Ui = struct {
             .width = 18,
             .height = 18,
             .corner_radius = 9,
-            .padding = .all(4),
+            // Center the dot in the ring so the border/padding don't shift it off
+            // axis (the engine is border-box: content = size − border − padding).
+            .justify = .center,
+            .align_items = .center,
             .background = self.theme.surface_variant,
+            .border_width = 1,
+            .border_color = if (opts.disabled) self.theme.border else self.theme.accent,
         }, dot);
         return self.controlRow(opts, ring);
     }
