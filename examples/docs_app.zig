@@ -462,6 +462,13 @@ const Docs = struct {
         return self.theme().background; // backdrop matches the theme
     }
 
+    /// The OS flipped light ⇆ dark (System Settings): follow it. The sidebar
+    /// switch still overrides, until the next OS change. Called by the app loop
+    /// (#318) when the platform reports an appearance change.
+    pub fn onAppearanceChange(self: *Docs) void {
+        self.dark = zooee.app.systemPrefersDark();
+    }
+
     /// Lock the resize cursor for the whole divider drag (#123): without this the
     /// pointer outruns the divider's hit rect and the cursor flips back.
     pub fn cursor(self: *Docs) ?zooee.Cursor {

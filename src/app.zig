@@ -1509,8 +1509,14 @@ fn frameOsHooks(comptime Model: type, window: anytype, model: *Model, gpa: std.m
         g_copy_pending = false;
     }
     // Live OS theme change (#318): the user changed their accent / light-dark in
-    // System Settings → repaint so theme() re-reads the system colors.
-    if (@hasDecl(WindowPlatform, "takeAppearanceChanged") and WindowPlatform.takeAppearanceChanged()) cmd = .redraw;
+    // System Settings → repaint so theme() re-reads the system colors. Models
+    // that cache OS-derived state (e.g. a light/dark flag behind a manual
+    // toggle) can resync it in an optional `onAppearanceChange` hook before the
+    // repaint — `theme()` alone can't, since it must honor the manual override.
+    if (@hasDecl(WindowPlatform, "takeAppearanceChanged") and WindowPlatform.takeAppearanceChanged()) {
+        if (@hasDecl(Model, "onAppearanceChange")) model.onAppearanceChange();
+        cmd = .redraw;
+    }
     if (@hasDecl(Model, "requestPaste") and @hasDecl(Model, "onPaste")) {
         if (model.requestPaste()) {
             var clip = systemClipboard(window, gpa);
