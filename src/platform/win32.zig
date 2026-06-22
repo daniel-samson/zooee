@@ -174,6 +174,22 @@ pub fn systemAccent() ?style_mod.Color {
     return style_mod.Color.rgb(@intCast((argb >> 16) & 0xFF), @intCast((argb >> 8) & 0xFF), @intCast(argb & 0xFF));
 }
 
+const HKEY_CURRENT_USER: ?*anyopaque = @ptrFromInt(0x80000001);
+const RRF_RT_REG_DWORD: u32 = 0x00000010;
+extern "advapi32" fn RegGetValueW(?*anyopaque, ?[*:0]const u16, ?[*:0]const u16, u32, ?*u32, ?*anyopaque, ?*u32) callconv(WINAPI) i32;
+
+/// Whether Windows is in dark mode — `AppsUseLightTheme == 0` under the
+/// Personalize key (the app/UI appearance, not the taskbar's SystemUsesLight).
+/// Mirrors macOS `prefersDark()` so apps default to the system appearance (#318).
+pub fn prefersDark() bool {
+    var data: u32 = 1; // assume light if the read fails
+    var size: u32 = @sizeOf(u32);
+    const subkey = std.unicode.utf8ToUtf16LeStringLiteral("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
+    const value = std.unicode.utf8ToUtf16LeStringLiteral("AppsUseLightTheme");
+    if (RegGetValueW(HKEY_CURRENT_USER, subkey, value, RRF_RT_REG_DWORD, null, &data, &size) != 0) return false;
+    return data == 0;
+}
+
 var g_theme_changed: bool = false;
 
 /// Consume the "OS theme changed" flag (accent / personalization) so the present

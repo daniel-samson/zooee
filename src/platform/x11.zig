@@ -588,6 +588,98 @@ fn keysymToKey(ks: KeySym) ?core_event.Key {
     };
 }
 
+// --- OS appearance integration (#318): GNOME via gsettings ------------------
+// Mirrors the macOS/Windows hooks so the app loop can re-theme live. Degrades
+// to "light, no accent, no live updates" on non-GNOME desktops (no gsettings).
+const style_mod = @import("../style.zig");
+
+const AppearanceWatcher = struct {
+    started: bool = false,
+    child: ?std.process.Child = null,
+    fd: std.posix.fd_t = -1,
+};
+var g_watcher: AppearanceWatcher = .{};
+
+/// Run `gsettings get org.gnome.desktop.interface <key>`; caller frees the
+/// returned stdout. Null when gsettings is missing or the read fails.
+fn gsettingsGet(key: [:0]const u8) ?[]u8 {
+    const res = std.process.Child.run(.{
+        .allocator = std.heap.page_allocator,
+        .argv = &.{ "gsettings", "get", "org.gnome.desktop.interface", key },
+    }) catch return null;
+    std.heap.page_allocator.free(res.stderr);
+    return res.stdout;
+}
+
+/// Whether the desktop prefers dark — GNOME `color-scheme == 'prefer-dark'`.
+/// Mirrors macOS/Windows `prefersDark()`; false on non-GNOME or when unset.
+pub fn prefersDark() bool {
+    const out = gsettingsGet("color-scheme") orelse return false;
+    defer std.heap.page_allocator.free(out);
+    return std.mem.indexOf(u8, out, "prefer-dark") != null;
+}
+
+/// The desktop accent (GNOME 47+ `accent-color`, a named enum) → sRGB, or null
+/// on older / non-GNOME desktops. Best-effort parity with macOS/Windows accent.
+pub fn systemAccent() ?style_mod.Color {
+    const out = gsettingsGet("accent-color") orelse return null;
+    defer std.heap.page_allocator.free(out);
+    const Named = struct { name: []const u8, r: u8, g: u8, b: u8 };
+    const palette = [_]Named{
+        .{ .name = "blue", .r = 0x35, .g = 0x84, .b = 0xe4 },
+        .{ .name = "teal", .r = 0x21, .g = 0x90, .b = 0xa4 },
+        .{ .name = "green", .r = 0x3a, .g = 0x94, .b = 0x4a },
+        .{ .name = "yellow", .r = 0xc8, .g = 0x88, .b = 0x00 },
+        .{ .name = "orange", .r = 0xed, .g = 0x5b, .b = 0x00 },
+        .{ .name = "red", .r = 0xe6, .g = 0x2d, .b = 0x42 },
+        .{ .name = "pink", .r = 0xd5, .g = 0x61, .b = 0x99 },
+        .{ .name = "purple", .r = 0x91, .g = 0x41, .b = 0xac },
+        .{ .name = "slate", .r = 0x6f, .g = 0x83, .b = 0x96 },
+    };
+    for (palette) |p| if (std.mem.indexOf(u8, out, p.name) != null) return style_mod.Color.rgb(p.r, p.g, p.b);
+    return null;
+}
+
+/// Consume the "OS appearance changed" signal. Lazily starts a single
+/// `gsettings monitor org.gnome.desktop.interface` child and polls its pipe
+/// non-blocking; any output means a key (color-scheme / accent-color) flipped.
+/// The app loop calls this each frame, so no extra fd needs to join the X wait.
+pub fn takeAppearanceChanged() bool {
+    if (!g_watcher.started) {
+        g_watcher.started = true;
+        var child = std.process.Child.init(
+            &.{ "gsettings", "monitor", "org.gnome.desktop.interface" },
+            std.heap.page_allocator,
+        );
+        child.stdin_behavior = .Ignore;
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Ignore;
+        child.spawn() catch {
+            g_watcher.child = null;
+            return false;
+        };
+        g_watcher.child = child;
+        g_watcher.fd = if (child.stdout) |o| o.handle else -1;
+    }
+    if (g_watcher.fd < 0) return false;
+    var pfd = [_]std.posix.pollfd{.{ .fd = g_watcher.fd, .events = std.posix.POLL.IN, .revents = 0 }};
+    const ready = std.posix.poll(&pfd, 0) catch return false;
+    if (ready == 0 or (pfd[0].revents & std.posix.POLL.IN) == 0) return false;
+    var buf: [512]u8 = undefined;
+    const n = std.posix.read(g_watcher.fd, &buf) catch return false;
+    return n > 0; // n==0 is EOF (monitor died) — not a change
+}
+
+/// Stop the gsettings monitor child. Called from Window.destroy so the helper
+/// process doesn't outlive the app.
+fn stopAppearanceWatcher() void {
+    if (g_watcher.child) |*c| {
+        _ = c.kill() catch {};
+        g_watcher.child = null;
+        g_watcher.fd = -1;
+    }
+}
+
 pub const Event = core_event.Event;
 
 pub const Window = struct {
@@ -1189,6 +1281,7 @@ pub const Window = struct {
     }
 
     pub fn destroy(self: *Window) void {
+        stopAppearanceWatcher(); // don't leave the gsettings monitor running
         if (self.gl_ctx) |ctx| {
             _ = glXMakeCurrent(self.display, 0, null);
             glXDestroyContext(self.display, ctx);
