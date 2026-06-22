@@ -262,6 +262,15 @@ pub const List = struct {
     rows: []const ListRow = &.{},
     selected: ?usize = null,
     width: ?f32 = null,
+    /// Inter-row spacing (#330). Defaults to the stock 2px stack.
+    gap: f32 = 2,
+    // Box model (#330) for the list container itself.
+    padding: layout.EdgeInsets = .{},
+    margin: layout.EdgeInsets = .{},
+    background: ?Color = null,
+    corner_radius: f32 = 0,
+    border_width: f32 = 0,
+    border_color: ?Color = null,
 };
 
 /// Scroll viewport (host, #274): a fixed-size box that clips its content and
@@ -277,7 +286,12 @@ pub const ScrollView = struct {
     direction: layout.Direction = .column,
     gap: f32 = 0,
     padding: layout.EdgeInsets = .{},
+    margin: layout.EdgeInsets = .{},
     background: ?Color = null,
+    corner_radius: f32 = 0,
+    /// Box-model border (#330). null `border_color` falls back to the theme border.
+    border_width: f32 = 0,
+    border_color: ?Color = null,
     /// Scroll-target id so the wheel routes here even amid other scroll regions
     /// (#309/#312); read it back in onEvent via app.scrollTarget().
     on_scroll: ?u32 = null,
@@ -295,10 +309,13 @@ pub const Card = struct {
     padding: layout.EdgeInsets = layout.EdgeInsets.all(16),
     width: ?f32 = null,
     height: ?f32 = null,
+    margin: layout.EdgeInsets = .{},
     /// null = the theme surface color (#21).
     background: ?Color = null,
     corner_radius: f32 = 10,
     border_width: f32 = 0,
+    /// null with a non-zero `border_width` falls back to the theme border (#330).
+    border_color: ?Color = null,
     elevation: Elevation = .low,
     children: []const Widget = &.{},
 };
@@ -731,9 +748,16 @@ pub const Ui = struct {
                 }
                 el.* = .{
                     .direction = .column,
-                    .gap = 2 * s,
+                    .gap = l.gap * s,
                     .width = if (l.width) |lw| lw * s else null,
+                    .padding = scaleInsets(l.padding, s),
+                    .margin = scaleInsets(l.margin, s),
                     .children = rows,
+                    .rect_style = .{
+                        .background = l.background,
+                        .corner_radius = if (l.corner_radius > 0) .all(l.corner_radius * s) else .none,
+                        .border = borderFrom(l.border_width, l.border_color, self.theme, s),
+                    },
                 };
             },
             .scroll => |sv| {
@@ -743,6 +767,7 @@ pub const Ui = struct {
                     .direction = sv.direction,
                     .gap = sv.gap * s,
                     .padding = scaleInsets(sv.padding, s),
+                    .margin = scaleInsets(sv.margin, s),
                     .width = if (sv.width) |x| x * s else null,
                     .height = if (sv.height) |x| x * s else null,
                     .scroll = true,
@@ -750,7 +775,11 @@ pub const Ui = struct {
                     .scroll_y = sv.scroll_y * s,
                     .on_scroll = sv.on_scroll,
                     .children = kids,
-                    .rect_style = .{ .background = sv.background },
+                    .rect_style = .{
+                        .background = sv.background,
+                        .corner_radius = if (sv.corner_radius > 0) .all(sv.corner_radius * s) else .none,
+                        .border = borderFrom(sv.border_width, sv.border_color, self.theme, s),
+                    },
                 };
             },
             .card => |cd| {
@@ -767,13 +796,14 @@ pub const Ui = struct {
                     .direction = cd.direction,
                     .gap = cd.gap * s,
                     .padding = scaleInsets(cd.padding, s),
+                    .margin = scaleInsets(cd.margin, s),
                     .width = if (cd.width) |x| x * s else null,
                     .height = if (cd.height) |x| x * s else null,
                     .children = kids,
                     .rect_style = .{
                         .background = cd.background orelse self.theme.surface,
                         .corner_radius = .all(cd.corner_radius * s),
-                        .border = if (cd.border_width > 0) .all(cd.border_width * s, self.theme.border) else .none,
+                        .border = borderFrom(cd.border_width, cd.border_color, self.theme, s),
                         .shadow = shadow,
                     },
                 };
@@ -1101,6 +1131,32 @@ test "lower: scroll view is a clamped viewport with offset+children (#274)" {
     try testing.expectEqual(@as(?f32, 200), el.width);
     try testing.expectEqual(@as(?f32, 150), el.height);
     try testing.expectEqual(@as(usize, 2), el.children.len);
+
+    // Box model (#324): margin + corner_radius + border.
+    const styled = try ui.lower(try ui.scroll(.{ .margin = .all(6), .corner_radius = 8, .border_width = 1 }, &.{}));
+    try testing.expectEqual(@as(f32, 6), styled.margin.left);
+    try testing.expectEqual(@as(f32, 8), styled.rect_style.corner_radius.top_left);
+    try testing.expect(!styled.rect_style.border.isNone());
+}
+
+test "lower: list container carries the box model + gap (#325)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ui = Ui.init(arena.allocator());
+    const el = try ui.lower(try ui.list(.{
+        .gap = 10,
+        .padding = .all(4),
+        .margin = .{ .top = 2 },
+        .background = Color.rgb(5, 5, 5),
+        .corner_radius = 12,
+        .border_width = 1,
+    }, &.{.{ .label = "X", .on_click = 1 }}));
+    try testing.expectEqual(@as(f32, 10), el.gap);
+    try testing.expectEqual(@as(f32, 4), el.padding.left);
+    try testing.expectEqual(@as(f32, 2), el.margin.top);
+    try testing.expect(el.rect_style.background != null);
+    try testing.expectEqual(@as(f32, 12), el.rect_style.corner_radius.top_left);
+    try testing.expect(!el.rect_style.border.isNone());
 }
 
 test "lower: card has surface fill, rounded corners, border + elevation shadow (#275)" {
@@ -1122,6 +1178,11 @@ test "lower: card has surface fill, rounded corners, border + elevation shadow (
     // elevation .none → no shadow.
     const flat = try ui.lower(try ui.card(.{ .elevation = .none }, &.{}));
     try testing.expect(flat.rect_style.shadow == null);
+
+    // Box model (#323): margin + explicit border_color.
+    const styled = try ui.lower(try ui.card(.{ .margin = .all(8), .border_width = 2, .border_color = Color.rgb(9, 9, 9) }, &.{}));
+    try testing.expectEqual(@as(f32, 8), styled.margin.top);
+    try testing.expectEqual(Color.rgb(9, 9, 9), styled.rect_style.border.top.color);
 }
 
 test "lower: selection controls are clickable and reflect checked state (#277)" {
