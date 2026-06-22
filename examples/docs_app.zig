@@ -12,6 +12,11 @@ const Color = zooee.Color;
 
 const force_software = @import("build_options").force_software;
 
+/// Backing storage for the native menu bar (#319); filled by Docs.menuBar.
+/// On macOS the first menu becomes the bold app menu, so Edit comes second.
+var menu_bar_buf: [2]zooee.menu.Item = undefined;
+const app_menu_items = [_]zooee.menu.Item{.{ .label = "About Zooee Docs", .enabled = false }};
+
 const Page = struct { name: []const u8, body: []const u8, icon: ui.IconName };
 const pages = [_]Page{
     .{ .name = "Welcome", .icon = .sparkles, .body = "Welcome to zooee — a native, cross-platform UI in Zig.\n\nThis app is the component gallery: pick an item on the left to see it, with variants and examples. The look adapts per OS (macOS / WinUI / Linux) and is still being tuned." },
@@ -477,6 +482,18 @@ const Docs = struct {
 
     pub fn background(self: *Docs) Color {
         return self.theme().background; // backdrop matches the theme
+    }
+
+    /// Native menu bar (#319): a standard Edit menu (Cut/Copy/Paste/Select All).
+    /// The framework owns these commands and routes them to the focused field /
+    /// selection, so there's no onMenuCommand to write.
+    pub fn menuBar(self: *Docs) []const zooee.menu.Item {
+        _ = self;
+        menu_bar_buf = .{
+            .{ .label = "Zooee Docs", .submenu = &app_menu_items },
+            .{ .label = "Edit", .submenu = zooee.app.editMenuItems() },
+        };
+        return &menu_bar_buf;
     }
 
     /// The OS flipped light ⇆ dark (System Settings): follow it. The sidebar

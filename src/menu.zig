@@ -39,6 +39,20 @@ pub const Item = struct {
 /// A separator entry (convenience).
 pub const separator: Item = .{ .separator = true };
 
+/// Reserved command ids for the framework's built-in Edit actions (#319). The
+/// app loop intercepts these (acting on the focused field / text selection)
+/// rather than passing them to `onMenuCommand`, so apps can drop the standard
+/// Edit menu / context menu in for free. App ids must avoid this range.
+pub const edit_cut: u32 = 0xED170001;
+pub const edit_copy: u32 = 0xED170002;
+pub const edit_paste: u32 = 0xED170003;
+pub const edit_select_all: u32 = 0xED170004;
+
+/// Whether `id` is one of the reserved framework Edit commands.
+pub fn isEditCommand(id: u32) bool {
+    return id >= edit_cut and id <= edit_select_all;
+}
+
 /// Total selectable (non-separator, non-submenu-parent) items in a tree,
 /// recursing into submenus. Useful for tests and sanity checks.
 pub fn countSelectable(items: []const Item) usize {

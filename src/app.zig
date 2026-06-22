@@ -29,6 +29,7 @@ const style_mod = @import("style.zig");
 const cursor_mod = @import("cursor.zig");
 const ui_mod = @import("ui.zig");
 const dialog = @import("dialog.zig");
+const menu_mod = @import("menu.zig");
 
 /// Build the frame's Element tree from the Model (#4): prefer the widget-layer
 /// `viewUi(ui) Widget` hook (lowered to Elements via `Ui`), else the raw
@@ -401,7 +402,7 @@ pub fn runWindow(
             }
             // Native right-click context menu (#129): pops at the click and
             // routes the choice through the model's onMenuCommand.
-            if (handleContextMenu(Model, window, model, ev) == .redraw) dirty = true;
+            if (handleContextMenu(Model, Msg, window, model, placements, ev) == .redraw) dirty = true;
         }
         // Native menu-bar selections + file-open requests (#129).
         if (frameOsHooks(Model, Msg, window, model, gpa, io) == .redraw) dirty = true;
@@ -510,7 +511,7 @@ fn runWindowGl(
             }
             // Native right-click context menu (#129): pops at the click and
             // routes the choice through the model's onMenuCommand.
-            if (handleContextMenu(Model, window, model, ev) == .redraw) dirty = true;
+            if (handleContextMenu(Model, Msg, window, model, placements, ev) == .redraw) dirty = true;
         }
         // Native menu-bar selections + file-open requests (#129).
         if (frameOsHooks(Model, Msg, window, model, gpa, io) == .redraw) dirty = true;
@@ -683,7 +684,7 @@ fn runWindowMetal(
             if (cmd == .redraw and isPointerEvent(ev)) pointer_drag = true;
             // Native right-click context menu (#129): pops at the click and
             // routes the choice through the model's onMenuCommand.
-            if (handleContextMenu(Model, window, model, ev) == .redraw) dirty = true;
+            if (handleContextMenu(Model, Msg, window, model, placements, ev) == .redraw) dirty = true;
         }
         // Native menu-bar selections + file-open requests (#129).
         if (frameOsHooks(Model, Msg, window, model, gpa, io) == .redraw) dirty = true;
@@ -814,7 +815,7 @@ fn runWindowD3d(
             }
             // Native right-click context menu (#129): pops at the click and
             // routes the choice through the model's onMenuCommand.
-            if (handleContextMenu(Model, window, model, ev) == .redraw) dirty = true;
+            if (handleContextMenu(Model, Msg, window, model, placements, ev) == .redraw) dirty = true;
         }
         // Native menu-bar selections + file-open requests (#129).
         if (frameOsHooks(Model, Msg, window, model, gpa, io) == .redraw) dirty = true;
@@ -1001,6 +1002,12 @@ var g_copy_len: usize = 0;
 /// Pending paste into a focused text field (#319): the clipboard read happens in
 /// frameOsHooks (which has the window + allocator), then inserts at the caret.
 var g_field_paste: ?struct { id: u32, on_change: ?u32 } = null;
+/// A text field targeted by an Edit command (#319): its id + on_change message.
+const EditTarget = struct { id: u32, on_change: ?u32 };
+/// The currently-focused editable field, refreshed each frame by
+/// renderTextFields. Lets the menu-bar Edit commands (which run without
+/// placements) target it. Null when no field is focused. (#319)
+var g_focused_edit: ?EditTarget = null;
 /// Diagnostic: log the selection→clipboard path (ZOOEE_CLIPLOG).
 pub var clipboard_debug: bool = false;
 
@@ -1146,9 +1153,16 @@ fn editKey(comptime Model: type, comptime Msg: type, model: *Model, el: *const l
 /// this overlays the selection highlight and a blink-less caret. Loops call it
 /// alongside renderTextSelection.
 pub fn renderTextFields(b: backend_mod.Backend, placements: []const layout_mod.Placement) void {
-    const fp = focusedPlacement(placements) orelse return;
+    const fp = focusedPlacement(placements) orelse {
+        g_focused_edit = null;
+        return;
+    };
     const el = fp.element;
-    const id = el.edit_field orelse return;
+    const id = el.edit_field orelse {
+        g_focused_edit = null;
+        return;
+    };
+    g_focused_edit = .{ .id = id, .on_change = el.edit_on_change };
     const te = edit_state.get(id) orelse return;
     const inner = layout_mod.contentBoxOf(el, fp.rect);
     if (te.selection()) |sel| {
@@ -1626,18 +1640,124 @@ fn dispatch(
     };
 }
 
-/// Native context menu (#129): on a secondary (right) click, if the model
-/// exposes `contextMenu()`, pop the OS-native menu at the click and route the
-/// chosen item id back through `onMenuCommand(id)`. No-ops for models without
-/// the hook, and on X11 (no native menu → popupMenu returns null). Generic over
-/// the window type (each platform Window exposes `popupMenu`).
-fn handleContextMenu(comptime Model: type, window: anytype, model: *Model, ev: event_mod.Event) Command {
-    if (!@hasDecl(Model, "contextMenu")) return .none;
+/// Perform a framework Edit command (#319) on `target` (a focused / clicked text
+/// field) or, when `target` is null, the read-only text selection. Returns
+/// `.redraw`. Mirrors the keyboard Cut/Copy/Paste/Select-All paths.
+fn doEditCommand(comptime Model: type, comptime Msg: type, model: *Model, id: u32, target: ?EditTarget) Command {
+    switch (id) {
+        menu_mod.edit_copy => {
+            if (target) |tg| {
+                if (edit_state.get(tg.id)) |te| if (te.selection() != null) queueClipboardWrite(te.selectedText());
+            } else if (g_textsel != null) {
+                g_copy_request = true; // render pass fills the buffer from the selection
+            }
+        },
+        menu_mod.edit_cut => {
+            if (target) |tg| if (edit_state.get(tg.id)) |te| if (te.selection() != null) {
+                queueClipboardWrite(te.selectedText());
+                te.deleteSelection(edit_state.allocator());
+                if (tg.on_change) |m| _ = model.update(@as(Msg, @enumFromInt(m)));
+            };
+        },
+        menu_mod.edit_paste => {
+            if (target) |tg| g_field_paste = .{ .id = tg.id, .on_change = tg.on_change };
+        },
+        menu_mod.edit_select_all => {
+            if (target) |tg| if (edit_state.get(tg.id)) |te| te.selectAll();
+        },
+        else => return .none,
+    }
+    return .redraw;
+}
+
+var g_edit_menu_buf: [5]menu_mod.Item = undefined;
+
+/// Build the context-aware Edit context menu (#319). `editable` → a text field
+/// (Cut/Paste/Select-All offered); otherwise read-only (just Copy). `has_sel`
+/// greys out Cut/Copy when there's nothing selected.
+fn buildEditMenu(editable: bool, has_sel: bool) []const menu_mod.Item {
+    var n: usize = 0;
+    if (editable) {
+        g_edit_menu_buf[n] = .{ .label = "Cut", .id = menu_mod.edit_cut, .accelerator = "Cmd+X", .enabled = has_sel };
+        n += 1;
+        g_edit_menu_buf[n] = .{ .label = "Copy", .id = menu_mod.edit_copy, .accelerator = "Cmd+C", .enabled = has_sel };
+        n += 1;
+        g_edit_menu_buf[n] = .{ .label = "Paste", .id = menu_mod.edit_paste, .accelerator = "Cmd+V" };
+        n += 1;
+        g_edit_menu_buf[n] = menu_mod.separator;
+        n += 1;
+        g_edit_menu_buf[n] = .{ .label = "Select All", .id = menu_mod.edit_select_all, .accelerator = "Cmd+A" };
+        n += 1;
+    } else {
+        g_edit_menu_buf[n] = .{ .label = "Copy", .id = menu_mod.edit_copy, .accelerator = "Cmd+C", .enabled = has_sel };
+        n += 1;
+    }
+    return g_edit_menu_buf[0..n];
+}
+
+var g_edit_bar_buf: [5]menu_mod.Item = undefined;
+
+/// The standard Edit submenu items (#319) for an app's `menuBar()` — e.g.
+/// `.{ .label = "Edit", .submenu = zooee.app.editMenuItems() }`. The framework
+/// handles these ids itself, acting on the focused field / selection.
+pub fn editMenuItems() []const menu_mod.Item {
+    g_edit_bar_buf = .{
+        .{ .label = "Cut", .id = menu_mod.edit_cut, .accelerator = "Cmd+X" },
+        .{ .label = "Copy", .id = menu_mod.edit_copy, .accelerator = "Cmd+C" },
+        .{ .label = "Paste", .id = menu_mod.edit_paste, .accelerator = "Cmd+V" },
+        menu_mod.separator,
+        .{ .label = "Select All", .id = menu_mod.edit_select_all, .accelerator = "Cmd+A" },
+    };
+    return &g_edit_bar_buf;
+}
+
+/// The editable field whose rect contains `p` (topmost), or null. (#319)
+fn editFieldAt(placements: []const layout_mod.Placement, p: geometry.Point) ?EditTarget {
+    var found: ?EditTarget = null;
+    for (placements) |pl| {
+        if (pl.element.edit_field) |id| {
+            if (pl.rect.contains(p)) found = .{ .id = id, .on_change = pl.element.edit_on_change };
+        }
+    }
+    return found;
+}
+
+/// Native context menu (#129/#319): on a secondary (right) click, show the
+/// framework Edit menu when the click is on a text field or selectable text
+/// (handled by the framework), otherwise the model's `contextMenu()`. Edit
+/// command ids are intercepted; everything else routes to `onMenuCommand`.
+fn handleContextMenu(comptime Model: type, comptime Msg: type, window: anytype, model: *Model, placements: []const layout_mod.Placement, ev: event_mod.Event) Command {
     if (ev != .pointer_down) return .none;
     const p = ev.pointer_down;
     if (!p.buttons.secondary) return .none;
+
+    // Framework Edit menu on a text field / read-only selection.
+    const field = editFieldAt(placements, p.position);
+    const on_text = field != null or g_textsel != null or selectableAt(placements, p.position) != null;
+    if (on_text) {
+        // Right-click focuses the field (browser parity) so its caret/selection
+        // render and the menu's edits are visible.
+        if (field != null) {
+            if (focusIndexAt(placements, p.position)) |fi| {
+                changeFocus(Model, Msg, model, placements, fi);
+                g_focus_visible = false;
+            }
+        }
+        const has_sel = if (field) |f|
+            (if (edit_state.get(f.id)) |te| te.selection() != null else false)
+        else
+            g_textsel != null;
+        const items = buildEditMenu(field != null, has_sel);
+        const chosen = window.popupMenu(items, p.position.x, p.position.y) orelse return .none;
+        if (menu_mod.isEditCommand(chosen)) return doEditCommand(Model, Msg, model, chosen, field);
+        return .none;
+    }
+
+    // Otherwise the app's own context menu.
+    if (!@hasDecl(Model, "contextMenu")) return .none;
     const items = model.contextMenu() orelse return .none;
     const chosen = window.popupMenu(items, p.position.x, p.position.y) orelse return .none;
+    if (menu_mod.isEditCommand(chosen)) return doEditCommand(Model, Msg, model, chosen, g_focused_edit);
     if (@hasDecl(Model, "onMenuCommand")) return model.onMenuCommand(chosen);
     return .none;
 }
@@ -1672,7 +1792,13 @@ fn frameOsHooks(comptime Model: type, comptime Msg: type, window: anytype, model
     }
     if (@hasDecl(Model, "menuBar")) {
         if (window.takeMenuCommand()) |id| {
-            if (model.onMenuCommand(id) == .redraw) cmd = .redraw;
+            // Framework Edit commands act on the focused field / selection (#319);
+            // everything else routes to the model.
+            if (menu_mod.isEditCommand(id)) {
+                if (doEditCommand(Model, Msg, model, id, g_focused_edit) == .redraw) cmd = .redraw;
+            } else if (@hasDecl(Model, "onMenuCommand")) {
+                if (model.onMenuCommand(id) == .redraw) cmd = .redraw;
+            }
         }
     }
     if (@hasDecl(Model, "takeOpenRequest") and @hasDecl(Model, "onFileChosen")) {
