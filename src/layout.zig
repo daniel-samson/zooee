@@ -709,6 +709,38 @@ fn measure(b: Backend, el: *const Element, avail_w: ?f32) Size {
         } else {
             content = b.measureText(t, el.text_style);
         }
+    } else if (el.wrap == .wrap and el.children.len > 0 and (el.width orelse avail_w) != null) {
+        // Wrapping container with a known main extent: break children into lines
+        // exactly as placeWrapped does, so the reported cross-axis size accounts
+        // for every line. Without this a wrapping row measures as a single line
+        // and its parent under-sizes — later lines spill outside the box (#308).
+        const dir = el.direction;
+        const own_main = (el.width orelse avail_w).?;
+        const avail_main = own_main - (if (dir == .row) chrome_w else chrome_h);
+        const child_avail: ?f32 = if (dir == .column) avail_main else null;
+        var max_line_main: f32 = 0;
+        var total_cross: f32 = 0;
+        var i: usize = 0;
+        var first_line = true;
+        while (i < el.children.len) {
+            var line_main: f32 = 0;
+            var line_cross: f32 = 0;
+            var j = i;
+            while (j < el.children.len) : (j += 1) {
+                const cs = measure(b, el.children[j], child_avail);
+                const cm = mainOf(dir, cs) + marginMain(dir, el.children[j].margin);
+                const add = cm + (if (j > i) el.gap else 0);
+                if (j > i and line_main + add > avail_main) break;
+                line_main += add;
+                line_cross = @max(line_cross, crossOf(dir, cs) + marginCross(dir, el.children[j].margin));
+            }
+            max_line_main = @max(max_line_main, line_main);
+            if (!first_line) total_cross += el.gap;
+            total_cross += line_cross;
+            first_line = false;
+            i = j;
+        }
+        content = sizeFrom(dir, max_line_main, total_cross);
     } else if (el.direction == .row and (el.width orelse avail_w) != null) {
         // Row with a known width: resolve each child's main-axis width (incl.
         // grow), then measure its height AT that width, so a child whose content
@@ -1297,6 +1329,30 @@ test "overflow: flex-wrap bounds the main-axis scroll (content can't pan off) (#
     try b.endFrame();
 
     try testing.expectEqual(red, rb.pixelAt(5, 5)); // first cell still at top-left
+}
+
+test "measure: a wrapping row reports the stacked height of every line, not one (#308)" {
+    var rb = raster.RasterBackend.init(testing.allocator);
+    defer rb.deinit();
+    const b = rb.interface();
+
+    // Six 40px cells in a 100px-wide wrapping row → 2 fit per line → 3 lines.
+    // Before the fix, measure() treated the row as a single line and reported
+    // height 20, so a parent under-sized and the lower lines spilled out.
+    const cell: Element = .{ .width = 40, .height = 20 };
+    const row: Element = .{
+        .width = 100,
+        .direction = .row,
+        .wrap = .wrap,
+        .children = &.{ &cell, &cell, &cell, &cell, &cell, &cell },
+    };
+    const s = measure(b, &row, null);
+    try testing.expectEqual(@as(f32, 60), s.height); // 3 lines × 20px, not 20
+
+    // And a parent that inherits its width wraps the same way: a height-less
+    // column sizes to the wrapped row's full height.
+    const col: Element = .{ .width = 100, .children = &.{&row} };
+    try testing.expectEqual(@as(f32, 60), measure(b, &col, null).height);
 }
 
 test "overflow: a scroll container clips to its padding box, not content box (#309)" {
