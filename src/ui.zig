@@ -133,6 +133,15 @@ pub const Text = struct {
     /// Allow the user to drag-select this text and copy it (#318). Off by
     /// default — opt in on body copy / paragraphs the user may want to lift.
     selectable: bool = false,
+
+    // Box model (#330) — lets text act as a badge/chip/pill (padded, filled,
+    // rounded, bordered). All neutral by default so plain text is unchanged.
+    padding: layout.EdgeInsets = .{},
+    margin: layout.EdgeInsets = .{},
+    background: ?Color = null,
+    corner_radius: f32 = 0,
+    border_width: f32 = 0,
+    border_color: ?Color = null,
 };
 
 /// Editable single-line text field (#319). Browser-like: the framework owns the
@@ -188,6 +197,15 @@ pub const Button = struct {
     /// hover/press/focus arrives with the framework's InteractionState, #5).
     disabled: bool = false,
     on_click: ?u32 = null,
+
+    // Box model (#330), layered over the size/role defaults. `padding` null = the
+    // size preset; `background` null = the role fill; `border_color` null = theme.
+    margin: layout.EdgeInsets = .{},
+    padding: ?layout.EdgeInsets = null,
+    background: ?Color = null,
+    corner_radius: f32 = 6,
+    border_width: f32 = 0,
+    border_color: ?Color = null,
 };
 
 /// Shared options for the selection controls (checkbox / toggle / radio, #277).
@@ -201,6 +219,14 @@ pub const Selection = struct {
     /// Roving-tabindex group (#310): give the radios of one group the same id
     /// (e.g. via `u.nextGroup()`) so they form a single Tab stop with arrow nav.
     tab_group: ?u32 = null,
+
+    // Box model (#330) applied to the control+label row.
+    padding: layout.EdgeInsets = .{},
+    margin: layout.EdgeInsets = .{},
+    background: ?Color = null,
+    corner_radius: f32 = 0,
+    border_width: f32 = 0,
+    border_color: ?Color = null,
 };
 
 fn buttonPad(sz: ButtonSize) struct { x: f32, y: f32 } {
@@ -229,6 +255,8 @@ pub const Icon = struct {
     size: f32 = 16,
     role: Role = .normal,
     disabled: bool = false,
+    /// Box-model margin (#330) — outer spacing around the icon's size box.
+    margin: layout.EdgeInsets = .{},
 };
 
 /// Like `Icon`, but carries already-baked geometry rather than a name from the
@@ -239,6 +267,8 @@ pub const IconRaw = struct {
     size: f32 = 16,
     role: Role = .normal,
     disabled: bool = false,
+    /// Box-model margin (#330) — outer spacing around the icon's size box.
+    margin: layout.EdgeInsets = .{},
 };
 
 /// Selectable list (host, #273): a vertical stack of clickable rows with a
@@ -484,6 +514,12 @@ pub const Ui = struct {
             .on_click = if (opts.disabled) null else opts.on_change,
             .focusable = !opts.disabled, // joins the Tab order (#310)
             .tab_group = opts.tab_group, // optional roving group (radios) (#310)
+            .padding = opts.padding,
+            .margin = opts.margin,
+            .background = opts.background,
+            .corner_radius = opts.corner_radius,
+            .border_width = opts.border_width,
+            .border_color = opts.border_color,
         }, children);
     }
 
@@ -643,10 +679,17 @@ pub const Ui = struct {
                 .text_wrap = if (t.wrap) .wrap else .nowrap,
                 .text_selectable = t.selectable,
                 .cursor = if (t.selectable) .text else null, // I-beam affordance (#318)
+                .padding = scaleInsets(t.padding, s),
+                .margin = scaleInsets(t.margin, s),
                 .text_style = .{
                     .size = (t.size orelse variantSize(t.variant)) * s,
                     .bold = t.bold orelse variantBold(t.variant),
                     .color = roleTextColor(self.theme, t.role),
+                },
+                .rect_style = .{
+                    .background = t.background,
+                    .corner_radius = if (t.corner_radius > 0) .all(t.corner_radius * s) else .none,
+                    .border = borderFrom(t.border_width, t.border_color, self.theme, s),
                 },
             },
             .text_input => |ti| {
@@ -688,19 +731,27 @@ pub const Ui = struct {
                     .on_click = if (bt.disabled) null else bt.on_click,
                     .focusable = !bt.disabled, // joins the Tab order (#310)
                     .cursor = if (bt.disabled) null else .pointer,
-                    .padding = .symmetric(pad.x * s, pad.y * s),
+                    .padding = if (bt.padding) |p| scaleInsets(p, s) else .symmetric(pad.x * s, pad.y * s),
+                    .margin = scaleInsets(bt.margin, s),
                     .text_style = .{
                         .size = buttonTextSize(bt.size) * s,
                         .color = if (bt.disabled) self.theme.text_muted else onRoleFill(self.theme, bt.role),
                     },
                     .rect_style = .{
-                        .background = if (bt.disabled) self.theme.surface_variant else roleFill(self.theme, bt.role),
-                        .corner_radius = .all(6 * s),
+                        .background = if (bt.disabled) self.theme.surface_variant else (bt.background orelse roleFill(self.theme, bt.role)),
+                        .corner_radius = if (bt.corner_radius > 0) .all(bt.corner_radius * s) else .none,
+                        .border = borderFrom(bt.border_width, bt.border_color, self.theme, s),
                     },
                 };
             },
-            .icon => |ic| try self.lowerIcon(el, s, gen_icons.get(ic.name), ic.size, ic.role, ic.disabled),
-            .icon_data => |ic| try self.lowerIcon(el, s, ic.data, ic.size, ic.role, ic.disabled),
+            .icon => |ic| {
+                try self.lowerIcon(el, s, gen_icons.get(ic.name), ic.size, ic.role, ic.disabled);
+                el.margin = scaleInsets(ic.margin, s);
+            },
+            .icon_data => |ic| {
+                try self.lowerIcon(el, s, ic.data, ic.size, ic.role, ic.disabled);
+                el.margin = scaleInsets(ic.margin, s);
+            },
             .list => |l| {
                 // One roving-tabindex group for the whole list (#310/#16): the
                 // list is a single Tab stop, arrows move between its rows.
@@ -1026,6 +1077,47 @@ test "lower: button size scales padding/text; disabled drops click+cursor (#271)
     const off = try ui.lower(ui.button(.{ .label = "Nope", .disabled = true, .on_click = 3 }));
     try testing.expectEqual(@as(?u32, null), off.on_click);
     try testing.expectEqual(@as(?@import("cursor.zig").Cursor, null), off.cursor);
+}
+
+test "lower: box model on Button / Selection / Text / Icon (#326 #327 #328 #329)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ui = Ui.init(arena.allocator());
+
+    // Button (#326): margin + padding/background/border overrides over role/size.
+    const btn = try ui.lower(ui.button(.{
+        .label = "Go",
+        .on_click = 1,
+        .margin = .all(3),
+        .padding = .all(20),
+        .background = Color.rgb(1, 1, 1),
+        .border_width = 1,
+    }));
+    try testing.expectEqual(@as(f32, 3), btn.margin.top);
+    try testing.expectEqual(@as(f32, 20), btn.padding.left); // override, not the size preset
+    try testing.expectEqual(Color.rgb(1, 1, 1), btn.rect_style.background.?);
+    try testing.expect(!btn.rect_style.border.isNone());
+
+    // Selection (#327): the control row carries the box model.
+    const sel = try ui.lower(try ui.checkbox(.{ .label = "A", .on_change = 2, .margin = .all(5), .background = Color.rgb(2, 2, 2), .corner_radius = 8 }));
+    try testing.expectEqual(@as(f32, 5), sel.margin.top);
+    try testing.expect(sel.rect_style.background != null);
+    try testing.expectEqual(@as(f32, 8), sel.rect_style.corner_radius.top_left);
+
+    // Text (#328): badge/chip surface; plain text stays neutral.
+    const badge = try ui.lower(ui.text("NEW", .{ .padding = .all(4), .margin = .{ .right = 6 }, .background = Color.rgb(3, 3, 3), .corner_radius = 4, .border_width = 1 }));
+    try testing.expectEqual(@as(f32, 4), badge.padding.left);
+    try testing.expectEqual(@as(f32, 6), badge.margin.right);
+    try testing.expect(badge.rect_style.background != null);
+    try testing.expect(!badge.rect_style.border.isNone());
+    const plain = try ui.lower(ui.text("hi", .{}));
+    try testing.expect(plain.rect_style.background == null);
+    try testing.expectEqual(@as(f32, 0), plain.padding.left);
+
+    // Icon (#329): margin around the size box.
+    const ic = try ui.lower(ui.icon(.{ .name = .plus, .size = 16, .margin = .all(7) }));
+    try testing.expectEqual(@as(f32, 7), ic.margin.top);
+    try testing.expectEqual(@as(?f32, 16), ic.width); // size box unchanged
 }
 
 test "generated icon: a relative-moveto subpath after another element is positioned absolutely (#272)" {
