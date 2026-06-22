@@ -309,7 +309,9 @@ pub fn Driver(comptime Model: type, comptime Msg: type) type {
         pub fn rightClick(self: *Self, x: f32, y: f32) !Command {
             const ev = Event{ .pointer_down = .{ .position = .{ .x = x, .y = y }, .buttons = .{ .secondary = true } } };
             _ = app_mod.dispatchEvent(Model, Msg, self.model, ev, self.placements());
-            const cmd = app_mod.handleContextMenu(Model, Msg, &self.fake_window, self.model, self.placements(), ev);
+            // io = null + FakeWindow (no has_popup_surface) keeps the headless
+            // path on the in-window overlay (#333).
+            const cmd = app_mod.handleContextMenu(Model, Msg, &self.fake_window, self.model, self.gpa, null, self.placements(), ev);
             self.last_command = cmd;
             if (cmd == .redraw) try self.relayout();
             return cmd;
