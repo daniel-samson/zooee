@@ -537,7 +537,6 @@ const XSetWindowAttributes = extern struct {
 extern "X11" fn XCreateColormap(*Display, Window_, ?*Visual, c_int) Colormap;
 extern "X11" fn XFreeColormap(*Display, Colormap) c_int;
 extern "X11" fn XMatchVisualInfo(*Display, c_int, c_int, c_int, *XVisualInfo) c_int;
-extern "X11" fn XQueryExtension(*Display, [*:0]const u8, *c_int, *c_int, *c_int) Bool;
 const TrueColor: c_int = 4;
 extern "X11" fn XCreateWindow(*Display, Window_, c_int, c_int, c_uint, c_uint, c_uint, c_int, c_uint, ?*Visual, c_ulong, *XSetWindowAttributes) Window_;
 extern "X11" fn XSync(*Display, Bool) c_int;
