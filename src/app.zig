@@ -408,7 +408,7 @@ pub fn runWindow(
             }
             // Native right-click context menu (#129): pops at the click and
             // routes the choice through the model's onMenuCommand.
-            if (handleContextMenu(Model, Msg, window, model, placements, ev) == .redraw) dirty = true;
+            if (handleContextMenu(Model, Msg, window, model, gpa, io, placements, ev) == .redraw) dirty = true;
         }
         // Native menu-bar selections + file-open requests (#129).
         if (frameOsHooks(Model, Msg, window, model, gpa, io) == .redraw) dirty = true;
@@ -518,7 +518,7 @@ fn runWindowGl(
             }
             // Native right-click context menu (#129): pops at the click and
             // routes the choice through the model's onMenuCommand.
-            if (handleContextMenu(Model, Msg, window, model, placements, ev) == .redraw) dirty = true;
+            if (handleContextMenu(Model, Msg, window, model, gpa, io, placements, ev) == .redraw) dirty = true;
         }
         // Native menu-bar selections + file-open requests (#129).
         if (frameOsHooks(Model, Msg, window, model, gpa, io) == .redraw) dirty = true;
@@ -693,7 +693,7 @@ fn runWindowMetal(
             if (cmd == .redraw and isPointerEvent(ev)) pointer_drag = true;
             // Native right-click context menu (#129): pops at the click and
             // routes the choice through the model's onMenuCommand.
-            if (handleContextMenu(Model, Msg, window, model, placements, ev) == .redraw) dirty = true;
+            if (handleContextMenu(Model, Msg, window, model, gpa, io, placements, ev) == .redraw) dirty = true;
         }
         // Native menu-bar selections + file-open requests (#129).
         if (frameOsHooks(Model, Msg, window, model, gpa, io) == .redraw) dirty = true;
@@ -826,7 +826,7 @@ fn runWindowD3d(
             }
             // Native right-click context menu (#129): pops at the click and
             // routes the choice through the model's onMenuCommand.
-            if (handleContextMenu(Model, Msg, window, model, placements, ev) == .redraw) dirty = true;
+            if (handleContextMenu(Model, Msg, window, model, gpa, io, placements, ev) == .redraw) dirty = true;
         }
         // Native menu-bar selections + file-open requests (#129).
         if (frameOsHooks(Model, Msg, window, model, gpa, io) == .redraw) dirty = true;
@@ -1084,14 +1084,14 @@ fn menuItemAt(m: OpenMenu, p: geometry.Point) ?usize {
 /// Draw the open overlay menu (#319): a themed panel with hover highlight,
 /// separators, disabled dimming, and right-aligned accelerators. Records the
 /// panel rect for hit-testing. Called last in the render pass so it's on top.
-pub fn renderMenuOverlay(b: backend_mod.Backend, viewport: geometry.Size) void {
-    const m = &(g_open_menu orelse return);
+/// The panel size (physical px, DPI-scaled) for a menu: widest label (+
+/// accelerator) and the stacked item heights. Pulled out of renderMenuOverlay
+/// (#333) so the popup-surface path can size its window before rendering into it.
+pub fn measureMenu(b: backend_mod.Backend, items: []const menu_mod.Item) geometry.Size {
     const sc = g_scale;
-    const th = g_menu_theme;
-    // Panel size: widest label (+ accelerator) and the stacked item heights.
     var w: f32 = 140 * sc;
     var total: f32 = 12 * sc;
-    for (m.items) |it| {
+    for (items) |it| {
         if (it.separator) {
             total += menu_sep_h * sc;
             continue;
@@ -1101,6 +1101,16 @@ pub fn renderMenuOverlay(b: backend_mod.Backend, viewport: geometry.Size) void {
         if (it.accelerator.len > 0) tw += b.measureText(it.accelerator, .{ .size = (menu_font - 2) * sc }).width + 24 * sc;
         w = @max(w, tw);
     }
+    return .{ .width = w, .height = total };
+}
+
+pub fn renderMenuOverlay(b: backend_mod.Backend, viewport: geometry.Size) void {
+    const m = &(g_open_menu orelse return);
+    const sc = g_scale;
+    const th = g_menu_theme;
+    const size = measureMenu(b, m.items);
+    const w = size.width;
+    const total = size.height;
     // Clamp the panel into the viewport so it doesn't spill off-screen near an
     // edge (#319). Mutating m.x/m.y keeps hit-testing (menuItemAt) in sync.
     if (m.x + w > viewport.width) m.x = @max(0, viewport.width - w);
@@ -2044,11 +2054,65 @@ fn editFieldAt(placements: []const layout_mod.Placement, p: geometry.Point) ?Edi
 /// framework Edit menu when the click is on a text field or selectable text
 /// (handled by the framework), otherwise the model's `contextMenu()`. Edit
 /// command ids are intercepted; everything else routes to `onMenuCommand`.
-pub fn handleContextMenu(comptime Model: type, comptime Msg: type, window: anytype, model: *Model, placements: []const layout_mod.Placement, ev: event_mod.Event) Command {
+/// Run the menu on a real override-redirect popup surface (#333): the platform
+/// gives us a grabbed window, we drive a modal loop here — rendering the menu
+/// with a standalone raster backend and routing its events through the same
+/// `handleOpenMenuEvent`/`renderMenuOverlay`/`menuItemAt` the in-window overlay
+/// uses. Returns `.grab_failed` if the surface couldn't be created/grabbed so
+/// the caller falls back to the overlay; otherwise `.ran` with the Command the
+/// chosen item produced (already dispatched by handleOpenMenuEvent).
+fn runPopupMenu(
+    comptime Model: type,
+    comptime Msg: type,
+    window: anytype,
+    model: *Model,
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    items: []const menu_mod.Item,
+    x: f32,
+    y: f32,
+    target: ?EditTarget,
+) union(enum) { ran: Command, grab_failed } {
+    var raster = raster_mod.RasterBackend.init(gpa);
+    defer raster.deinit();
+    raster.char_width = 8 * g_scale;
+    raster.line_height = 16 * g_scale;
+    raster.clear_color = g_menu_theme.surface; // panel corners blend into the surface
+    _ = system_font.loadInto(gpa, io, &raster);
+    const b = raster.interface();
+
+    const size = measureMenu(b, items);
+    const w: u32 = @intFromFloat(@ceil(size.width));
+    const h: u32 = @intFromFloat(@ceil(size.height));
+    var surf = window.popupSurface(@as(i32, @intFromFloat(x)), @as(i32, @intFromFloat(y)), w, h) orelse return .grab_failed;
+    defer surf.destroy();
+
+    // Reuse the overlay state machine, but at popup-local origin (0,0) — the
+    // surface IS the panel, so renderMenuOverlay/menuItemAt need no changes.
+    g_open_menu = .{ .items = items, .x = 0, .y = 0, .target = target };
+    defer g_open_menu = null;
+    const viewport: geometry.Size = .{ .width = @floatFromInt(w), .height = @floatFromInt(h) };
+
+    var result: Command = .redraw;
+    while (true) {
+        b.beginFrame(viewport) catch {};
+        renderMenuOverlay(b, viewport);
+        b.endFrame() catch {};
+        surf.blit(raster.pixels, raster.width, raster.height);
+        // pumpEvents blocks until input (modal); the rest of the app is frozen
+        // while the menu is up, matching native TrackPopupMenu/NSMenu behavior.
+        for (surf.pumpEvents()) |pev| {
+            if (handleOpenMenuEvent(Model, Msg, model, pev)) |cmd| result = cmd;
+            if (g_open_menu == null) return .{ .ran = result }; // chosen / dismissed
+        }
+    }
+}
+
+pub fn handleContextMenu(comptime Model: type, comptime Msg: type, window: anytype, model: *Model, gpa: std.mem.Allocator, io: ?std.Io, placements: []const layout_mod.Placement, ev: event_mod.Event) Command {
     if (ev != .pointer_down) return .none;
     const p = ev.pointer_down;
     if (!p.buttons.secondary) return .none;
-    // X11 (no native menus) and the test override use the in-window overlay;
+    // X11 (no native menus) and the test override use the framework-drawn menu;
     // mac/Windows pop the OS-native menu synchronously.
     const overlay = force_overlay_menu or !nativeMenus(window);
 
@@ -2069,10 +2133,7 @@ pub fn handleContextMenu(comptime Model: type, comptime Msg: type, window: anyty
         else
             g_textsel != null;
         const items = buildEditMenu(field != null, has_sel);
-        if (overlay) {
-            g_open_menu = .{ .items = items, .x = p.position.x, .y = p.position.y, .target = field };
-            return .redraw;
-        }
+        if (overlay) return openMenu(Model, Msg, window, model, gpa, io, items, p.position.x, p.position.y, field);
         const chosen = window.popupMenu(items, p.position.x, p.position.y) orelse return .none;
         if (menu_mod.isEditCommand(chosen)) return doEditCommand(Model, Msg, model, chosen, field);
         return .none;
@@ -2081,14 +2142,34 @@ pub fn handleContextMenu(comptime Model: type, comptime Msg: type, window: anyty
     // Otherwise the app's own context menu.
     if (!@hasDecl(Model, "contextMenu")) return .none;
     const items = model.contextMenu() orelse return .none;
-    if (overlay) {
-        g_open_menu = .{ .items = items, .x = p.position.x, .y = p.position.y, .target = g_focused_edit };
-        return .redraw;
-    }
+    if (overlay) return openMenu(Model, Msg, window, model, gpa, io, items, p.position.x, p.position.y, g_focused_edit);
     const chosen = window.popupMenu(items, p.position.x, p.position.y) orelse return .none;
     if (menu_mod.isEditCommand(chosen)) return doEditCommand(Model, Msg, model, chosen, g_focused_edit);
     if (@hasDecl(Model, "onMenuCommand")) return model.onMenuCommand(chosen);
     return .none;
+}
+
+/// Open the framework menu: on a popup-surface-capable backend (X11) with an
+/// available io, run it on a real grabbed popup window (#333); otherwise (or on
+/// grab failure, or under the ZOOEE_OVERLAY_MENU / headless test override) fall
+/// back to the in-window overlay via `g_open_menu`.
+fn openMenu(comptime Model: type, comptime Msg: type, window: anytype, model: *Model, gpa: std.mem.Allocator, io: ?std.Io, items: []const menu_mod.Item, x: f32, y: f32, target: ?EditTarget) Command {
+    // comptime-gate on the window type so `window.popupSurface` (X11-only) is
+    // never analyzed for backends without it (#333). runPopupMenu is then only
+    // instantiated for popup-capable windows.
+    const W = @TypeOf(window.*);
+    if (comptime @hasDecl(W, "has_popup_surface") and W.has_popup_surface) {
+        if (!force_overlay_menu) {
+            if (io) |real_io| {
+                switch (runPopupMenu(Model, Msg, window, model, gpa, real_io, items, x, y, target)) {
+                    .ran => |cmd| return cmd,
+                    .grab_failed => {}, // fall through to the in-window overlay
+                }
+            }
+        }
+    }
+    g_open_menu = .{ .items = items, .x = x, .y = y, .target = target };
+    return .redraw;
 }
 
 /// Install the model's native menu bar once at loop start, if it exposes
@@ -2276,6 +2357,24 @@ fn hitMsg(placements: []const layout_mod.Placement, p: geometry.Point, kind: Int
 
 const testing = std.testing;
 const record = @import("backends/record.zig");
+
+test "measureMenu sizes the panel from items + separators (#333)" {
+    g_scale = 1;
+    var rb = raster_mod.RasterBackend.init(testing.allocator);
+    defer rb.deinit();
+    rb.char_width = 8; // no font loaded → measureText = n * char_width (deterministic)
+    const b = rb.interface();
+
+    const items = [_]menu_mod.Item{
+        .{ .label = "Cut", .id = menu_mod.edit_cut, .accelerator = "Cmd+X" },
+        .{ .separator = true },
+        .{ .label = "Paste", .id = menu_mod.edit_paste, .accelerator = "Cmd+V" },
+    };
+    const size = measureMenu(b, &items);
+    // height = 12 pad + 26 (Cut) + 9 (sep) + 26 (Paste) = 73; width floors at 140.
+    try testing.expectEqual(@as(f32, 73), size.height);
+    try testing.expectEqual(@as(f32, 140), size.width);
+}
 
 test "focus ring draws an accent outline around the focused element (#310)" {
     resetFocus();

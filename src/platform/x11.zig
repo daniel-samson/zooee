@@ -246,6 +246,7 @@ extern "X11" fn XDefaultScreen(*Display) c_int;
 extern "X11" fn XRootWindow(*Display, c_int) Window_;
 extern "X11" fn XDefaultVisual(*Display, c_int) ?*Visual;
 extern "X11" fn XDefaultDepth(*Display, c_int) c_int;
+extern "X11" fn XDefaultColormap(*Display, c_int) Colormap;
 extern "X11" fn XWhitePixel(*Display, c_int) c_ulong;
 extern "X11" fn XCreateSimpleWindow(*Display, Window_, c_int, c_int, c_uint, c_uint, c_uint, c_ulong, c_ulong) Window_;
 extern "X11" fn XDestroyWindow(*Display, Window_) c_int;
@@ -308,8 +309,22 @@ extern "X11" fn XSetWMProtocols(*Display, Window_, *Atom, c_int) c_int;
 extern "X11" fn XLookupKeysym(*XKeyEvent, c_int) KeySym;
 extern "X11" fn XLookupString(*XKeyEvent, [*]u8, c_int, ?*KeySym, ?*anyopaque) c_int;
 extern "X11" fn XCreateGC(*Display, Drawable, c_ulong, ?*anyopaque) ?*GC;
+extern "X11" fn XFreeGC(*Display, *GC) c_int;
 extern "X11" fn XCreateImage(*Display, ?*Visual, c_uint, c_int, c_int, [*]u8, c_uint, c_uint, c_int, c_int) ?*XImage;
 extern "X11" fn XPutImage(*Display, Drawable, *GC, *XImage, c_int, c_int, c_int, c_int, c_uint, c_uint) c_int;
+// Pointer/keyboard grabs + coordinate mapping for the override-redirect popup
+// menu surface (#333). A real grab is what makes the menu modal (clicks outside
+// dismiss; the main window gets no input while it's open), the X11/Wayland
+// equivalent of TrackPopupMenu / NSMenu's own modal loop.
+extern "X11" fn XGrabPointer(*Display, Window_, Bool, c_uint, c_int, c_int, Window_, XID, Time) c_int;
+extern "X11" fn XUngrabPointer(*Display, Time) c_int;
+extern "X11" fn XGrabKeyboard(*Display, Window_, Bool, c_int, c_int, Time) c_int;
+extern "X11" fn XUngrabKeyboard(*Display, Time) c_int;
+extern "X11" fn XTranslateCoordinates(*Display, Window_, Window_, c_int, c_int, *c_int, *c_int, *Window_) Bool;
+extern "X11" fn XDisplayWidth(*Display, c_int) c_int;
+extern "X11" fn XDisplayHeight(*Display, c_int) c_int;
+const GrabModeAsync: c_int = 1;
+const GrabSuccess: c_int = 0;
 
 // --- XInput2 (#309): smooth + natural-scroll-aware wheel ---------------------
 // The legacy core button 4/5/6/7 wheel path is not adjusted by libinput's
@@ -540,6 +555,7 @@ const CWBorderPixel: c_ulong = 1 << 3;
 const CWBitGravity: c_ulong = 1 << 4;
 const CWColormap: c_ulong = 1 << 13;
 const CWEventMask: c_ulong = 1 << 11;
+const CWOverrideRedirect: c_ulong = 1 << 9;
 /// bit_gravity: keep existing content anchored top-left on resize (#182), so
 /// growing the window doesn't re-expose/shift what's already painted.
 const NorthWestGravity: c_int = 1;
@@ -809,6 +825,11 @@ pub const Window = struct {
     /// X11 has no toolkit-agnostic native menus, so the framework draws an
     /// in-window overlay menu instead of using popupMenu/setMenuBar (#319).
     pub const native_menus = false;
+    /// …but it CAN host the overlay on a real override-redirect popup window
+    /// with a pointer grab (#333), so the menu escapes the main window bounds
+    /// and is genuinely modal. app.zig drives it via popupSurface(); the
+    /// in-window overlay stays as the grab-failure fallback.
+    pub const has_popup_surface = true;
 
     display: *Display,
     handle: Window_,
@@ -1203,6 +1224,26 @@ pub const Window = struct {
         return null;
     }
 
+    /// Create an override-redirect popup window of `w`×`h` physical px for the
+    /// context menu (#333), anchored at main-window-local `(lx, ly)`. Maps the
+    /// anchor to root coordinates and clamps the panel onto the screen, then
+    /// grabs the pointer so the menu is modal. Returns null if the window or the
+    /// pointer grab fails — the caller then falls back to the in-window overlay.
+    pub fn popupSurface(self: *Window, lx: i32, ly: i32, w: u32, h: u32) ?PopupSurface {
+        const root = XRootWindow(self.display, XDefaultScreen(self.display));
+        // Anchor in root coords (the popup is a child of root, not of us).
+        var gx: c_int = 0;
+        var gy: c_int = 0;
+        var child: Window_ = 0;
+        _ = XTranslateCoordinates(self.display, self.handle, root, lx, ly, &gx, &gy, &child);
+        // Keep the panel on-screen (this replaces the overlay's viewport clamp).
+        const sw = XDisplayWidth(self.display, XDefaultScreen(self.display));
+        const sh = XDisplayHeight(self.display, XDefaultScreen(self.display));
+        if (gx + @as(c_int, @intCast(w)) > sw) gx = @max(0, sw - @as(c_int, @intCast(w)));
+        if (gy + @as(c_int, @intCast(h)) > sh) gy = @max(0, sh - @as(c_int, @intCast(h)));
+        return PopupSurface.create(self, gx, gy, w, h);
+    }
+
     /// Native menu bar (#129): no native X11 menu bar; no-op (apps draw their
     /// own, #17). Present for cross-platform uniformity.
     pub fn setMenuBar(self: *Window, items: []const menu_mod.Item) void {
@@ -1432,6 +1473,48 @@ pub const Window = struct {
         self.gpa.destroy(self);
     }
 
+    /// Serve another app's request to paste the CLIPBOARD selection we own
+    /// (#209): hand over clipboard_text, or refuse with property=None. Factored
+    /// out of pumpEvents so the modal popup-menu loop (#333) can keep clipboard
+    /// serving alive while it blocks on its own surface.
+    fn serveSelectionRequest(self: *Window, req: XSelectionRequestEvent) void {
+        const utf8 = XInternAtom(self.display, "UTF8_STRING", 0);
+        const targets_atom = XInternAtom(self.display, "TARGETS", 0);
+        const timestamp_atom = XInternAtom(self.display, "TIMESTAMP", 0);
+        var prop = req.property;
+        if (self.clipboard_text) |text| {
+            if (req.target == utf8 or req.target == 31) { // XA_STRING=31
+                _ = XChangeProperty(self.display, req.requestor, req.property, req.target, 8, 0, text.ptr, @intCast(text.len));
+            } else if (req.target == targets_atom) {
+                // Advertise the targets a clipboard manager checks for.
+                var list = [_]Atom{ targets_atom, timestamp_atom, utf8, 31 };
+                _ = XChangeProperty(self.display, req.requestor, req.property, 4, 32, 0, @ptrCast(&list), list.len); // XA_ATOM=4
+            } else if (req.target == timestamp_atom) {
+                // ICCCM: report the ownership time as an INTEGER (XA_INTEGER=19).
+                var t: Time = self.clipboard_time;
+                _ = XChangeProperty(self.display, req.requestor, req.property, 19, 32, 0, @ptrCast(&t), 1);
+            } else {
+                prop = 0; // unsupported target → None
+            }
+        } else {
+            prop = 0;
+        }
+        var nev: XEvent = undefined;
+        nev.xselection = .{
+            .type = SelectionNotify,
+            .serial = 0,
+            .send_event = 1,
+            .display = self.display,
+            .requestor = req.requestor,
+            .selection = req.selection,
+            .target = req.target,
+            .property = prop,
+            .time = req.time,
+        };
+        _ = XSendEvent(self.display, req.requestor, 0, 0, &nev);
+        _ = XFlush(self.display);
+    }
+
     pub fn pumpEvents(self: *Window) []const Event {
         self.queue.clearRetainingCapacity();
         _ = self.drop_arena.reset(.retain_capacity); // free last frame's drop paths (#212)
@@ -1579,50 +1662,176 @@ pub const Window = struct {
                         }
                     }
                 },
-                SelectionRequest => {
-                    // Another app is pasting the CLIPBOARD selection we own
-                    // (#209): serve clipboard_text, or refuse with property=None.
-                    const req = ev.xselectionrequest;
-                    const utf8 = XInternAtom(self.display, "UTF8_STRING", 0);
-                    const targets_atom = XInternAtom(self.display, "TARGETS", 0);
-                    const timestamp_atom = XInternAtom(self.display, "TIMESTAMP", 0);
-                    var prop = req.property;
-                    if (self.clipboard_text) |text| {
-                        if (req.target == utf8 or req.target == 31) { // XA_STRING=31
-                            _ = XChangeProperty(self.display, req.requestor, req.property, req.target, 8, 0, text.ptr, @intCast(text.len));
-                        } else if (req.target == targets_atom) {
-                            // Advertise the targets a clipboard manager checks for.
-                            var list = [_]Atom{ targets_atom, timestamp_atom, utf8, 31 };
-                            _ = XChangeProperty(self.display, req.requestor, req.property, 4, 32, 0, @ptrCast(&list), list.len); // XA_ATOM=4
-                        } else if (req.target == timestamp_atom) {
-                            // ICCCM: report the ownership time as an INTEGER (XA_INTEGER=19).
-                            var t: Time = self.clipboard_time;
-                            _ = XChangeProperty(self.display, req.requestor, req.property, 19, 32, 0, @ptrCast(&t), 1);
-                        } else {
-                            prop = 0; // unsupported target → None
-                        }
-                    } else {
-                        prop = 0;
-                    }
-                    var nev: XEvent = undefined;
-                    nev.xselection = .{
-                        .type = SelectionNotify,
-                        .serial = 0,
-                        .send_event = 1,
-                        .display = self.display,
-                        .requestor = req.requestor,
-                        .selection = req.selection,
-                        .target = req.target,
-                        .property = prop,
-                        .time = req.time,
-                    };
-                    _ = XSendEvent(self.display, req.requestor, 0, 0, &nev);
-                    _ = XFlush(self.display);
-                },
+                SelectionRequest => self.serveSelectionRequest(ev.xselectionrequest),
                 else => {},
             }
         }
         return self.queue.items;
+    }
+};
+
+/// A short-lived override-redirect popup window for the context menu (#333):
+/// its own raster surface (XPutImage) + a pointer grab, so the menu escapes the
+/// main window's bounds and is modal. app.zig owns the modal loop and the menu
+/// drawing/hit-testing — this struct only provides the surface, an event pump
+/// (popup-local coords), a blit, and teardown. The platform never calls up into
+/// app.zig; the app↔platform boundary stays one-directional.
+pub const PopupSurface = struct {
+    win: *Window, // for serveSelectionRequest + shared display
+    display: *Display,
+    handle: Window_,
+    gc: *GC,
+    visual: ?*Visual,
+    depth: c_uint,
+    gpa: std.mem.Allocator,
+    bgra: std.ArrayList(u8) = .empty,
+    ximage: ?*XImage = null,
+    img_w: usize = 0,
+    img_h: usize = 0,
+    width: u32,
+    height: u32,
+    queue: std.ArrayList(Event) = .empty,
+    kbd_grabbed: bool = false,
+
+    /// Create + map the popup at root coords `(gx, gy)` and grab the pointer.
+    /// Returns null on window/GC creation or pointer-grab failure (caller falls
+    /// back to the in-window overlay). The visual/depth are inherited from the
+    /// main window so the existing depth-32 ZPixmap blit path applies unchanged.
+    fn create(win: *Window, gx: c_int, gy: c_int, w: u32, h: u32) ?PopupSurface {
+        const screen = XDefaultScreen(win.display);
+        const root = XRootWindow(win.display, screen);
+        // Use the screen's DEFAULT visual/depth/colormap — NOT the main window's
+        // (which may be a GLX visual whose colormap we don't have; creating a
+        // window with a non-default visual and no matching colormap is a
+        // BadMatch and the window never really exists). The raster popup doesn't
+        // need the GL visual anyway.
+        const visual = XDefaultVisual(win.display, screen);
+        const depth: c_uint = @intCast(XDefaultDepth(win.display, screen));
+        var swa: XSetWindowAttributes = .{
+            .override_redirect = 1, // WM leaves it undecorated/unmanaged
+            .background_pixel = XWhitePixel(win.display, screen),
+            .border_pixel = 0,
+            .colormap = XDefaultColormap(win.display, screen),
+            .event_mask = ExposureMask | ButtonPressMask | ButtonReleaseMask | PointerMotionMask | KeyPressMask,
+        };
+        const handle = XCreateWindow(win.display, root, gx, gy, w, h, 0, @intCast(depth), InputOutput, visual, CWOverrideRedirect | CWBackPixel | CWBorderPixel | CWColormap | CWEventMask, &swa);
+        if (handle == 0) return null;
+        const gc = XCreateGC(win.display, handle, 0, null) orelse {
+            _ = XDestroyWindow(win.display, handle);
+            return null;
+        };
+        _ = XMapRaised(win.display, handle);
+        _ = XSync(win.display, 0); // ensure the window is viewable before grabbing
+        // owner_events = False so EVERY pointer event is reported relative to the
+        // popup (grab) window — exactly the popup-local coords menuItemAt wants,
+        // including clicks outside the panel (which dismiss).
+        const ok = XGrabPointer(win.display, handle, 0, @intCast(ButtonPressMask | ButtonReleaseMask | PointerMotionMask), GrabModeAsync, GrabModeAsync, 0, 0, win.last_event_time);
+        if (ok != GrabSuccess) {
+            _ = XFreeGC(win.display, gc);
+            _ = XDestroyWindow(win.display, handle);
+            _ = XFlush(win.display);
+            return null;
+        }
+        // Keyboard grab is best-effort: without it Escape just won't work, but
+        // the menu is still usable (click to choose / click-out to dismiss).
+        const kbd = XGrabKeyboard(win.display, handle, 0, GrabModeAsync, GrabModeAsync, win.last_event_time) == GrabSuccess;
+        _ = XFlush(win.display);
+        return .{
+            .win = win,
+            .display = win.display,
+            .handle = handle,
+            .gc = gc,
+            .visual = visual,
+            .depth = depth,
+            .gpa = win.gpa,
+            .width = w,
+            .height = h,
+            .kbd_grabbed = kbd,
+        };
+    }
+
+    /// Present an RGBA frame to the popup (RGBA→BGRA + XPutImage), mirroring the
+    /// module-level `blit` but on this surface's own GC/XImage.
+    pub fn blit(self: *PopupSurface, rgba: []const u8, width: usize, height: usize) void {
+        std.debug.assert(rgba.len == width * height * 4);
+        self.bgra.resize(self.gpa, rgba.len) catch return;
+        const dst = self.bgra.items;
+        var i: usize = 0;
+        while (i < rgba.len) : (i += 4) {
+            dst[i + 0] = rgba[i + 2];
+            dst[i + 1] = rgba[i + 1];
+            dst[i + 2] = rgba[i + 0];
+            dst[i + 3] = 255;
+        }
+        if (self.ximage == null or self.img_w != width or self.img_h != height) {
+            if (self.ximage) |old| {
+                old.data = null;
+                if (old.f.destroy_image) |di| _ = di(old);
+            }
+            self.ximage = XCreateImage(self.display, self.visual, self.depth, ZPixmap, 0, dst.ptr, @intCast(width), @intCast(height), 32, @intCast(width * 4));
+            self.img_w = width;
+            self.img_h = height;
+        } else {
+            self.ximage.?.data = dst.ptr;
+        }
+        if (self.ximage) |img| {
+            _ = XPutImage(self.display, self.handle, self.gc, img, 0, 0, 0, 0, @intCast(width), @intCast(height));
+            _ = XFlush(self.display);
+        }
+    }
+
+    /// Drain pending events into popup-local core events. Pointer/key events
+    /// reach us via the grab; SelectionRequest (clipboard) is forwarded to the
+    /// main window so a paste from another app doesn't stall while we're modal.
+    pub fn pumpEvents(self: *PopupSurface) []const Event {
+        self.queue.clearRetainingCapacity();
+        while (XPending(self.display) > 0) {
+            var ev: XEvent = undefined;
+            _ = XNextEvent(self.display, &ev);
+            switch (ev.type) {
+                ButtonPress, ButtonRelease => {
+                    const b = ev.xbutton.button;
+                    if (b >= 4 and b <= 7) continue; // ignore wheel while open
+                    self.win.last_event_time = ev.xbutton.time;
+                    const pe: core_event.PointerEvent = .{
+                        .position = .{ .x = @floatFromInt(ev.xbutton.x), .y = @floatFromInt(ev.xbutton.y) },
+                        .buttons = .{ .primary = b == 1, .middle = b == 2, .secondary = b == 3 },
+                        .mods = x11Mods(ev.xbutton.state),
+                    };
+                    self.queue.append(self.gpa, if (ev.type == ButtonPress) .{ .pointer_down = pe } else .{ .pointer_up = pe }) catch {};
+                },
+                MotionNotify => {
+                    self.queue.append(self.gpa, .{ .pointer_move = .{
+                        .position = .{ .x = @floatFromInt(ev.xmotion.x), .y = @floatFromInt(ev.xmotion.y) },
+                        .mods = x11Mods(ev.xmotion.state),
+                    } }) catch {};
+                },
+                KeyPress => {
+                    self.win.last_event_time = ev.xkey.time;
+                    if (keysymToKey(XLookupKeysym(&ev.xkey, 0))) |k| {
+                        self.queue.append(self.gpa, .{ .key_down = .{ .key = k, .mods = x11Mods(ev.xkey.state) } }) catch {};
+                    }
+                },
+                SelectionRequest => self.win.serveSelectionRequest(ev.xselectionrequest),
+                else => {},
+            }
+        }
+        return self.queue.items;
+    }
+
+    /// Ungrab, tear down the window/GC/image, and free buffers.
+    pub fn destroy(self: *PopupSurface) void {
+        if (self.kbd_grabbed) _ = XUngrabKeyboard(self.display, 0); // CurrentTime
+        _ = XUngrabPointer(self.display, 0);
+        if (self.ximage) |img| {
+            img.data = null;
+            if (img.f.destroy_image) |di| _ = di(img);
+        }
+        _ = XFreeGC(self.display, self.gc);
+        _ = XDestroyWindow(self.display, self.handle);
+        _ = XFlush(self.display);
+        self.bgra.deinit(self.gpa);
+        self.queue.deinit(self.gpa);
     }
 };
 
