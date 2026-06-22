@@ -65,6 +65,8 @@ pub const dialog = @import("dialog.zig");
 /// Native menu model + context-menu popup (#129): NSMenu / HMENU.
 pub const menu = @import("menu.zig");
 pub const text = @import("text.zig");
+/// Editable-text model (#319): buffer + caret + selection behind TextInput.
+pub const text_edit = @import("text_edit.zig");
 pub const clipboard = @import("clipboard.zig");
 pub const display = @import("display.zig");
 pub const theme = @import("theme.zig");
