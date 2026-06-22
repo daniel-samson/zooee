@@ -381,7 +381,7 @@ pub fn Driver(comptime Model: type, comptime Msg: type) type {
                 app_mod.renderFocusRing(b, r.placements);
                 app_mod.renderTextSelection(b, r.placements);
                 app_mod.renderTextFields(b, r.placements);
-                app_mod.renderMenuOverlay(b);
+                app_mod.renderMenuOverlay(b, self.viewport);
             }
             try b.endFrame();
             return self.raster.pixels;

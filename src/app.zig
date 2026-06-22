@@ -221,7 +221,7 @@ pub fn run(
         renderFocusRing(b, result.placements); // focus ring (#310)
         renderTextSelection(b, result.placements); // text selection (#318)
         renderTextFields(b, result.placements); // text fields (#319)
-        renderMenuOverlay(b); // menu overlay (#319)
+        renderMenuOverlay(b, .{ .width = 60, .height = 14 }); // menu overlay (#319)
         try b.endFrame();
         result.deinit(frame_arena.allocator());
         const text = try term.renderToText(gpa);
@@ -258,7 +258,7 @@ pub fn run(
             renderFocusRing(b, result.placements); // focus ring (#310)
             renderTextSelection(b, result.placements); // text selection (#318)
             renderTextFields(b, result.placements); // text fields (#319)
-            renderMenuOverlay(b); // menu overlay (#319)
+            renderMenuOverlay(b, viewport); // menu overlay (#319)
             try b.endFrame();
             try term.present(out);
             try out.flush();
@@ -381,7 +381,7 @@ pub fn runWindow(
             renderFocusRing(self.backend, result.placements); // focus ring (#310)
             renderTextSelection(self.backend, result.placements); // text selection (#318)
             renderTextFields(self.backend, result.placements); // text fields (#319)
-            renderMenuOverlay(self.backend); // menu overlay (#319)
+            renderMenuOverlay(self.backend, viewport); // menu overlay (#319)
             self.backend.endFrame() catch return;
             platform.blit(self.win, self.raster.pixels, self.raster.width, self.raster.height);
         }
@@ -491,7 +491,7 @@ fn runWindowGl(
             renderFocusRing(self.backend, result.placements); // focus ring (#310)
             renderTextSelection(self.backend, result.placements); // text selection (#318)
             renderTextFields(self.backend, result.placements); // text fields (#319)
-            renderMenuOverlay(self.backend); // menu overlay (#319)
+            renderMenuOverlay(self.backend, viewport); // menu overlay (#319)
             self.backend.endFrame() catch return;
             self.win.glSwap();
         }
@@ -544,7 +544,7 @@ fn runWindowGl(
                 renderFocusRing(b, result.placements); // focus ring (#310)
                 renderTextSelection(b, result.placements); // text selection (#318)
                 renderTextFields(b, result.placements); // text fields (#319)
-                renderMenuOverlay(b); // menu overlay (#319)
+                renderMenuOverlay(b, viewport); // menu overlay (#319)
                 try b.endFrame();
                 const pixels = try glb.readPixels();
                 defer gpa.free(pixels);
@@ -657,7 +657,7 @@ fn runWindowMetal(
             renderFocusRing(self.backend, result.placements); // focus ring (#310)
             renderTextSelection(self.backend, result.placements); // text selection (#318)
             renderTextFields(self.backend, result.placements); // text fields (#319)
-            renderMenuOverlay(self.backend); // menu overlay (#319)
+            renderMenuOverlay(self.backend, viewport); // menu overlay (#319)
             const t_walk = lap(prof, self.io, &t);
             self.backend.endFrame() catch return;
             const t_end = lap(prof, self.io, &t);
@@ -717,7 +717,7 @@ fn runWindowMetal(
                 renderFocusRing(b, result.placements); // focus ring (#310)
                 renderTextSelection(b, result.placements); // text selection (#318)
                 renderTextFields(b, result.placements); // text fields (#319)
-                renderMenuOverlay(b); // menu overlay (#319)
+                renderMenuOverlay(b, viewport); // menu overlay (#319)
                 try b.endFrame();
                 const pixels = try mb.readPixels();
                 defer gpa.free(pixels);
@@ -799,7 +799,7 @@ fn runWindowD3d(
             renderFocusRing(self.backend, result.placements); // focus ring (#310)
             renderTextSelection(self.backend, result.placements); // text selection (#318)
             renderTextFields(self.backend, result.placements); // text fields (#319)
-            renderMenuOverlay(self.backend); // menu overlay (#319)
+            renderMenuOverlay(self.backend, viewport); // menu overlay (#319)
             self.backend.endFrame() catch return;
             self.db.presentTo(self.swapchain);
         }
@@ -851,7 +851,7 @@ fn runWindowD3d(
                 renderFocusRing(b, result.placements); // focus ring (#310)
                 renderTextSelection(b, result.placements); // text selection (#318)
                 renderTextFields(b, result.placements); // text fields (#319)
-                renderMenuOverlay(b); // menu overlay (#319)
+                renderMenuOverlay(b, viewport); // menu overlay (#319)
                 try b.endFrame();
                 const pixels = try db.readPixels();
                 defer gpa.free(pixels);
@@ -965,7 +965,7 @@ pub fn renderOffscreen(
     renderFocusRing(b, result.placements); // focus ring (#310)
     renderTextSelection(b, result.placements); // text selection (#318)
     renderTextFields(b, result.placements); // text fields (#319)
-    renderMenuOverlay(b); // menu overlay (#319)
+    renderMenuOverlay(b, viewport); // menu overlay (#319)
     try b.endFrame();
     return result;
 }
@@ -1072,7 +1072,7 @@ fn menuItemAt(m: OpenMenu, p: geometry.Point) ?usize {
 /// Draw the open overlay menu (#319): a themed panel with hover highlight,
 /// separators, disabled dimming, and right-aligned accelerators. Records the
 /// panel rect for hit-testing. Called last in the render pass so it's on top.
-pub fn renderMenuOverlay(b: backend_mod.Backend) void {
+pub fn renderMenuOverlay(b: backend_mod.Backend, viewport: geometry.Size) void {
     const m = &(g_open_menu orelse return);
     const sc = g_scale;
     const th = g_menu_theme;
@@ -1089,6 +1089,10 @@ pub fn renderMenuOverlay(b: backend_mod.Backend) void {
         if (it.accelerator.len > 0) tw += b.measureText(it.accelerator, .{ .size = (menu_font - 2) * sc }).width + 24 * sc;
         w = @max(w, tw);
     }
+    // Clamp the panel into the viewport so it doesn't spill off-screen near an
+    // edge (#319). Mutating m.x/m.y keeps hit-testing (menuItemAt) in sync.
+    if (m.x + w > viewport.width) m.x = @max(0, viewport.width - w);
+    if (m.y + total > viewport.height) m.y = @max(0, viewport.height - total);
     const x = m.x;
     const y = m.y;
     m.panel = .{ .x = x, .y = y, .width = w, .height = total };
