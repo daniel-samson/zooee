@@ -52,6 +52,23 @@ pub const Widget = union(enum) {
     composite: Composite,
 };
 
+/// The shared box-model surface (#330). Every host widget that paints a box
+/// carries these knobs so styling is uniform across the library — the way every
+/// CSS element has margin/border/padding/background. Widgets either embed this
+/// directly or declare the same fields flat (when they need per-widget defaults)
+/// and feed them through `borderFrom` + `scaleInsets` at lowering time.
+///
+/// All values are authored in logical units and DPI-scaled when lowered. A null
+/// `border_color` with a non-zero `border_width` falls back to the theme border.
+pub const BoxStyle = struct {
+    padding: layout.EdgeInsets = .{},
+    margin: layout.EdgeInsets = .{},
+    background: ?Color = null,
+    corner_radius: f32 = 0,
+    border_width: f32 = 0,
+    border_color: ?Color = null,
+};
+
 /// Layout container (host). Maps to a flex `Element`.
 pub const Box = struct {
     direction: layout.Direction = .column,
@@ -687,10 +704,7 @@ pub const Ui = struct {
                             one[0] = label_el;
                             kids = one;
                         }
-                        const border: style.Border = if (r.border_width > 0)
-                            .all(r.border_width * s, r.border_color orelse self.theme.border)
-                        else
-                            .none;
+                        const border = borderFrom(r.border_width, r.border_color, self.theme, s);
                         row_el.* = .{
                             .direction = .row,
                             .align_items = .center,
@@ -805,6 +819,12 @@ pub const Ui = struct {
 
 fn scaleInsets(e: layout.EdgeInsets, s: f32) layout.EdgeInsets {
     return .{ .top = e.top * s, .right = e.right * s, .bottom = e.bottom * s, .left = e.left * s };
+}
+
+/// Shared box-model border lowering (#330): a uniform DPI-scaled border, or
+/// `.none` when `width <= 0`. A null `color` falls back to the theme border.
+fn borderFrom(width: f32, color: ?Color, theme: Theme, s: f32) style.Border {
+    return if (width > 0) .all(width * s, color orelse theme.border) else .none;
 }
 
 // Role → concrete colors, resolved from the active theme (#21).
