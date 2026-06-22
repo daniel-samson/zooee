@@ -23,6 +23,7 @@ const pages = [_]Page{
     .{ .name = "Scroll", .icon = .scroll_text, .body = "A scroll viewport: a fixed-size box that clips its content and pans it on wheel/trackpad. Offsets are clamped to the content extent. Scroll inside the box below." },
     .{ .name = "Card", .icon = .credit_card, .body = "Surfaces / panels: a background, rounded corners, an optional border, and an elevation shadow. The building block for content blocks." },
     .{ .name = "Selection", .icon = .square_check, .body = "Checkbox, toggle/switch, and radio group — boolean and single-choice selection. Click any control to change it. Checked state is prop-driven; clicks dispatch on_change." },
+    .{ .name = "Input", .icon = .type, .body = "Editable text fields (#319). Click to focus, then type. Arrow keys move the caret (Shift to select), Home/End jump, Backspace/Delete edit. The framework owns the buffer per field id; read it with app.textInputValue(id)." },
 };
 
 /// Message ids for the Selection page's interactive controls.
@@ -180,6 +181,20 @@ fn lucideExtras(u: *ui.Ui) !Widget {
         u.iconData(.{ .data = zooee.lucide.rocket, .size = 24, .role = .secondary }),
         u.iconData(.{ .data = zooee.lucide.globe, .size = 24, .role = .secondary }),
     }));
+}
+
+/// Live examples for the Input page (#319): editable text fields + live value.
+fn inputExamples(u: *ui.Ui) !Widget {
+    return u.column(.{ .gap = 18 }, &.{
+        try example(u, "click to focus, then type (arrows / shift-select / home-end / delete work)", try u.column(.{ .gap = 10 }, &.{
+            u.textInput(.{ .id = 6001, .value = "edit me", .width = 280 }),
+            u.textInput(.{ .id = 6002, .placeholder = "placeholder…", .width = 280 }),
+        })),
+        try example(u, "live value (read via app.textInputValue)", try u.row(.{ .gap = 8, .align_items = .center }, &.{
+            u.text("first field:", .{ .role = .secondary }),
+            u.text(zooee.app.textInputValue(6001), .{}),
+        })),
+    });
 }
 
 /// Live examples for the Button page (#271): role variants, sizes, disabled.
@@ -359,6 +374,8 @@ const Docs = struct {
             try blocks.append(u.arena, try cardExamples(u));
         } else if (std.mem.eql(u8, page.name, "Selection")) {
             try blocks.append(u.arena, try selectionExamples(u, self.sel_check, self.sel_toggle, self.sel_radio));
+        } else if (std.mem.eql(u8, page.name, "Input")) {
+            try blocks.append(u.arena, try inputExamples(u));
         }
         const detail = try u.column(.{
             .grow = 1,

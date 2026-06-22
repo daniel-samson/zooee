@@ -135,6 +135,15 @@ pub const Element = struct {
     /// Read-only text selection (#318): drag to select, ⌘C/Ctrl+C to copy.
     /// Only meaningful on a text leaf.
     text_selectable: bool = false,
+    /// Editable text field id (#319): non-null marks this box as a TextInput.
+    /// The framework keeps the buffer/caret/selection for this id and draws the
+    /// text, caret, and selection over the box in a render pass (the box itself
+    /// carries no `text`). See app.zig renderTextFields / edit_state.
+    edit_field: ?u32 = null,
+    /// Message dispatched when an `edit_field`'s buffer changes (#319).
+    edit_on_change: ?u32 = null,
+    /// Placeholder text drawn (muted) when the field is empty (#319).
+    edit_placeholder: []const u8 = "",
 
     // Filled path (#120): a closed polygon in the element's LOCAL coords
     // (relative to its border-box origin), filled with `path_color` (even-odd).
@@ -663,6 +672,35 @@ pub fn drawTextSelection(b: Backend, el: *const Element, inner: Rect, sel_a: usi
         b.drawRect(rect, .{ .background = hl });
         b.drawText(.{ .x = rect.x, .y = inner.y + ln.y }, shapeForDisplay(t[a..c], &abuf, &vbuf), sel_style);
     }
+}
+
+/// A thin vertical caret rect (absolute coords) at byte `offset` in `el`'s text,
+/// `w` px wide — for the TextInput caret (#319). The caller supplies a scratch
+/// element whose `text` is the field's current buffer.
+pub fn caretRect(b: Backend, el: *const Element, inner: Rect, offset: usize, w: f32) Rect {
+    const t = el.text orelse "";
+    const line_h = b.measureText("Ag", el.text_style).height;
+    var buf: [16 * 1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    var ctx: MeasureCtx = .{ .b = b, .style = el.text_style };
+    const m: text_mod.Measurer = .{ .ctx = &ctx, .measure_fn = MeasureCtx.measure };
+    var lay = text_mod.layout(fba.allocator(), t, m, .{
+        .max_width = if (el.text_wrap != .nowrap) inner.width + wrap_slack else null,
+        .@"align" = el.text_align,
+        .line_height = line_h,
+        .wrap = el.text_wrap,
+    }) catch return .{ .x = inner.x, .y = inner.y, .width = w, .height = line_h };
+    defer lay.deinit(fba.allocator());
+    const off = @min(offset, t.len);
+    const p = text_mod.caretToPoint(lay, t, m, off);
+    var ly: f32 = 0;
+    for (lay.lines) |ln| {
+        if (off >= ln.start and off <= ln.end) {
+            ly = ln.y;
+            break;
+        }
+    }
+    return .{ .x = inner.x + p.x, .y = inner.y + ly, .width = w, .height = line_h };
 }
 
 /// The padding box: border-box minus border widths only (padding included).

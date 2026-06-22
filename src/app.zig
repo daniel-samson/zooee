@@ -16,6 +16,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const layout_mod = @import("layout.zig");
+const edit_state = @import("edit_state.zig");
 const event_mod = @import("event.zig");
 const backend_mod = @import("backend.zig");
 const terminal_mod = @import("backends/terminal.zig");
@@ -216,6 +217,7 @@ pub fn run(
         layout_mod.render(b, result);
         renderFocusRing(b, result.placements); // focus ring (#310)
         renderTextSelection(b, result.placements); // text selection (#318)
+        renderTextFields(b, result.placements); // text fields (#319)
         try b.endFrame();
         result.deinit(frame_arena.allocator());
         const text = try term.renderToText(gpa);
@@ -251,6 +253,7 @@ pub fn run(
             layout_mod.render(b, result);
             renderFocusRing(b, result.placements); // focus ring (#310)
             renderTextSelection(b, result.placements); // text selection (#318)
+            renderTextFields(b, result.placements); // text fields (#319)
             try b.endFrame();
             try term.present(out);
             try out.flush();
@@ -371,6 +374,7 @@ pub fn runWindow(
             layout_mod.render(self.backend, result);
             renderFocusRing(self.backend, result.placements); // focus ring (#310)
             renderTextSelection(self.backend, result.placements); // text selection (#318)
+            renderTextFields(self.backend, result.placements); // text fields (#319)
             self.backend.endFrame() catch return;
             platform.blit(self.win, self.raster.pixels, self.raster.width, self.raster.height);
         }
@@ -479,6 +483,7 @@ fn runWindowGl(
             layout_mod.render(self.backend, result);
             renderFocusRing(self.backend, result.placements); // focus ring (#310)
             renderTextSelection(self.backend, result.placements); // text selection (#318)
+            renderTextFields(self.backend, result.placements); // text fields (#319)
             self.backend.endFrame() catch return;
             self.win.glSwap();
         }
@@ -530,6 +535,7 @@ fn runWindowGl(
                 layout_mod.render(b, result);
                 renderFocusRing(b, result.placements); // focus ring (#310)
                 renderTextSelection(b, result.placements); // text selection (#318)
+                renderTextFields(b, result.placements); // text fields (#319)
                 try b.endFrame();
                 const pixels = try glb.readPixels();
                 defer gpa.free(pixels);
@@ -641,6 +647,7 @@ fn runWindowMetal(
             layout_mod.render(self.backend, result);
             renderFocusRing(self.backend, result.placements); // focus ring (#310)
             renderTextSelection(self.backend, result.placements); // text selection (#318)
+            renderTextFields(self.backend, result.placements); // text fields (#319)
             const t_walk = lap(prof, self.io, &t);
             self.backend.endFrame() catch return;
             const t_end = lap(prof, self.io, &t);
@@ -699,6 +706,7 @@ fn runWindowMetal(
                 layout_mod.render(b, result);
                 renderFocusRing(b, result.placements); // focus ring (#310)
                 renderTextSelection(b, result.placements); // text selection (#318)
+                renderTextFields(b, result.placements); // text fields (#319)
                 try b.endFrame();
                 const pixels = try mb.readPixels();
                 defer gpa.free(pixels);
@@ -779,6 +787,7 @@ fn runWindowD3d(
             layout_mod.render(self.backend, result);
             renderFocusRing(self.backend, result.placements); // focus ring (#310)
             renderTextSelection(self.backend, result.placements); // text selection (#318)
+            renderTextFields(self.backend, result.placements); // text fields (#319)
             self.backend.endFrame() catch return;
             self.db.presentTo(self.swapchain);
         }
@@ -829,6 +838,7 @@ fn runWindowD3d(
                 layout_mod.render(b, result);
                 renderFocusRing(b, result.placements); // focus ring (#310)
                 renderTextSelection(b, result.placements); // text selection (#318)
+                renderTextFields(b, result.placements); // text fields (#319)
                 try b.endFrame();
                 const pixels = try db.readPixels();
                 defer gpa.free(pixels);
@@ -941,6 +951,7 @@ pub fn renderOffscreen(
     layout_mod.render(b, result);
     renderFocusRing(b, result.placements); // focus ring (#310)
     renderTextSelection(b, result.placements); // text selection (#318)
+    renderTextFields(b, result.placements); // text fields (#319)
     try b.endFrame();
     return result;
 }
@@ -1036,6 +1047,59 @@ fn renderTextSelection(b: backend_mod.Backend, placements: []const layout_mod.Pl
 
 pub fn focusedIndex() ?usize {
     return g_focus;
+}
+
+/// Current text of the TextInput field with this id (#319). Apps read it in
+/// response to the field's `on_change` message.
+pub fn textInputValue(id: u32) []const u8 {
+    return edit_state.value(id);
+}
+
+/// The focused placement if it is an editable text field (#319), else null.
+fn focusedEditPlacement(placements: []const layout_mod.Placement) ?layout_mod.Placement {
+    const pl = focusedPlacement(placements) orelse return null;
+    return if (pl.element.edit_field != null) pl else null;
+}
+
+/// Apply an editing key (caret nav / delete) to the focused field, dispatching
+/// `edit_on_change` when the buffer actually changed. Returns null for keys the
+/// field doesn't consume (so they fall through to focus nav / the app). #319.
+fn editKey(comptime Model: type, comptime Msg: type, model: *Model, el: *const layout_mod.Element, k: event_mod.KeyEvent) ?Command {
+    const id = el.edit_field orelse return null;
+    const te = edit_state.get(id) orelse return null;
+    const shift = k.mods.shift;
+    const before = te.text().len;
+    switch (k.key) {
+        .left => te.moveLeft(shift),
+        .right => te.moveRight(shift),
+        .home => te.moveHome(shift),
+        .end => te.moveEnd(shift),
+        .backspace => te.backspace(edit_state.allocator()),
+        .delete => te.deleteForward(edit_state.allocator()),
+        else => return null,
+    }
+    if (te.text().len != before) {
+        if (el.edit_on_change) |m| _ = model.update(@as(Msg, @enumFromInt(m)));
+    }
+    return .redraw;
+}
+
+/// Draw the caret + selection on the focused TextInput (#319). The field's text
+/// itself is drawn by the normal layout pass (the box carries the live buffer);
+/// this overlays the selection highlight and a blink-less caret. Loops call it
+/// alongside renderTextSelection.
+pub fn renderTextFields(b: backend_mod.Backend, placements: []const layout_mod.Placement) void {
+    const fp = focusedPlacement(placements) orelse return;
+    const el = fp.element;
+    const id = el.edit_field orelse return;
+    const te = edit_state.get(id) orelse return;
+    const inner = layout_mod.contentBoxOf(el, fp.rect);
+    if (te.selection()) |sel| {
+        layout_mod.drawTextSelection(b, el, inner, sel.lo, sel.hi, selection_color, selection_text_color);
+    }
+    const w = @max(1.5, el.text_style.size * 0.08);
+    const cr = layout_mod.caretRect(b, el, inner, te.caret, w);
+    b.drawRect(cr, .{ .background = focus_ring_color });
 }
 /// Whether the focus ring should currently show (`:focus-visible`): true after
 /// keyboard focus, false after a mouse click. Backends gate ring drawing on it.
@@ -1406,6 +1470,11 @@ fn dispatch(
                 g_focus_visible = true; // keyboard focus → show the ring
                 break :blk .redraw;
             }
+            // Text-field editing (#319): caret nav (arrows/home/end, +Shift to
+            // select) and Backspace/Delete on the focused field take priority.
+            if (focusedEditPlacement(placements)) |pl| {
+                if (editKey(Model, Msg, model, pl.element, k)) |cmd| break :blk cmd;
+            }
             // Arrow keys move within the focused roving group (#310/#16: list /
             // radio group / segmented control). Standalone controls don't capture
             // arrows — they pass to the app — matching the web.
@@ -1440,6 +1509,21 @@ fn dispatch(
             if ((t.mods.super or t.mods.ctrl) and (t.codepoint == 'c' or t.codepoint == 'C') and g_textsel != null) {
                 g_copy_request = true;
                 break :blk .redraw;
+            }
+            // Typing into a focused text field (#319): printable input (no
+            // ctrl/super/alt — those are shortcuts) inserts at the caret.
+            if (focusedEditPlacement(placements)) |pl| {
+                if (!t.mods.ctrl and !t.mods.super and !t.mods.alt and t.codepoint >= 0x20 and t.codepoint != 0x7f) {
+                    if (pl.element.edit_field) |id| if (edit_state.get(id)) |te| {
+                        var ub: [4]u8 = undefined;
+                        const n = std.unicode.utf8Encode(@intCast(t.codepoint), &ub) catch 0;
+                        if (n > 0) {
+                            te.insert(edit_state.allocator(), ub[0..n]) catch {};
+                            if (pl.element.edit_on_change) |m| _ = model.update(@as(Msg, @enumFromInt(m)));
+                            break :blk .redraw;
+                        }
+                    };
+                }
             }
             if (t.codepoint == ' ' and !t.mods.ctrl and !t.mods.alt and !t.mods.super) {
                 if (activateFocused(Model, Msg, model, placements)) |cmd| break :blk cmd;

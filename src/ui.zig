@@ -20,6 +20,7 @@ const style = @import("style.zig");
 const geometry = @import("geometry.zig");
 const theme_mod = @import("theme.zig");
 const gen_icons = @import("generated_icons.zig");
+const edit_state = @import("edit_state.zig");
 
 const Element = layout.Element;
 const Color = style.Color;
@@ -40,6 +41,7 @@ pub const Role = enum { normal, primary, secondary, danger };
 pub const Widget = union(enum) {
     box: Box,
     text: Text,
+    text_input: TextInput,
     button: Button,
     icon: Icon,
     icon_data: IconRaw,
@@ -111,6 +113,23 @@ pub const Text = struct {
     /// Allow the user to drag-select this text and copy it (#318). Off by
     /// default — opt in on body copy / paragraphs the user may want to lift.
     selectable: bool = false,
+};
+
+/// Editable single-line text field (#319). Browser-like: the framework owns the
+/// live buffer/caret/selection (keyed by `id`), routes typing + Cut/Copy/Paste/
+/// Select-All into it, and draws the text/caret/selection. The app seeds the
+/// initial text with `value` (used the first time `id` is seen) and reads the
+/// current contents with `zooee.app.textInputValue(id)`; `on_change` is
+/// dispatched whenever the buffer changes.
+pub const TextInput = struct {
+    /// Stable field id — the edit state is keyed by this across frames.
+    id: u32,
+    /// Seed text, applied only the first time this `id` appears.
+    value: []const u8 = "",
+    placeholder: []const u8 = "",
+    on_change: ?u32 = null,
+    width: ?f32 = 200,
+    disabled: bool = false,
 };
 
 fn variantSize(v: TextVariant) f32 {
@@ -437,6 +456,14 @@ pub const Ui = struct {
         return .{ .icon_data = opts };
     }
 
+    /// Editable text field (#319). Seeds the framework edit state for `opts.id`
+    /// with `opts.value` on first use; thereafter the field owns its buffer.
+    pub fn textInput(self: *Ui, opts: TextInput) Widget {
+        _ = self;
+        edit_state.ensure(opts.id, opts.value);
+        return .{ .text_input = opts };
+    }
+
     /// Selectable list. `rows` is copied into the arena (same dangling-slice
     /// reason as the container builders).
     pub fn list(self: *Ui, opts: List, rows: []const ListRow) !Widget {
@@ -561,6 +588,37 @@ pub const Ui = struct {
                     .bold = t.bold orelse variantBold(t.variant),
                     .color = roleTextColor(self.theme, t.role),
                 },
+            },
+            .text_input => |ti| {
+                // A focusable bordered box whose text IS the live edit buffer, so
+                // normal layout draws it; the framework overlays the caret +
+                // selection on the focused field in a render pass (#319).
+                const fsize = 15 * s;
+                const padx = 8 * s;
+                const pady = 6 * s;
+                const buf = edit_state.value(ti.id);
+                const show_ph = buf.len == 0;
+                el.* = .{
+                    .edit_field = ti.id,
+                    .edit_on_change = ti.on_change,
+                    .edit_placeholder = ti.placeholder,
+                    .text = if (show_ph) ti.placeholder else buf,
+                    .text_wrap = .nowrap, // single-line
+                    .focusable = !ti.disabled,
+                    .cursor = if (ti.disabled) null else .text,
+                    .width = if (ti.width) |iw| iw * s else null,
+                    .height = fsize * 1.35 + 2 * pady,
+                    .padding = .symmetric(padx, pady),
+                    .text_style = .{
+                        .size = fsize,
+                        .color = if (ti.disabled) self.theme.text_muted else if (show_ph) self.theme.text_muted else self.theme.text,
+                    },
+                    .rect_style = .{
+                        .background = self.theme.surface,
+                        .border = .all(1 * s, self.theme.border),
+                        .corner_radius = .all(6 * s),
+                    },
+                };
             },
             .button => |bt| {
                 const pad = buttonPad(bt.size);
