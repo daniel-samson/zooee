@@ -1053,10 +1053,12 @@ var g_menu_shadow: bool = true;
 /// floating panel like a native context menu. The colors stay theme-driven
 /// (accent hover etc.); only this soft shadow + the corner radius are new.
 fn menuShadow() style_mod.BoxShadow {
+    // Subtle, like a native menu: small offset + tight blur. Keep the blur's
+    // ~3σ extent (≈1.5·blur) inside menu_shadow_pad so it isn't clipped square.
     return if (g_menu_dark)
-        .{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 150 }, .dy = 8, .blur = 28, .corner_radius = menu_radius }
+        .{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 110 }, .dy = 3, .blur = 11, .corner_radius = menu_radius }
     else
-        .{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 70 }, .dy = 6, .blur = 24, .corner_radius = menu_radius };
+        .{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 48 }, .dy = 3, .blur = 10, .corner_radius = menu_radius };
 }
 
 /// Panel corner radius (logical px), bumped to match a native menu (#341).
@@ -1065,7 +1067,7 @@ const menu_radius: f32 = 8;
 /// Logical-px margin reserved around the panel inside the popup window for the
 /// drop shadow to fade out (#341); only used when the ARGB transparent surface
 /// is available.
-const menu_shadow_pad: f32 = 18;
+const menu_shadow_pad: f32 = 20;
 /// An open overlay menu. `items` is borrowed (a stable static / model buffer)
 /// and must outlive the open menu; `target` is the field an Edit command acts
 /// on; `panel` is filled by the render pass for hit-testing in dispatch.
@@ -2336,10 +2338,13 @@ fn runPopupMenu(
     const h: u32 = @intFromFloat(@ceil(size.height) + 2 * pad);
     var surf = window.popupSurface(@as(i32, @intFromFloat(x - pad)), @as(i32, @intFromFloat(y - pad)), w, h) orelse return .grab_failed;
     defer surf.destroy();
-    // On an ARGB surface (compositor present) clear to fully transparent so the
-    // menu's rounded corners + shadow show the desktop; otherwise the corners
-    // blend into the opaque surface fill (#333 transparency).
-    raster.clear_color = if (surf.alpha) .{ .r = 0, .g = 0, .b = 0, .a = 0 } else g_menu_theme.surface;
+    // On an ARGB surface (compositor present) clear to the surface color at
+    // alpha 0 — NOT transparent black. The rounded panel is anti-aliased against
+    // this clear; blending toward black would leave a dark fringe (jagged
+    // corners). Matching the panel RGB keeps the edge clean while staying fully
+    // transparent (#341).
+    const sfc = g_menu_theme.surface;
+    raster.clear_color = if (surf.alpha) .{ .r = sfc.r, .g = sfc.g, .b = sfc.b, .a = 0 } else sfc;
     g_menu_shadow = surf.alpha; // shadow only on the transparent surface
     defer g_menu_shadow = true; // restore the in-window-overlay default
 
