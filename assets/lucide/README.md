@@ -5,13 +5,15 @@ The complete [Lucide](https://lucide.dev) set (v1.21.0) is baked into
 raw SVGs are *not* vendored (1.7k files); `LICENSE` here covers the baked data
 (Lucide ISC + Feather MIT).
 
-The app consumes icons two ways:
+The app consumes icons two ways (#346 — `src/lucide.zig` is the single source):
 
-- **Curated, shipped set** — the SVGs in the top-level `icons/` directory get
-  flattened into `src/generated_icons.zig` and are always available via
-  `Ui.icon`. Keep this set small (size-budget note in `tools/svg2icons.zig`).
+- **Curated set** — `ui.IconName` in `src/ui.zig` maps a small enum to
+  `lucide.<name>` consts via `curatedIcon`, available through `Ui.icon`. Zig's
+  lazy decls mean only those icons compile into size-budgeted builds. To add
+  one: add an enum case + switch arm.
 - **Full set** — `src/lucide.zig`, one `pub const` per icon, so an app that
-  names a few (`lucide.house`) compiles in only those. See `src/root.zig`.
+  names a few (`lucide.house`) compiles in only those, via `Ui.iconData`.
+  See `src/root.zig`.
 
 ## Regenerate `src/lucide.zig` (e.g. to bump the version)
 
@@ -23,12 +25,9 @@ zig build gen-lucide         # rebake src/lucide.zig
 To bump the version, edit `version` in `tools/fetch-lucide.sh`, refresh this
 `LICENSE`, then run the two commands above.
 
-## Add an icon to the curated, shipped set
+## Add an icon to the curated set
 
-```sh
-tools/add-icon.sh chevron-down star    # auto-fetches the pool if needed
-zig build gen-icons                     # regenerate src/generated_icons.zig
-```
-
-Then reference it by its sanitized name (`chevron-down` → `.chevron_down`)
-through `Ui.icon`.
+Add its sanitized name (`chevron-down` → `chevron_down`) as an `IconName` enum
+case + `curatedIcon` switch arm in `src/ui.zig`, pointing at the existing
+`lucide.chevron_down` const. No fetch or regeneration needed — the full set is
+already baked.

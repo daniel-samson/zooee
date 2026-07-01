@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Download the vendored Lucide SVG pool into assets/lucide/icons/ (gitignored).
 # The pool isn't committed — src/lucide.zig is the baked artifact — so fetch it
-# here whenever you need to regenerate (`zig build gen-lucide`) or promote a new
-# curated icon (`tools/add-icon.sh`). Pin matches the baked set.
+# here whenever you need to regenerate (`zig build gen-lucide`). Pin matches
+# the baked set.
 #
 #   tools/fetch-lucide.sh        # fetch the pinned version
 #   zig build gen-lucide         # rebake src/lucide.zig from it

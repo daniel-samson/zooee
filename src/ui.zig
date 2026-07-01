@@ -19,7 +19,7 @@ const layout = @import("layout.zig");
 const style = @import("style.zig");
 const geometry = @import("geometry.zig");
 const theme_mod = @import("theme.zig");
-const gen_icons = @import("generated_icons.zig");
+const lucide = @import("lucide.zig");
 const edit_state = @import("edit_state.zig");
 
 const Element = layout.Element;
@@ -246,9 +246,55 @@ fn buttonTextSize(sz: ButtonSize) f32 {
 
 /// Vector icon (host, #272). Lowers to an Element carrying the baked subpaths
 /// for `name` (stroked or filled), scaled to a `size`×`size` box and tinted by
-/// `role`/`disabled`. The set is generated at build time from real SVGs in
-/// icons/ (Lucide) — see tools/svg2icons.zig and src/generated_icons.zig.
-pub const IconName = gen_icons.Name;
+/// `role`/`disabled`. Names resolve to `src/lucide.zig` consts (#346), so only
+/// the curated set below compiles into size-budgeted builds (lazy decls). To
+/// grow the set: add an enum case + arm in `curatedIcon`. For anything else,
+/// use `Ui.iconData` with `lucide.<name>` directly.
+pub const IconName = enum {
+    check,
+    chevron_left,
+    chevron_right,
+    credit_card,
+    house,
+    layout_dashboard,
+    list,
+    moon,
+    play,
+    plus,
+    scroll_text,
+    shapes,
+    sparkles,
+    square_check,
+    square_mouse_pointer,
+    star,
+    sun,
+    type,
+};
+
+/// The curated name → baked Lucide geometry. A switch over per-icon consts —
+/// referencing them here (not `lucide.get`) keeps the full set lazily unused.
+fn curatedIcon(name: IconName) geometry.IconData {
+    return switch (name) {
+        .check => lucide.check,
+        .chevron_left => lucide.chevron_left,
+        .chevron_right => lucide.chevron_right,
+        .credit_card => lucide.credit_card,
+        .house => lucide.house,
+        .layout_dashboard => lucide.layout_dashboard,
+        .list => lucide.list,
+        .moon => lucide.moon,
+        .play => lucide.play,
+        .plus => lucide.plus,
+        .scroll_text => lucide.scroll_text,
+        .shapes => lucide.shapes,
+        .sparkles => lucide.sparkles,
+        .square_check => lucide.square_check,
+        .square_mouse_pointer => lucide.square_mouse_pointer,
+        .star => lucide.star,
+        .sun => lucide.sun,
+        .type => lucide.type,
+    };
+}
 
 pub const Icon = struct {
     name: IconName,
@@ -750,7 +796,7 @@ pub const Ui = struct {
                 };
             },
             .icon => |ic| {
-                try self.lowerIcon(el, s, gen_icons.get(ic.name), ic.size, ic.role, ic.disabled);
+                try self.lowerIcon(el, s, curatedIcon(ic.name), ic.size, ic.role, ic.disabled);
                 el.margin = scaleInsets(ic.margin, s);
             },
             .icon_data => |ic| {
@@ -1129,7 +1175,7 @@ test "generated icon: a relative-moveto subpath after another element is positio
     // square-check = <rect rx=2> then <path d="m9 12 2 2 4-4">. The check's
     // leading relative moveto must start from the origin, NOT where the rect
     // ended — guards the svg2icons per-element current-point reset.
-    const d = gen_icons.get(.square_check);
+    const d = curatedIcon(.square_check);
     try testing.expectEqual(@as(usize, 2), d.subpaths.len);
     const check = d.subpaths[1]; // the checkmark, not the rect
     try testing.expectEqual(@as(usize, 3), check.pts.len);
