@@ -157,7 +157,7 @@ pub const Element = struct {
     // Multi-subpath vector icon (#272): each subpath is a polyline in LOCAL
     // coords (already scaled to the icon box). Stroked with round caps/joins
     // (`stroke_width`) when `icon_stroke`, else filled — both tinted with
-    // `path_color`. Built from baked SVG data (src/generated_icons.zig).
+    // `path_color`. Built from baked SVG data (src/lucide.zig).
     icon_paths: ?[]const IconSubPath = null,
     icon_stroke: bool = false,
 

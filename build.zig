@@ -62,35 +62,21 @@ pub fn build(b: *std.Build) void {
     rm.has_side_effects = true; // always run; never cached
     clean_step.dependOn(&rm.step);
 
-    // --- gen-icons: SVG → baked icon data (build-time, #272) ---------------
-    // Regenerates src/generated_icons.zig from the SVGs in icons/. The output
-    // is committed so normal builds don't need this step; rerun when icons
-    // change. Runs the parser+flattener at build time so the runtime ships only
-    // point tables, never an SVG parser (keeps the binary small).
+    // --- gen-lucide: SVG → baked icon data (build-time, #272/#346) ---------
+    // Regenerates src/lucide.zig (the committed artifact — every icon a lazy
+    // `pub const`, so apps compile in only what they name) from the SVG pool in
+    // assets/lucide/icons/, which is gitignored and fetched on demand
+    // (tools/fetch-lucide.sh) — so this step only runs after a fetch. The
+    // parser+flattener runs at build time; the runtime ships only point tables,
+    // never an SVG parser. The output is normalized through `zig fmt` so the
+    // committed file matches CI's fmt --check.
     const svg2icons = addExe(b, target, optimize, null, "svg2icons", "tools/svg2icons.zig");
-    const gen_icons = b.addRunArtifact(svg2icons);
-    gen_icons.addArgs(&.{ "icons", "src/generated_icons.zig" });
-    gen_icons.has_side_effects = true; // writes into the source tree
-    // Normalize the emitted file through `zig fmt` so the committed output is
-    // formatting-clean (the emitter keeps `@"name"` quoting + tight braces; fmt
-    // unquotes valid identifiers and adds spacing, matching CI's fmt --check).
-    const fmt_icons = b.addSystemCommand(&.{ b.graph.zig_exe, "fmt", "src/generated_icons.zig" });
-    fmt_icons.step.dependOn(&gen_icons.step);
-    const gen_icons_step = b.step("gen-icons", "Regenerate src/generated_icons.zig from icons/*.svg");
-    gen_icons_step.dependOn(&fmt_icons.step);
-
-    // The full Lucide set (src/lucide.zig) is the committed artifact; it's baked
-    // from the SVG pool in assets/lucide/icons/, which is gitignored and fetched
-    // on demand (tools/fetch-lucide.sh) — so this step only runs after a fetch.
-    // Only the docs demo references src/lucide.zig, so Zig's lazy compilation
-    // keeps its ~1.7k point tables out of the size-budgeted builds.
     const gen_lucide = b.addRunArtifact(svg2icons);
     gen_lucide.addArgs(&.{ "assets/lucide/icons", "src/lucide.zig" });
-    gen_lucide.has_side_effects = true;
+    gen_lucide.has_side_effects = true; // writes into the source tree
     const fmt_lucide = b.addSystemCommand(&.{ b.graph.zig_exe, "fmt", "src/lucide.zig" });
     fmt_lucide.step.dependOn(&gen_lucide.step);
-    b.step("gen-lucide", "Regenerate src/lucide.zig from the full Lucide pool").dependOn(&fmt_lucide.step);
-    gen_icons_step.dependOn(&fmt_lucide.step);
+    b.step("gen-lucide", "Regenerate src/lucide.zig from the Lucide pool (fetch first)").dependOn(&fmt_lucide.step);
 
     // --- test --------------------------------------------------------------
     const test_step = b.step("test", "Run unit tests");
